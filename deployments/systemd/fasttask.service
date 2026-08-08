@@ -1,0 +1,20 @@
+[Unit]
+Description=FastTask service
+After=network-online.target
+
+[Service]
+Type=simple
+User=fasttask
+Group=fasttask
+EnvironmentFile=/etc/fasttask/fasttask.env
+ExecStart=/usr/local/bin/fasttask serve --with-worker --with-scheduler
+Restart=on-failure
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fasttask /var/backups/fasttask
+
+[Install]
+WantedBy=multi-user.target
