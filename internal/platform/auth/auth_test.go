@@ -91,6 +91,28 @@ func TestRefreshRotationLogoutAndPanelClaims(t *testing.T) {
 	if _, err := service.AuthenticatePanel(wrongScope); err == nil {
 		t.Fatal("wrong service scope accepted")
 	}
+	importToken, err := service.IssueServiceToken(user.ID, []string{"imports:write", "imports:read"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	importPrincipal, err := service.AuthenticateServicePrincipal(importToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !HasScopes(importPrincipal, "imports:write", "imports:read") || HasScopes(importPrincipal, "agent-jobs:write") {
+		t.Fatalf("unexpected import scopes: %#v", importPrincipal.Scopes)
+	}
+	clientToken, err := service.IssueServiceTokenForClient(user.ID, "fastread", []string{"imports:write"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPrincipal, err := service.AuthenticateServicePrincipal(clientToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientPrincipal.ClientID != "fastread" {
+		t.Fatalf("client id=%q", clientPrincipal.ClientID)
+	}
 }
 
 func TestLoginBackoffAfterRepeatedFailures(t *testing.T) {

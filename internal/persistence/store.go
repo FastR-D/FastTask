@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,27 +56,55 @@ func (s *Store) Migrate(ctx context.Context) error {
 }
 
 func RunMigrations(ctx context.Context, db *gorm.DB) error {
+	currentVersion := 0
 	var count int64
 	err := db.WithContext(ctx).Raw("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'").Scan(&count).Error
 	if err != nil {
 		return err
 	}
 	if count > 0 {
-		var version int
-		if err := db.WithContext(ctx).Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version).Error; err != nil {
+		if err := db.WithContext(ctx).Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&currentVersion).Error; err != nil {
 			return err
 		}
-		if version >= 1 {
-			return nil
-		}
 	}
-	contents, err := embeddedMigrations.ReadFile("migrations/000001_init.up.sql")
+	entries, err := embeddedMigrations.ReadDir("migrations")
 	if err != nil {
 		return err
 	}
-	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Exec(string(contents)).Error
-	})
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".up.sql") {
+			files = append(files, entry.Name())
+		}
+	}
+	sort.Strings(files)
+	for _, name := range files {
+		prefix, _, ok := strings.Cut(name, "_")
+		if !ok {
+			return fmt.Errorf("invalid migration filename %q", name)
+		}
+		version, err := strconv.Atoi(prefix)
+		if err != nil {
+			return fmt.Errorf("invalid migration version in %q: %w", name, err)
+		}
+		if version <= currentVersion {
+			continue
+		}
+		if version != currentVersion+1 {
+			return fmt.Errorf("migration gap: database is at %d, next migration is %d", currentVersion, version)
+		}
+		contents, err := embeddedMigrations.ReadFile("migrations/" + name)
+		if err != nil {
+			return err
+		}
+		if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			return tx.Exec(string(contents)).Error
+		}); err != nil {
+			return fmt.Errorf("apply migration %s: %w", name, err)
+		}
+		currentVersion = version
+	}
+	return nil
 }
 
 func (s *Store) Transaction(ctx context.Context, fn func(*gorm.DB) error) error {

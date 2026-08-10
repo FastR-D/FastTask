@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +42,9 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	if cfg.AudioDir == "" {
 		cfg.AudioDir = filepath.Join(filepath.Dir(cfg.DatabasePath), "audio")
 	}
+	if cfg.IntegrationTimeout == 0 {
+		cfg.IntegrationTimeout = 2 * time.Second
+	}
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	if err := engine.SetTrustedProxies(cfg.TrustedProxies); err != nil {
@@ -66,9 +71,11 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	humaConfig.OpenAPIPath, humaConfig.DocsPath, humaConfig.SchemasPath = "/openapi", "/docs", "/schemas"
 	humaConfig.Servers = []*huma.Server{{URL: strings.TrimRight(cfg.PublicURL, "/") + "/api/v1"}}
 	humaConfig.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
-		"userBearer":   {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
-		"deviceToken":  {Type: "apiKey", In: "header", Name: "X-Device-Token"},
-		"serviceToken": {Type: "apiKey", In: "header", Name: "X-Service-Token"},
+		"userBearer":            {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
+		"deviceToken":           {Type: "apiKey", In: "header", Name: "X-Device-Token"},
+		"serviceImportsWrite":   {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
+		"serviceImportsRead":    {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
+		"serviceAgentJobsWrite": {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
 	}
 	humaConfig.Components.Schemas = huma.NewMapRegistry("#/components/schemas/", schemaNamer)
 	humagin.MultipartMaxMemory = 8 << 20
@@ -81,23 +88,41 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 }
 
 func (s *Server) authenticationMiddleware(ctx huma.Context, next func(huma.Context)) {
-	needsUser := false
-	for _, requirement := range ctx.Operation().Security {
-		if _, ok := requirement["userBearer"]; ok {
-			needsUser = true
-		}
-	}
-	if !needsUser {
+	security := ctx.Operation().Security
+	if len(security) == 0 {
 		next(ctx)
 		return
 	}
-	principal, err := s.auth.Authenticate(ctx.Header("Authorization"))
-	if err != nil {
-		huma.WriteErr(s.API, ctx, http.StatusUnauthorized, "authentication required")
+	authorization := ctx.Header("Authorization")
+	validService := false
+	for _, requirement := range security {
+		if _, ok := requirement["userBearer"]; ok {
+			if authenticated, err := s.auth.Authenticate(authorization); err == nil {
+				ctx = huma.WithValue(ctx, principalContextKey{}, authenticated)
+				next(ctx)
+				return
+			}
+		}
+		for scheme, scope := range map[string]string{"serviceImportsWrite": "imports:write", "serviceImportsRead": "imports:read", "serviceAgentJobsWrite": "agent-jobs:write"} {
+			if _, ok := requirement[scheme]; !ok {
+				continue
+			}
+			authenticated, err := s.auth.AuthenticateServicePrincipal(authorization)
+			if err == nil {
+				validService = true
+				if platformauth.HasScopes(authenticated, scope) {
+					ctx = huma.WithValue(ctx, principalContextKey{}, authenticated)
+					next(ctx)
+					return
+				}
+			}
+		}
+	}
+	if validService {
+		huma.WriteErr(s.API, ctx, http.StatusForbidden, "insufficient service scope")
 		return
 	}
-	ctx = huma.WithValue(ctx, principalContextKey{}, principal)
-	next(ctx)
+	huma.WriteErr(s.API, ctx, http.StatusUnauthorized, "authentication required")
 }
 
 type principalContextKey struct{}
@@ -108,6 +133,12 @@ func principal(ctx context.Context) platformauth.Principal {
 }
 func userSecurity() []map[string][]string   { return []map[string][]string{{"userBearer": {}}} }
 func publicSecurity() []map[string][]string { return []map[string][]string{} }
+func serviceSecurity(scheme string) []map[string][]string {
+	return []map[string][]string{{scheme: {}}}
+}
+func userOrServiceSecurity(scheme string) []map[string][]string {
+	return []map[string][]string{{"userBearer": {}}, {scheme: {}}}
+}
 
 type itemResponse[T any] struct{ Body T }
 type listResponse[T any] struct {
@@ -138,15 +169,17 @@ func (s *Server) register() {
 	s.registerJobs()
 	s.registerDevices()
 	s.registerPanel()
+	s.registerImports()
+	s.registerIntegrationStatus()
 }
 
 func register[I, O any](api huma.API, id, method, path, summary string, security []map[string][]string, handler func(context.Context, *I) (*O, error)) {
-	huma.Register(api, huma.Operation{OperationID: id, Method: method, Path: path, Summary: summary, Security: security, DefaultStatus: operationStatus(id), Errors: []int{400, 401, 404, 409, 412, 422, 428, 500}}, handler)
+	huma.Register(api, huma.Operation{OperationID: id, Method: method, Path: path, Summary: summary, Security: security, DefaultStatus: operationStatus(id), Errors: []int{400, 401, 403, 404, 409, 412, 422, 428, 500}}, handler)
 }
 
 func operationStatus(id string) int {
 	switch id {
-	case "create-goal", "create-task", "create-daily-plan", "add-daily-plan-item", "create-work-session", "create-conversation", "create-device":
+	case "create-goal", "create-task", "create-daily-plan", "add-daily-plan-item", "create-work-session", "create-conversation", "create-device", "create-import":
 		return http.StatusCreated
 	case "generate-task-tree", "revise-task-tree", "generate-daily-plan", "generate-support-items", "create-conversation-message", "create-voice-transcription", "retry-agent-job":
 		return http.StatusAccepted
@@ -1083,11 +1116,8 @@ func (s *Server) registerJobs() {
 			ErrorMessage string         `json:"error_message,omitempty"`
 		}
 	}
-	register(s.API, "agent-job-callback", http.MethodPost, "/agent-jobs/{job_id}/callbacks", "External worker callback", publicSecurity(), func(ctx context.Context, input *callbackInput) (*resourceResponse[persistence.AgentJob], error) {
-		if _, err := s.auth.AuthenticateService(input.Authorization, "agent-jobs:write"); err != nil {
-			return nil, huma.Error403Forbidden("insufficient service scope")
-		}
-		job, err := s.app.AgentCallback(ctx, input.ID, input.Body.AttemptNo, input.Body.LeaseVersion, input.Body.RunToken, input.Body.Status, input.Body.Result, input.Body.ErrorCode, input.Body.ErrorMessage)
+	register(s.API, "agent-job-callback", http.MethodPost, "/agent-jobs/{job_id}/callbacks", "External worker callback", serviceSecurity("serviceAgentJobsWrite"), func(ctx context.Context, input *callbackInput) (*resourceResponse[persistence.AgentJob], error) {
+		job, err := s.app.AgentCallback(ctx, principal(ctx).UserID, input.ID, input.Body.AttemptNo, input.Body.LeaseVersion, input.Body.RunToken, input.Body.Status, input.Body.Result, input.Body.ErrorCode, input.Body.ErrorMessage)
 		if err != nil {
 			return nil, mapError(err)
 		}
@@ -1297,6 +1327,201 @@ func (s *Server) registerPanel() {
 	})
 }
 
+type externalImportSourceBody struct {
+	System      string `json:"system" enum:"fastinsight,fastnews,fastread,fastwrite"`
+	ExternalID  string `json:"external_id" minLength:"1" maxLength:"500"`
+	URL         string `json:"url,omitempty" maxLength:"4000"`
+	ContentHash string `json:"content_hash,omitempty" maxLength:"500"`
+}
+
+type externalImportBody struct {
+	ID              string                   `json:"id"`
+	SchemaVersion   string                   `json:"schema_version"`
+	TraceID         string                   `json:"trace_id,omitempty"`
+	Source          externalImportSourceBody `json:"source"`
+	Kind            string                   `json:"kind"`
+	Title           string                   `json:"title"`
+	Description     string                   `json:"description"`
+	SuggestedGoalID *string                  `json:"suggested_goal_id,omitempty"`
+	Artifacts       []map[string]any         `json:"artifacts"`
+	Metadata        map[string]any           `json:"metadata"`
+	Status          string                   `json:"status"`
+	TaskID          *string                  `json:"task_id,omitempty"`
+	DecisionNote    string                   `json:"decision_note,omitempty"`
+	Revision        int                      `json:"revision"`
+	DecidedAt       *time.Time               `json:"decided_at,omitempty"`
+	CreatedAt       time.Time                `json:"created_at"`
+	UpdatedAt       time.Time                `json:"updated_at"`
+}
+
+func externalImportResponse(item persistence.ExternalImport) externalImportBody {
+	artifacts := []map[string]any{}
+	metadata := map[string]any{}
+	_ = json.Unmarshal([]byte(item.ArtifactsJSON), &artifacts)
+	_ = json.Unmarshal([]byte(item.MetadataJSON), &metadata)
+	return externalImportBody{ID: item.ID, SchemaVersion: item.SchemaVersion, TraceID: item.TraceID, Source: externalImportSourceBody{System: item.SourceSystem, ExternalID: item.SourceExternalID, URL: item.SourceURL, ContentHash: item.ContentHash}, Kind: item.Kind, Title: item.Title, Description: item.Description, SuggestedGoalID: item.SuggestedGoalID, Artifacts: artifacts, Metadata: metadata, Status: item.Status, TaskID: item.TaskID, DecisionNote: item.DecisionNote, Revision: item.Revision, DecidedAt: item.DecidedAt, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}
+}
+
+func (s *Server) registerImports() {
+	type createInput struct {
+		IdempotencyKey string `header:"Idempotency-Key" required:"true"`
+		Body           struct {
+			SchemaVersion   string                   `json:"schema_version,omitempty"`
+			TraceID         string                   `json:"trace_id,omitempty" maxLength:"200"`
+			Source          externalImportSourceBody `json:"source"`
+			Kind            string                   `json:"kind" enum:"candidate_task,research_material,progress_evidence,review_issue,generated_report"`
+			Title           string                   `json:"title" minLength:"1" maxLength:"300"`
+			Description     string                   `json:"description,omitempty" maxLength:"8000"`
+			SuggestedGoalID *string                  `json:"suggested_goal_id,omitempty"`
+			Artifacts       []map[string]any         `json:"artifacts,omitempty" maxItems:"100"`
+			Metadata        map[string]any           `json:"metadata,omitempty"`
+		}
+	}
+	register(s.API, "create-import", http.MethodPost, "/imports", "Create external import", userOrServiceSecurity("serviceImportsWrite"), func(ctx context.Context, input *createInput) (*resourceResponse[externalImportBody], error) {
+		if input.Body.Artifacts == nil {
+			input.Body.Artifacts = []map[string]any{}
+		}
+		if input.Body.Metadata == nil {
+			input.Body.Metadata = map[string]any{}
+		}
+		artifacts, err := json.Marshal(input.Body.Artifacts)
+		if err != nil {
+			return nil, mapError(application.ErrValidation)
+		}
+		metadata, err := json.Marshal(input.Body.Metadata)
+		if err != nil {
+			return nil, mapError(application.ErrValidation)
+		}
+		item := persistence.ExternalImport{SchemaVersion: input.Body.SchemaVersion, TraceID: input.Body.TraceID, SourceSystem: input.Body.Source.System, SourceExternalID: input.Body.Source.ExternalID, SourceURL: input.Body.Source.URL, ContentHash: input.Body.Source.ContentHash, Kind: input.Body.Kind, Title: input.Body.Title, Description: input.Body.Description, SuggestedGoalID: input.Body.SuggestedGoalID, ArtifactsJSON: string(artifacts), MetadataJSON: string(metadata)}
+		if err := s.app.CreateExternalImport(ctx, principal(ctx).UserID, &item); err != nil {
+			return nil, mapError(err)
+		}
+		return &resourceResponse[externalImportBody]{ETag: application.StrongETag("import", item.ID, item.Revision), Body: externalImportResponse(item)}, nil
+	})
+
+	type listInput struct {
+		Status           string `query:"status" enum:"candidate,converted,rejected"`
+		SourceSystem     string `query:"source_system" enum:"fastinsight,fastnews,fastread,fastwrite"`
+		Kind             string `query:"kind" enum:"candidate_task,research_material,progress_evidence,review_issue,generated_report"`
+		SourceExternalID string `query:"source_external_id"`
+		Limit            int    `query:"limit" minimum:"1" maximum:"100" default:"20"`
+		Cursor           string `query:"cursor"`
+	}
+	register(s.API, "list-imports", http.MethodGet, "/imports", "List external imports", userOrServiceSecurity("serviceImportsRead"), func(ctx context.Context, input *listInput) (*listResponse[externalImportBody], error) {
+		var items []persistence.ExternalImport
+		q := s.app.Store.DB.WithContext(ctx).Where("user_id = ?", principal(ctx).UserID)
+		if input.Status != "" {
+			q = q.Where("status = ?", input.Status)
+		}
+		if input.SourceSystem != "" {
+			q = q.Where("source_system = ?", input.SourceSystem)
+		}
+		if input.Kind != "" {
+			q = q.Where("kind = ?", input.Kind)
+		}
+		if input.SourceExternalID != "" {
+			q = q.Where("source_external_id = ?", input.SourceExternalID)
+		}
+		if input.Cursor != "" {
+			var cursorTime time.Time
+			var cursorID string
+			if err := decodeImportCursor(input.Cursor, &cursorTime, &cursorID); err != nil {
+				return nil, mapError(application.ErrValidation)
+			}
+			q = q.Where("created_at < ? OR (created_at = ? AND id < ?)", cursorTime, cursorTime, cursorID)
+		}
+		if err := q.Order("created_at DESC, id DESC").Limit(input.Limit + 1).Find(&items).Error; err != nil {
+			return nil, mapError(err)
+		}
+		out := &listResponse[externalImportBody]{}
+		if len(items) > input.Limit {
+			out.Body.HasMore = true
+			items = items[:input.Limit]
+			cursor := encodeImportCursor(items[len(items)-1].CreatedAt, items[len(items)-1].ID)
+			out.Body.NextCursor = &cursor
+		}
+		out.Body.Items = make([]externalImportBody, 0, len(items))
+		for _, item := range items {
+			out.Body.Items = append(out.Body.Items, externalImportResponse(item))
+		}
+		return out, nil
+	})
+
+	type getInput struct {
+		ID string `path:"import_id"`
+	}
+	register(s.API, "get-import", http.MethodGet, "/imports/{import_id}", "Get external import", userOrServiceSecurity("serviceImportsRead"), func(ctx context.Context, input *getInput) (*resourceResponse[externalImportBody], error) {
+		var item persistence.ExternalImport
+		if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&item).Error; err != nil {
+			return nil, mapError(err)
+		}
+		return &resourceResponse[externalImportBody]{ETag: application.StrongETag("import", item.ID, item.Revision), Body: externalImportResponse(item)}, nil
+	})
+
+	type conversionInput struct {
+		ID             string `path:"import_id"`
+		IfMatch        string `header:"If-Match" required:"true"`
+		IdempotencyKey string `header:"Idempotency-Key" required:"true"`
+		Body           struct {
+			Mode            string  `json:"mode" enum:"create,attach" required:"true" doc:"Use create to create a Task or attach to link an existing Task."`
+			ExistingTaskID  *string `json:"existing_task_id,omitempty"`
+			GoalID          string  `json:"goal_id,omitempty"`
+			ParentID        *string `json:"parent_id,omitempty"`
+			Type            string  `json:"type,omitempty" enum:"milestone,task,action"`
+			Title           string  `json:"title,omitempty" maxLength:"300"`
+			Description     string  `json:"description,omitempty" maxLength:"8000"`
+			SuccessCriteria string  `json:"success_criteria,omitempty" maxLength:"2000"`
+			MinimumAction   string  `json:"minimum_action,omitempty" maxLength:"2000"`
+			Priority        int     `json:"priority,omitempty" minimum:"0" maximum:"100"`
+			EstimateMinutes int     `json:"estimate_minutes,omitempty" minimum:"0" maximum:"1440"`
+			Position        int     `json:"position,omitempty" minimum:"0"`
+			DecisionNote    string  `json:"decision_note,omitempty" maxLength:"2000"`
+		}
+	}
+	type conversionBody struct {
+		Import externalImportBody `json:"import"`
+		Task   persistence.Task   `json:"task"`
+	}
+	register(s.API, "convert-import", http.MethodPost, "/imports/{import_id}/conversion", "Convert external import to task", userSecurity(), func(ctx context.Context, input *conversionInput) (*resourceResponse[conversionBody], error) {
+		revision, err := revisionFromResourceETag(input.IfMatch, "import", input.ID)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if input.Body.Mode == "attach" && input.Body.ExistingTaskID == nil || input.Body.Mode == "create" && input.Body.ExistingTaskID != nil {
+			return nil, mapError(application.ErrValidation)
+		}
+		if input.Body.Mode == "attach" && (input.Body.GoalID != "" || input.Body.ParentID != nil || input.Body.Type != "" || input.Body.Title != "" || input.Body.Description != "" || input.Body.SuccessCriteria != "" || input.Body.MinimumAction != "" || input.Body.Priority != 0 || input.Body.EstimateMinutes != 0 || input.Body.Position != 0) {
+			return nil, mapError(application.ErrValidation)
+		}
+		command := application.ConvertExternalImportCommand{ExistingTaskID: input.Body.ExistingTaskID, GoalID: input.Body.GoalID, ParentID: input.Body.ParentID, Type: input.Body.Type, Title: input.Body.Title, Description: input.Body.Description, SuccessCriteria: input.Body.SuccessCriteria, MinimumAction: input.Body.MinimumAction, Priority: input.Body.Priority, EstimateMinutes: input.Body.EstimateMinutes, Position: input.Body.Position, DecisionNote: input.Body.DecisionNote}
+		item, task, err := s.app.ConvertExternalImport(ctx, principal(ctx).UserID, input.ID, revision, command)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &resourceResponse[conversionBody]{ETag: application.StrongETag("import", item.ID, item.Revision), Body: conversionBody{Import: externalImportResponse(*item), Task: *task}}, nil
+	})
+
+	type rejectionInput struct {
+		ID             string `path:"import_id"`
+		IfMatch        string `header:"If-Match" required:"true"`
+		IdempotencyKey string `header:"Idempotency-Key" required:"true"`
+		Body           struct {
+			Note string `json:"note,omitempty" maxLength:"2000"`
+		}
+	}
+	register(s.API, "reject-import", http.MethodPut, "/imports/{import_id}/rejection", "Reject external import", userSecurity(), func(ctx context.Context, input *rejectionInput) (*resourceResponse[externalImportBody], error) {
+		revision, err := revisionFromResourceETag(input.IfMatch, "import", input.ID)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		item, err := s.app.RejectExternalImport(ctx, principal(ctx).UserID, input.ID, revision, input.Body.Note)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &resourceResponse[externalImportBody]{ETag: application.StrongETag("import", item.ID, item.Revision), Body: externalImportResponse(*item)}, nil
+	})
+}
+
 func (s *Server) static() {
 	index := filepath.Join(s.cfg.WebDist, "index.html")
 	if _, err := os.Stat(index); err != nil {
@@ -1356,8 +1581,10 @@ func idempotencyMiddleware(store *persistence.Store, authService *platformauth.S
 		if bearer := c.GetHeader("Authorization"); bearer != "" {
 			if principal, authErr := authService.Authenticate(bearer); authErr == nil {
 				principalSeed = "user:" + principal.UserID
-			} else if service, serviceErr := authService.AuthenticateService(bearer, "agent-jobs:write"); serviceErr == nil {
-				principalSeed = "service:" + service.UserID
+			} else if service, serviceErr := authService.AuthenticateServicePrincipal(bearer); serviceErr == nil {
+				scopes := append([]string(nil), service.Scopes...)
+				sort.Strings(scopes)
+				principalSeed = "service:" + service.ClientID + ":" + service.UserID + ":" + strings.Join(scopes, ",")
 			}
 		}
 		if c.Request.URL.Path == "/api/v1/auth/refresh" {
@@ -1427,7 +1654,7 @@ func mapError(err error) error {
 		return huma.NewError(http.StatusPreconditionFailed, "resource revision does not match")
 	case errors.Is(err, application.ErrPrecondition):
 		return huma.NewError(http.StatusPreconditionRequired, "If-Match is required")
-	case errors.Is(err, application.ErrConflict), errors.Is(err, application.ErrActiveSession), errors.Is(err, domain.ErrCoreLimit), errors.Is(err, domain.ErrSupportBeforeCoreDone):
+	case errors.Is(err, application.ErrConflict), errors.Is(err, application.ErrActiveSession), errors.Is(err, application.ErrExternalImportExists), errors.Is(err, domain.ErrCoreLimit), errors.Is(err, domain.ErrSupportBeforeCoreDone):
 		return huma.Error409Conflict(err.Error())
 	case errors.Is(err, application.ErrValidation), errors.Is(err, domain.ErrCycle):
 		return huma.Error422UnprocessableEntity(err.Error())
@@ -1451,6 +1678,32 @@ func revisionFromETag(value string) (int, error) {
 		return 0, application.ErrRevision
 	}
 	return revision, nil
+}
+func revisionFromResourceETag(value, kind, id string) (int, error) {
+	revision, err := revisionFromETag(value)
+	if err != nil || value != application.StrongETag(kind, id, revision) {
+		return 0, application.ErrRevision
+	}
+	return revision, nil
+}
+func encodeImportCursor(createdAt time.Time, id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(createdAt.UTC().Format(time.RFC3339Nano) + "\n" + id))
+}
+func decodeImportCursor(value string, createdAt *time.Time, id *string) error {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return err
+	}
+	parts := strings.SplitN(string(decoded), "\n", 2)
+	if len(parts) != 2 || parts[1] == "" {
+		return errors.New("invalid cursor")
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return err
+	}
+	*createdAt, *id = parsed, parts[1]
+	return nil
 }
 func matchETag(value, kind, id string, revision int) bool {
 	return value == application.StrongETag(kind, id, revision)

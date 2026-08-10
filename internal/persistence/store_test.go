@@ -48,6 +48,68 @@ func TestMigrationsWALAndReopen(t *testing.T) {
 	if found.Identifier != "tester" {
 		t.Fatalf("unexpected user: %#v", found)
 	}
+	var version int
+	if err := reopened.DB.Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version).Error; err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("schema version=%d, want 2", version)
+	}
+}
+
+func TestMigrationUpgradeFromVersionOne(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	contents, err := embeddedMigrations.ReadFile("migrations/000001_init.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.Exec(string(contents)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := store.DB.Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version).Error; err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("schema version=%d, want 2", version)
+	}
+	if !store.DB.Migrator().HasTable(&ExternalImport{}) {
+		t.Fatal("external_imports table was not created")
+	}
+}
+
+func TestExternalImportSourceUniquenessIsUserScoped(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+	now := Now()
+	users := []User{
+		{ID: NewID("user"), Identifier: "import-a", PasswordHash: "hash", DisplayName: "A", Timezone: "Asia/Shanghai", Locale: "zh-CN", Role: "member", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now},
+		{ID: NewID("user"), Identifier: "import-b", PasswordHash: "hash", DisplayName: "B", Timezone: "Asia/Shanghai", Locale: "zh-CN", Role: "member", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now},
+	}
+	if err := store.DB.Create(&users).Error; err != nil {
+		t.Fatal(err)
+	}
+	first := ExternalImport{ID: NewID("import"), UserID: users[0].ID, SchemaVersion: "1.0", SourceSystem: "fastread", SourceExternalID: "paper-1", Kind: "research_material", Title: "Paper", ArtifactsJSON: "[]", MetadataJSON: "{}", Status: "candidate", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := store.DB.Create(&first).Error; err != nil {
+		t.Fatal(err)
+	}
+	duplicate := first
+	duplicate.ID = NewID("import")
+	if err := store.DB.Create(&duplicate).Error; err == nil {
+		t.Fatal("duplicate source key for one user was accepted")
+	}
+	otherUser := first
+	otherUser.ID, otherUser.UserID = NewID("import"), users[1].ID
+	if err := store.DB.Create(&otherUser).Error; err != nil {
+		t.Fatalf("same source key for another user rejected: %v", err)
+	}
 }
 
 func TestTransactionRollbackAndActiveSessionConstraint(t *testing.T) {

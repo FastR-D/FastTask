@@ -74,7 +74,7 @@ FastTask 面向时间可自主安排、目标长期且执行路径不确定的�
 - MVP 不把一天全部时间排满。
 - MVP 不建设通用 DAG Agent 编排平台，该能力属于 FastLabs 的主要边界。
 - MVP 不引入 Kafka、RabbitMQ、Redis、独立工作流引擎或微服务集群。
-- MVP 不明确实现 FastNews、FastRead、FastWrite 等项目的点对点业务调用，只提供通用联动边界。
+- MVP 不实现 FastNews、FastRead、FastWrite 等项目的自动点对点业务调用；已提供通用外部导入收件箱和可选服务健康探测。
 
 关于需求中的“每天三个任务”，本设计采用“最多三个、允许少于三个”的约束。这是明确的设计取舍：三个是注意力上限，不是必须填满的数量；当候选不足、全部任务阻塞或用户当天不可用时，伪造占位任务会违背产品目标。
 
@@ -424,7 +424,7 @@ Repository -> HTTP DTO
 
 - 向 FastResearch Panel 提供当前用户的任务摘要。
 - 管理统一身份或短期登录 Token 的映射。
-- P1 提供其他 FastResearch 工具向 FastTask 导入候选事项的通用入口。
+- 提供其他 FastResearch 工具向 FastTask 导入候选事项的通用入口，并保留后续专用适配器边界。
 
 Panel 和其他项目不得直接读取 FastTask SQLite 文件。
 

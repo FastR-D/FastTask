@@ -59,3 +59,30 @@ func TestWouldCreateCycle(t *testing.T) {
 		t.Fatal("unexpected cycle")
 	}
 }
+
+func TestExternalImportValidationAndTransitions(t *testing.T) {
+	for _, source := range []string{"fastinsight", "fastnews", "fastread", "fastwrite"} {
+		if !ValidExternalImportSource(source) {
+			t.Errorf("source %q rejected", source)
+		}
+	}
+	if ValidExternalImportSource("unknown") {
+		t.Fatal("unknown source accepted")
+	}
+	for _, kind := range []string{"candidate_task", "research_material", "progress_evidence", "review_issue", "generated_report"} {
+		if !ValidExternalImportKind(kind) {
+			t.Errorf("kind %q rejected", kind)
+		}
+	}
+	if ValidExternalImportKind("unknown") {
+		t.Fatal("unknown kind accepted")
+	}
+	for _, target := range []string{"converted", "rejected"} {
+		if err := ValidateExternalImportTransition("candidate", target); err != nil {
+			t.Errorf("candidate -> %s rejected: %v", target, err)
+		}
+	}
+	if !errors.Is(ValidateExternalImportTransition("converted", "rejected"), ErrInvalidTransition) {
+		t.Fatal("terminal import transition accepted")
+	}
+}
