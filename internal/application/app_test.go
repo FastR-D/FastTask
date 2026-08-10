@@ -272,3 +272,69 @@ func TestSupportWorkerCreatesVisibleInputItem(t *testing.T) {
 		t.Fatalf("input items=%d", count)
 	}
 }
+
+func TestExternalImportConversionCreatesTaskAtomically(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	item := persistence.ExternalImport{SourceSystem: "fastread", SourceExternalID: "paper-task-1", SourceURL: "https://example.org/paper", ContentHash: "sha256:paper", Kind: "candidate_task", Title: "Read paper", Description: "Assess it as a baseline", SuggestedGoalID: &f.goal.ID, ArtifactsJSON: `[{"kind":"json","uri":"file:///tmp/report.json"}]`, MetadataJSON: `{"page_count":12}`}
+	if err := f.app.CreateExternalImport(ctx, f.user.ID, &item); err != nil {
+		t.Fatal(err)
+	}
+	converted, task, err := f.app.ConvertExternalImport(ctx, f.user.ID, item.ID, item.Revision, ConvertExternalImportCommand{Type: "task", SuccessCriteria: "Record a baseline decision with evidence", MinimumAction: "Read the abstract and method section", Priority: 80, EstimateMinutes: 50, DecisionNote: "Relevant to the active goal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.Status != "converted" || converted.TaskID == nil || *converted.TaskID != task.ID {
+		t.Fatalf("unexpected conversion: %#v task=%#v", converted, task)
+	}
+	if task.Title != item.Title || task.Description != item.Description || task.Status != "ready" || task.GoalID != f.goal.ID {
+		t.Fatalf("unexpected task: %#v", task)
+	}
+	var treeRevisions int64
+	f.store.DB.Model(&persistence.TaskTreeRevision{}).Where("goal_id = ? AND source = 'external_import'", f.goal.ID).Count(&treeRevisions)
+	if treeRevisions != 1 {
+		t.Fatalf("external import tree revisions=%d", treeRevisions)
+	}
+	var progress int64
+	f.store.DB.Model(&persistence.ProgressEvent{}).Where("task_id = ?", task.ID).Count(&progress)
+	if progress != 0 {
+		t.Fatalf("conversion created %d progress events", progress)
+	}
+}
+
+func TestExternalImportConversionRollbackAndTerminalRejection(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	item := persistence.ExternalImport{SourceSystem: "fastwrite", SourceExternalID: "review-1", Kind: "review_issue", Title: "Fix threat model", ArtifactsJSON: "[]", MetadataJSON: "{}"}
+	if err := f.app.CreateExternalImport(ctx, f.user.ID, &item); err != nil {
+		t.Fatal(err)
+	}
+	beforeTasks := int64(0)
+	f.store.DB.Model(&persistence.Task{}).Where("user_id = ?", f.user.ID).Count(&beforeTasks)
+	_, _, err := f.app.ConvertExternalImport(ctx, f.user.ID, item.ID, item.Revision, ConvertExternalImportCommand{GoalID: "missing", Type: "task", SuccessCriteria: "fixed", MinimumAction: "open issue"})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("invalid conversion error=%v", err)
+	}
+	var current persistence.ExternalImport
+	if err := f.store.DB.First(&current, "id = ?", item.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != "candidate" || current.Revision != 1 {
+		t.Fatalf("import changed after rollback: %#v", current)
+	}
+	afterTasks := int64(0)
+	f.store.DB.Model(&persistence.Task{}).Where("user_id = ?", f.user.ID).Count(&afterTasks)
+	if afterTasks != beforeTasks {
+		t.Fatalf("task count changed after rollback: %d -> %d", beforeTasks, afterTasks)
+	}
+	rejected, err := f.app.RejectExternalImport(ctx, f.user.ID, item.ID, item.Revision, "Not relevant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejected.Status != "rejected" || rejected.DecidedAt == nil {
+		t.Fatalf("unexpected rejection: %#v", rejected)
+	}
+	if _, _, err := f.app.ConvertExternalImport(ctx, f.user.ID, item.ID, rejected.Revision, ConvertExternalImportCommand{ExistingTaskID: &f.tasks[0].ID}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("rejected import converted: %v", err)
+	}
+}

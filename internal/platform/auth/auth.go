@@ -22,6 +22,7 @@ type principalKey struct{}
 type Principal struct {
 	UserID    string
 	SessionID string
+	ClientID  string
 	Role      string
 	Scopes    []string
 }
@@ -45,8 +46,9 @@ type claims struct {
 }
 
 type serviceClaims struct {
-	Scopes []string `json:"scopes"`
-	UserID string   `json:"represented_user_id"`
+	Scopes   []string `json:"scopes"`
+	UserID   string   `json:"represented_user_id"`
+	ClientID string   `json:"client_id"`
 	jwt.RegisteredClaims
 }
 
@@ -226,6 +228,17 @@ func (s *Service) AuthenticatePanel(token string) (Principal, error) {
 }
 
 func (s *Service) AuthenticateService(token, requiredScope string) (Principal, error) {
+	principal, err := s.AuthenticateServicePrincipal(token)
+	if err != nil {
+		return Principal{}, err
+	}
+	if !HasScopes(principal, requiredScope) {
+		return Principal{}, errors.New("missing service scope")
+	}
+	return principal, nil
+}
+
+func (s *Service) AuthenticateServicePrincipal(token string) (Principal, error) {
 	token = strings.TrimSpace(strings.TrimPrefix(token, "Bearer "))
 	if token == "" {
 		return Principal{}, errors.New("missing service token")
@@ -243,25 +256,44 @@ func (s *Service) AuthenticateService(token, requiredScope string) (Principal, e
 	if !ok || claims.UserID == "" {
 		return Principal{}, errors.New("invalid service claims")
 	}
-	hasScope := false
-	for _, scope := range claims.Scopes {
-		if scope == requiredScope {
-			hasScope = true
+	clientID := strings.TrimSpace(claims.ClientID)
+	if clientID == "" {
+		clientID = strings.TrimSpace(claims.Subject)
+	}
+	if clientID == "" {
+		return Principal{}, errors.New("missing service client identity")
+	}
+	return Principal{UserID: claims.UserID, ClientID: clientID, Role: "service", Scopes: claims.Scopes}, nil
+}
+
+func HasScopes(principal Principal, required ...string) bool {
+	available := make(map[string]bool, len(principal.Scopes))
+	for _, scope := range principal.Scopes {
+		available[scope] = true
+	}
+	for _, scope := range required {
+		if !available[scope] {
+			return false
 		}
 	}
-	if !hasScope {
-		return Principal{}, errors.New("missing service scope")
-	}
-	return Principal{UserID: claims.UserID, Role: "service", Scopes: claims.Scopes}, nil
+	return true
 }
 
 func (s *Service) IssuePanelToken(userID string, ttl time.Duration) (string, error) {
-	return s.IssueServiceToken(userID, []string{"panel:summary:read"}, ttl)
+	return s.IssueServiceTokenForClient(userID, "fastresearch-panel", []string{"panel:summary:read"}, ttl)
 }
 
 func (s *Service) IssueServiceToken(userID string, scopes []string, ttl time.Duration) (string, error) {
+	return s.IssueServiceTokenForClient(userID, "fastresearch-service", scopes, ttl)
+}
+
+func (s *Service) IssueServiceTokenForClient(userID, clientID string, scopes []string, ttl time.Duration) (string, error) {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return "", errors.New("service client identity is required")
+	}
 	now := persistence.Now()
-	claims := serviceClaims{Scopes: scopes, UserID: userID, RegisteredClaims: jwt.RegisteredClaims{Issuer: "fasttask-panel", Subject: "fastresearch-service", Audience: jwt.ClaimStrings{"fasttask-panel-api"}, ExpiresAt: jwt.NewNumericDate(now.Add(ttl)), IssuedAt: jwt.NewNumericDate(now), ID: persistence.NewID("servicejwt")}}
+	claims := serviceClaims{Scopes: scopes, UserID: userID, ClientID: clientID, RegisteredClaims: jwt.RegisteredClaims{Issuer: "fasttask-panel", Subject: clientID, Audience: jwt.ClaimStrings{"fasttask-panel-api"}, ExpiresAt: jwt.NewNumericDate(now.Add(ttl)), IssuedAt: jwt.NewNumericDate(now), ID: persistence.NewID("servicejwt")}}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.config.PanelJWTSecret))
 }
 

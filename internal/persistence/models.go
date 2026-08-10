@@ -157,6 +157,30 @@ type ProgressEvent struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+type ExternalImport struct {
+	ID               string     `json:"id"`
+	UserID           string     `json:"-"`
+	SchemaVersion    string     `json:"schema_version"`
+	TraceID          string     `json:"trace_id,omitempty"`
+	SourceSystem     string     `json:"-"`
+	SourceExternalID string     `json:"-"`
+	SourceURL        string     `json:"-"`
+	ContentHash      string     `json:"-"`
+	Kind             string     `json:"kind"`
+	Title            string     `json:"title"`
+	Description      string     `json:"description"`
+	SuggestedGoalID  *string    `json:"suggested_goal_id,omitempty"`
+	ArtifactsJSON    string     `json:"-"`
+	MetadataJSON     string     `json:"-"`
+	Status           string     `json:"status"`
+	TaskID           *string    `json:"task_id,omitempty"`
+	DecisionNote     string     `json:"decision_note,omitempty"`
+	Revision         int        `json:"revision"`
+	DecidedAt        *time.Time `json:"decided_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
 type Conversation struct {
 	ID        string    `json:"id"`
 	UserID    string    `json:"-"`

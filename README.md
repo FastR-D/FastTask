@@ -17,6 +17,8 @@ FastTask 是一个面向研究生和科研人员的长期目标推进系统。�
 - 持久化 Agent Job、Attempt、Lease、Fencing Token、重试和取消。
 - 墨水屏独立只读 Token、ETag 和 `304 Not Modified`。
 - FastResearch Panel 只读摘要接口。
+- FastInsight、FastNews、FastRead、FastWrite 通用外部导入收件箱，支持来源去重、用户审批和任务转换。
+- 可选 FastRead/FastWrite 健康探测，不影响 FastTask Readiness。
 - Gin + Huma v2，自动生成 OpenAPI 和 API 文档。
 - SQLite WAL、版本化 SQL Migration、一致性备份和恢复验证。
 - 响应式桌面/移动 Web 管理界面。
@@ -105,6 +107,9 @@ go run ./cmd/fasttask serve --with-worker --with-scheduler
 | `FASTTASK_ADMIN_PASSWORD` | `fasttask-admin` | 首次启动管理员密码 |
 | `FASTTASK_ADMIN_NAME` | `FastTask Admin` | 管理员显示名 |
 | `FASTTASK_PANEL_JWT_SECRET` | 与 JWT Secret 相同 | Panel/外部 Worker 短期 Service JWT 签名密钥 |
+| `FASTTASK_FASTREAD_URL` | 空 | 可选 FastRead Base URL，例如直接后端 `http://127.0.0.1:8483` 或 Docker/Nginx `http://127.0.0.1:3015` |
+| `FASTTASK_FASTWRITE_URL` | 空 | 可选 FastWrite Base URL，例如 `http://127.0.0.1:3003` |
+| `FASTTASK_INTEGRATION_TIMEOUT_MS` | `2000` | 外部健康探测超时，范围 100 至 10000 毫秒 |
 | `OPENAI_API_BASE_URL` | 空 | OpenAI-compatible `/v1` Base URL |
 | `OPENAI_MODEL` | 空 | 模型名 |
 | `OPENAI_API_KEY` | 空 | API Key |
@@ -277,6 +282,8 @@ tmux kill-session -t fasttask
 - 语音：MVP 已实现录音上传、受限临时存储、持久化转写 Job、OpenAI-compatible STT Adapter 和作业完成清理；没有 STT 模型配置时使用明确标注的演示转写。
 - FastResearch Panel：提供只读摘要。服务身份使用短期 JWT，必须包含 `fasttask-panel-api` Audience、`panel:summary:read` Scope 和签名的代表用户 Claim。
 - 墨水屏：后端 Poll 契约已完成，真实硬件固件不在本仓库范围内，可按 OpenAPI 接入。
+- FastResearch 工具：已实现 `/api/v1/imports` 通用收件箱。用户或带 `imports:write` Scope 的服务可导入候选事项；用户可通过 ETag 审批后创建或关联 Task。带 `imports:read` Scope 的服务只能读取被代表用户的导入事项。
+- 集成状态：管理员可调用 `GET /api/v1/integrations/status` 查看 FastRead/FastWrite 可选健康探测结果，并明确 FastInsight/FastNews CLI Runner 尚未实现。
 
 ## 设计文档
 
@@ -284,5 +291,6 @@ tmux kill-session -t fasttask
 - `doc/func.md`
 - `doc/interface.md`
 - `doc/tech.md`
+- [`doc/integration/README.md`](doc/integration/README.md)：FastInsight、FastNews、FastRead、FastWrite 对接与协作总览
 
 实现中的 HTTP DTO 和 OpenAPI 是字段级事实来源；文档用于解释产品语义、架构边界和演进决策。

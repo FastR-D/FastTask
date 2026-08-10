@@ -102,6 +102,9 @@ func TestOpenAPIAndHealth(t *testing.T) {
 	if !strings.Contains(openapi.Body.String(), "userBearer") {
 		t.Fatal("OpenAPI missing bearer security scheme")
 	}
+	if !strings.Contains(openapi.Body.String(), "/imports/{import_id}/conversion") || !strings.Contains(openapi.Body.String(), "serviceImportsWrite") || !strings.Contains(openapi.Body.String(), "serviceImportsRead") {
+		t.Fatal("OpenAPI missing external import contract or service security")
+	}
 }
 
 func TestRealUserScenario(t *testing.T) {
@@ -352,6 +355,18 @@ func TestExternalWorkerCallbackRejectsStaleLease(t *testing.T) {
 	if stale.Code != 409 {
 		t.Fatalf("stale callback=%d %s", stale.Code, stale.Body.String())
 	}
+	other := persistence.User{ID: persistence.NewID("user"), Identifier: "callback-other", PasswordHash: "hash", DisplayName: "Other", Timezone: "Asia/Shanghai", Locale: "zh-CN", Role: "member", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := api.store.DB.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	otherToken, err := api.server.auth.IssueServiceToken(other.ID, []string{"agent-jobs:write"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossUser := api.do(t, http.MethodPost, "/api/v1/agent-jobs/"+job.ID+"/callbacks", map[string]any{"attempt_no": 1, "lease_version": 2, "run_token": runToken, "status": "succeeded", "result": map[string]any{"ok": true}}, map[string]string{"Authorization": "Bearer " + otherToken, "Idempotency-Key": "callback-other-user"})
+	if crossUser.Code != http.StatusNotFound {
+		t.Fatalf("cross-user callback=%d %s", crossUser.Code, crossUser.Body.String())
+	}
 	success := api.do(t, http.MethodPost, "/api/v1/agent-jobs/"+job.ID+"/callbacks", map[string]any{"attempt_no": 1, "lease_version": 2, "run_token": runToken, "status": "succeeded", "result": map[string]any{"ok": true}}, map[string]string{"Authorization": "Bearer " + serviceToken, "Idempotency-Key": "callback-good"})
 	if success.Code != 200 {
 		t.Fatalf("callback=%d %s", success.Code, success.Body.String())
@@ -385,6 +400,268 @@ func TestExternalTaskTreeCallbackMaterializesProposal(t *testing.T) {
 	api.store.DB.Model(&persistence.Proposal{}).Where("job_id = ?", job.ID).Count(&count)
 	if count != 1 {
 		t.Fatalf("proposal count=%d", count)
+	}
+}
+
+func TestExternalImportServiceIngestionAndUserConversion(t *testing.T) {
+	api := newTestAPI(t)
+	goalResponse := api.do(t, http.MethodPost, "/api/v1/goals", map[string]any{"title": "Integration goal", "description": "Connect research tools", "success_criteria": "One imported paper is reviewed"}, map[string]string{"Idempotency-Key": "integration-goal"})
+	var goal persistence.Goal
+	decode(t, goalResponse, &goal)
+
+	writeToken, err := api.server.auth.IssueServiceToken(api.user.ID, []string{"imports:write"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	importBody := map[string]any{
+		"schema_version": "1.0",
+		"trace_id":       "trace-fastread-1",
+		"source": map[string]any{
+			"system":       "fastread",
+			"external_id":  "paper-task-1",
+			"url":          "http://127.0.0.1:3015/?task_id=paper-task-1",
+			"content_hash": "sha256:paper",
+		},
+		"kind":              "candidate_task",
+		"title":             "Read imported paper",
+		"description":       "Determine whether the method is a suitable baseline",
+		"suggested_goal_id": goal.ID,
+		"artifacts":         []map[string]any{{"kind": "json", "uri": "file:///srv/fastread/report.json"}},
+		"metadata":          map[string]any{"page_count": 12},
+	}
+	headers := map[string]string{"Authorization": "Bearer " + writeToken, "Idempotency-Key": "fastread-paper-1"}
+	created := api.do(t, http.MethodPost, "/api/v1/imports", importBody, headers)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create import=%d %s", created.Code, created.Body.String())
+	}
+	var imported externalImportBody
+	decode(t, created, &imported)
+	if imported.Status != "candidate" || imported.Source.System != "fastread" || imported.Source.ExternalID != "paper-task-1" || len(imported.Artifacts) != 1 {
+		t.Fatalf("unexpected import: %#v", imported)
+	}
+	rotatedToken, err := api.server.auth.IssueServiceToken(api.user.ID, []string{"imports:write"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay := api.do(t, http.MethodPost, "/api/v1/imports", importBody, map[string]string{"Authorization": "Bearer " + rotatedToken, "Idempotency-Key": "fastread-paper-1"})
+	if replay.Code != http.StatusCreated || replay.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("service replay=%d replay=%q body=%s", replay.Code, replay.Header().Get("Idempotency-Replayed"), replay.Body.String())
+	}
+	wrongScope, err := api.server.auth.IssueServiceTokenForClient(api.user.ID, "fastresearch-service", []string{"panel:summary:read"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongScopeReplay := api.do(t, http.MethodPost, "/api/v1/imports", importBody, map[string]string{"Authorization": "Bearer " + wrongScope, "Idempotency-Key": "fastread-paper-1"})
+	if wrongScopeReplay.Code != http.StatusForbidden {
+		t.Fatalf("wrong-scope replay=%d %s", wrongScopeReplay.Code, wrongScopeReplay.Body.String())
+	}
+	duplicate := api.do(t, http.MethodPost, "/api/v1/imports", importBody, map[string]string{"Authorization": "Bearer " + writeToken, "Idempotency-Key": "different-import-key"})
+	if duplicate.Code != http.StatusConflict {
+		t.Fatalf("duplicate source=%d %s", duplicate.Code, duplicate.Body.String())
+	}
+
+	readWithWriteOnly := api.do(t, http.MethodGet, "/api/v1/imports", nil, map[string]string{"Authorization": "Bearer " + writeToken})
+	if readWithWriteOnly.Code != http.StatusForbidden {
+		t.Fatalf("write-only token read=%d %s", readWithWriteOnly.Code, readWithWriteOnly.Body.String())
+	}
+	readToken, err := api.server.auth.IssueServiceToken(api.user.ID, []string{"imports:read"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := api.do(t, http.MethodGet, "/api/v1/imports?source_system=fastread", nil, map[string]string{"Authorization": "Bearer " + readToken})
+	if list.Code != http.StatusOK {
+		t.Fatalf("service list=%d %s", list.Code, list.Body.String())
+	}
+
+	serviceConversion := api.do(t, http.MethodPost, "/api/v1/imports/"+imported.ID+"/conversion", map[string]any{"mode": "create", "goal_id": goal.ID, "type": "task", "success_criteria": "Decision recorded", "minimum_action": "Read abstract"}, map[string]string{"Authorization": "Bearer " + writeToken, "If-Match": created.Header().Get("ETag"), "Idempotency-Key": "service-convert"})
+	if serviceConversion.Code != http.StatusUnauthorized {
+		t.Fatalf("service conversion=%d %s", serviceConversion.Code, serviceConversion.Body.String())
+	}
+	converted := api.do(t, http.MethodPost, "/api/v1/imports/"+imported.ID+"/conversion", map[string]any{"mode": "create", "type": "task", "success_criteria": "Decision recorded with evidence", "minimum_action": "Read abstract and method", "priority": 80, "estimate_minutes": 50}, map[string]string{"If-Match": created.Header().Get("ETag"), "Idempotency-Key": "user-convert"})
+	if converted.Code != http.StatusOK {
+		t.Fatalf("convert import=%d %s", converted.Code, converted.Body.String())
+	}
+	var conversion struct {
+		Import externalImportBody `json:"import"`
+		Task   persistence.Task   `json:"task"`
+	}
+	decode(t, converted, &conversion)
+	if conversion.Import.Status != "converted" || conversion.Task.GoalID != goal.ID || conversion.Task.Title != imported.Title {
+		t.Fatalf("unexpected conversion: %#v", conversion)
+	}
+	if conversion.Import.TaskID == nil || *conversion.Import.TaskID != conversion.Task.ID {
+		t.Fatal("converted import does not reference task")
+	}
+	stale := api.do(t, http.MethodPut, "/api/v1/imports/"+imported.ID+"/rejection", map[string]any{"note": "too late"}, map[string]string{"If-Match": created.Header().Get("ETag"), "Idempotency-Key": "stale-reject"})
+	if stale.Code != http.StatusPreconditionFailed {
+		t.Fatalf("stale rejection=%d %s", stale.Code, stale.Body.String())
+	}
+}
+
+func TestExternalImportETagModeAndPagination(t *testing.T) {
+	api := newTestAPI(t)
+	goalResponse := api.do(t, http.MethodPost, "/api/v1/goals", map[string]any{"title": "Import contracts", "success_criteria": "covered"}, map[string]string{"Idempotency-Key": "contract-goal"})
+	var goal persistence.Goal
+	decode(t, goalResponse, &goal)
+	taskResponse := api.do(t, http.MethodPost, "/api/v1/tasks", map[string]any{"goal_id": goal.ID, "type": "task", "title": "Existing", "success_criteria": "done", "minimum_action": "start", "estimate_minutes": 25, "priority": 50, "position": 0}, map[string]string{"Idempotency-Key": "contract-task"})
+	var task persistence.Task
+	decode(t, taskResponse, &task)
+	created := make([]*httptest.ResponseRecorder, 0, 3)
+	for i := 0; i < 3; i++ {
+		response := api.do(t, http.MethodPost, "/api/v1/imports", map[string]any{"source": map[string]any{"system": "fastwrite", "external_id": fmt.Sprintf("issue-contract-%d", i)}, "kind": "review_issue", "title": fmt.Sprintf("Issue %d", i)}, map[string]string{"Idempotency-Key": fmt.Sprintf("contract-import-%d", i)})
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create import=%d %s", response.Code, response.Body.String())
+		}
+		created = append(created, response)
+	}
+	var imported externalImportBody
+	decode(t, created[0], &imported)
+	wrongETag := api.do(t, http.MethodPut, "/api/v1/imports/"+imported.ID+"/rejection", map[string]any{}, map[string]string{"If-Match": application.StrongETag("task", task.ID, 1), "Idempotency-Key": "wrong-etag"})
+	if wrongETag.Code != http.StatusPreconditionFailed {
+		t.Fatalf("wrong resource ETag=%d %s", wrongETag.Code, wrongETag.Body.String())
+	}
+	mixed := api.do(t, http.MethodPost, "/api/v1/imports/"+imported.ID+"/conversion", map[string]any{"mode": "attach", "existing_task_id": task.ID, "goal_id": goal.ID}, map[string]string{"If-Match": created[0].Header().Get("ETag"), "Idempotency-Key": "mixed-mode"})
+	if mixed.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("mixed conversion=%d %s", mixed.Code, mixed.Body.String())
+	}
+	first := api.do(t, http.MethodGet, "/api/v1/imports?limit=2", nil, nil)
+	var page struct {
+		Items      []externalImportBody `json:"items"`
+		NextCursor *string              `json:"next_cursor"`
+		HasMore    bool                 `json:"has_more"`
+	}
+	decode(t, first, &page)
+	if len(page.Items) != 2 || !page.HasMore || page.NextCursor == nil {
+		t.Fatalf("unexpected first page: %#v", page)
+	}
+	second := api.do(t, http.MethodGet, "/api/v1/imports?limit=2&cursor="+*page.NextCursor, nil, nil)
+	decode(t, second, &page)
+	if len(page.Items) != 1 || page.HasMore {
+		t.Fatalf("unexpected second page: %#v", page)
+	}
+}
+
+func TestExternalImportOwnershipIsolationAndRejection(t *testing.T) {
+	api := newTestAPI(t)
+	created := api.do(t, http.MethodPost, "/api/v1/imports", map[string]any{"source": map[string]any{"system": "fastnews", "external_id": "fastnews:conference:paper-1", "url": "https://example.org/paper"}, "kind": "research_material", "title": "Conference paper", "metadata": map[string]any{"category": "Network Security"}}, map[string]string{"Idempotency-Key": "news-import"})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create import=%d %s", created.Code, created.Body.String())
+	}
+	var imported externalImportBody
+	decode(t, created, &imported)
+	rejected := api.do(t, http.MethodPut, "/api/v1/imports/"+imported.ID+"/rejection", map[string]any{"note": "Not relevant to active goals"}, map[string]string{"If-Match": created.Header().Get("ETag"), "Idempotency-Key": "reject-news"})
+	if rejected.Code != http.StatusOK {
+		t.Fatalf("reject import=%d %s", rejected.Code, rejected.Body.String())
+	}
+	var rejectedBody externalImportBody
+	decode(t, rejected, &rejectedBody)
+	if rejectedBody.Status != "rejected" || rejectedBody.DecidedAt == nil {
+		t.Fatalf("unexpected rejected import: %#v", rejectedBody)
+	}
+
+	now := persistence.Now()
+	other := persistence.User{ID: persistence.NewID("user"), Identifier: "import-other", PasswordHash: "hash", DisplayName: "Other", Timezone: "Asia/Shanghai", Locale: "zh-CN", Role: "member", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := api.store.DB.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	otherToken, err := api.server.auth.IssueServiceToken(other.ID, []string{"imports:read"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hidden := api.do(t, http.MethodGet, "/api/v1/imports/"+imported.ID, nil, map[string]string{"Authorization": "Bearer " + otherToken})
+	if hidden.Code != http.StatusNotFound {
+		t.Fatalf("cross-user import=%d %s", hidden.Code, hidden.Body.String())
+	}
+}
+
+func TestIntegrationStatusReportsConfiguredHTTPServices(t *testing.T) {
+	fastRead := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/sys_check" {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"code":0,"msg":"success","data":null}`))
+	}))
+	defer fastRead.Close()
+	fastWrite := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/health" {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer fastWrite.Close()
+
+	api := newTestAPI(t)
+	api.server.cfg.FastReadURL = fastRead.URL
+	api.server.cfg.FastWriteURL = fastWrite.URL
+	api.server.cfg.IntegrationTimeout = time.Second
+	response := api.do(t, http.MethodGet, "/api/v1/integrations/status", nil, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("integration status=%d %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Services []integrationStatus `json:"services"`
+	}
+	decode(t, response, &result)
+	if len(result.Services) != 4 {
+		t.Fatalf("services=%d", len(result.Services))
+	}
+	byName := map[string]integrationStatus{}
+	for _, service := range result.Services {
+		byName[service.Name] = service
+	}
+	if !byName["fastread"].Configured || !byName["fastread"].Reachable || !byName["fastwrite"].Reachable {
+		t.Fatalf("unexpected HTTP service status: %#v", byName)
+	}
+	if byName["fastnews"].Configured || byName["fastinsight"].Configured {
+		t.Fatalf("CLI services should not be configured: %#v", byName)
+	}
+}
+
+func TestIntegrationHealthRejectsDeceptiveFastReadResponse(t *testing.T) {
+	deceptive := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{}`))
+	}))
+	defer deceptive.Close()
+	api := newTestAPI(t)
+	api.server.cfg.FastReadURL = deceptive.URL
+	api.server.cfg.IntegrationTimeout = time.Second
+	response := api.do(t, http.MethodGet, "/api/v1/integrations/status", nil, nil)
+	var result struct {
+		Services []integrationStatus `json:"services"`
+	}
+	decode(t, response, &result)
+	for _, service := range result.Services {
+		if service.Name == "fastread" && service.Reachable {
+			t.Fatal("FastRead response without code field was accepted")
+		}
+	}
+}
+
+func TestIntegrationStatusRequiresAdmin(t *testing.T) {
+	api := newTestAPI(t)
+	hash, err := platformauth.HashPassword("member-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := persistence.Now()
+	member := persistence.User{ID: persistence.NewID("user"), Identifier: "member-status", PasswordHash: hash, DisplayName: "Member", Timezone: "Asia/Shanghai", Locale: "zh-CN", Role: "member", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := api.store.DB.Create(&member).Error; err != nil {
+		t.Fatal(err)
+	}
+	login := api.do(t, http.MethodPost, "/api/v1/auth/login", map[string]any{"identifier": member.Identifier, "password": "member-password"}, map[string]string{"Authorization": ""})
+	var tokens struct {
+		AccessToken string `json:"access_token"`
+	}
+	decode(t, login, &tokens)
+	api.access = tokens.AccessToken
+	response := api.do(t, http.MethodGet, "/api/v1/integrations/status", nil, nil)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("member integration status=%d %s", response.Code, response.Body.String())
 	}
 }
 

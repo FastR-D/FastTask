@@ -31,11 +31,18 @@ type Config struct {
 	AudioDir           string
 	PanelJWTSecret     string
 	TrustedProxies     []string
+	FastReadURL        string
+	FastWriteURL       string
+	IntegrationTimeout time.Duration
 }
 
 func Load() (Config, error) {
 	_ = loadDotEnv(".env")
 	port, err := envInt("FASTTASK_PORT", 10000)
+	if err != nil {
+		return Config{}, err
+	}
+	integrationTimeoutMS, err := envInt("FASTTASK_INTEGRATION_TIMEOUT_MS", 2000)
 	if err != nil {
 		return Config{}, err
 	}
@@ -60,12 +67,18 @@ func Load() (Config, error) {
 		AudioDir:           env("FASTTASK_AUDIO_DIR", "data/audio"),
 		PanelJWTSecret:     env("FASTTASK_PANEL_JWT_SECRET", env("FASTTASK_JWT_SECRET", "local-development-secret-change-me")),
 		TrustedProxies:     envList("FASTTASK_TRUSTED_PROXIES", "10.22.33.0/24"),
+		FastReadURL:        strings.TrimRight(env("FASTTASK_FASTREAD_URL", ""), "/"),
+		FastWriteURL:       strings.TrimRight(env("FASTTASK_FASTWRITE_URL", ""), "/"),
+		IntegrationTimeout: time.Duration(integrationTimeoutMS) * time.Millisecond,
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return Config{}, errors.New("FASTTASK_PORT must be between 1 and 65535")
 	}
 	if len(c.JWTSecret) < 24 {
 		return Config{}, errors.New("FASTTASK_JWT_SECRET must contain at least 24 characters")
+	}
+	if c.IntegrationTimeout < 100*time.Millisecond || c.IntegrationTimeout > 10*time.Second {
+		return Config{}, errors.New("FASTTASK_INTEGRATION_TIMEOUT_MS must be between 100 and 10000")
 	}
 	if c.Environment == "production" && (strings.Contains(c.JWTSecret, "development") || c.AdminPassword == "fasttask-admin") {
 		return Config{}, errors.New("production requires non-default FASTTASK_JWT_SECRET and FASTTASK_ADMIN_PASSWORD")

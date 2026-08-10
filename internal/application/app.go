@@ -17,14 +17,15 @@ import (
 )
 
 var (
-	ErrNotFound            = errors.New("resource not found")
-	ErrConflict            = errors.New("resource conflict")
-	ErrRevision            = errors.New("revision mismatch")
-	ErrPrecondition        = errors.New("precondition required")
-	ErrValidation          = errors.New("validation failed")
-	ErrActiveSession       = errors.New("active work session exists")
-	ErrStaleAgentAttempt   = errors.New("stale agent attempt")
-	ErrIdempotencyKeyReuse = errors.New("idempotency key reused")
+	ErrNotFound             = errors.New("resource not found")
+	ErrConflict             = errors.New("resource conflict")
+	ErrRevision             = errors.New("revision mismatch")
+	ErrPrecondition         = errors.New("precondition required")
+	ErrValidation           = errors.New("validation failed")
+	ErrActiveSession        = errors.New("active work session exists")
+	ErrStaleAgentAttempt    = errors.New("stale agent attempt")
+	ErrIdempotencyKeyReuse  = errors.New("idempotency key reused")
+	ErrExternalImportExists = errors.New("external import already exists")
 )
 
 type App struct{ Store *persistence.Store }
@@ -71,34 +72,158 @@ func (a *App) UpdateGoal(ctx context.Context, userID, id string, expected int, c
 }
 
 func (a *App) CreateTask(ctx context.Context, userID string, task *persistence.Task) error {
-	var goal persistence.Goal
-	if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", task.GoalID, userID).First(&goal).Error; err != nil {
-		return notFound(err)
+	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		return a.createTaskTx(tx, userID, task, "manual task creation", "user")
+	})
+}
+
+type ConvertExternalImportCommand struct {
+	ExistingTaskID  *string
+	GoalID          string
+	ParentID        *string
+	Type            string
+	Title           string
+	Description     string
+	SuccessCriteria string
+	MinimumAction   string
+	Priority        int
+	EstimateMinutes int
+	Position        int
+	DecisionNote    string
+}
+
+func (a *App) CreateExternalImport(ctx context.Context, userID string, item *persistence.ExternalImport) error {
+	item.SchemaVersion = strings.TrimSpace(item.SchemaVersion)
+	item.SourceSystem = strings.TrimSpace(item.SourceSystem)
+	item.SourceExternalID = strings.TrimSpace(item.SourceExternalID)
+	item.Kind = strings.TrimSpace(item.Kind)
+	item.Title = strings.TrimSpace(item.Title)
+	if item.SchemaVersion == "" {
+		item.SchemaVersion = "1.0"
 	}
-	if task.ParentID != nil {
-		var parent persistence.Task
-		if err := a.Store.DB.WithContext(ctx).Where("id = ? AND goal_id = ? AND user_id = ?", *task.ParentID, task.GoalID, userID).First(&parent).Error; err != nil {
-			return ErrValidation
-		}
+	if item.SchemaVersion != "1.0" || !domain.ValidExternalImportSource(item.SourceSystem) || !domain.ValidExternalImportKind(item.Kind) || item.SourceExternalID == "" || item.Title == "" {
+		return ErrValidation
+	}
+	if item.ArtifactsJSON == "" {
+		item.ArtifactsJSON = "[]"
+	}
+	if item.MetadataJSON == "" {
+		item.MetadataJSON = "{}"
+	}
+	var artifacts []any
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(item.ArtifactsJSON), &artifacts); err != nil {
+		return ErrValidation
+	}
+	if err := json.Unmarshal([]byte(item.MetadataJSON), &metadata); err != nil {
+		return ErrValidation
+	}
+	if len(item.ArtifactsJSON) > 128<<10 || len(item.MetadataJSON) > 128<<10 {
+		return ErrValidation
 	}
 	now := persistence.Now()
-	task.ID, task.UserID, task.Status, task.Revision = persistence.NewID("task"), userID, "ready", 1
-	if task.Type == "" {
-		task.Type = "task"
-	}
-	if task.Priority == 0 {
-		task.Priority = 50
-	}
-	if task.EstimateMinutes == 0 {
-		task.EstimateMinutes = 25
-	}
-	task.CreatedAt, task.UpdatedAt = now, now
+	item.ID, item.UserID, item.Status, item.Revision = persistence.NewID("import"), userID, "candidate", 1
+	item.CreatedAt, item.UpdatedAt = now, now
 	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		if err := tx.Create(task).Error; err != nil {
+		if item.SuggestedGoalID != nil {
+			var goal persistence.Goal
+			if err := tx.Where("id = ? AND user_id = ?", *item.SuggestedGoalID, userID).First(&goal).Error; err != nil {
+				return notFound(err)
+			}
+		}
+		if err := tx.Create(item).Error; err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "unique") {
+				return ErrExternalImportExists
+			}
 			return err
 		}
-		return a.snapshotTaskTree(tx, userID, task.GoalID, "manual task creation", "user")
+		return createOutbox(tx, userID, "external_import.created", map[string]any{"import_id": item.ID, "source_system": item.SourceSystem, "source_external_id": item.SourceExternalID})
 	})
+}
+
+func (a *App) ConvertExternalImport(ctx context.Context, userID, id string, expected int, command ConvertExternalImportCommand) (*persistence.ExternalImport, *persistence.Task, error) {
+	var item persistence.ExternalImport
+	var task persistence.Task
+	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&item).Error; err != nil {
+			return notFound(err)
+		}
+		if item.Revision != expected {
+			return ErrRevision
+		}
+		if err := domain.ValidateExternalImportTransition(item.Status, "converted"); err != nil {
+			return ErrConflict
+		}
+		if command.ExistingTaskID != nil {
+			if strings.TrimSpace(*command.ExistingTaskID) == "" {
+				return ErrValidation
+			}
+			if err := tx.Where("id = ? AND user_id = ?", *command.ExistingTaskID, userID).First(&task).Error; err != nil {
+				return notFound(err)
+			}
+		} else {
+			if strings.TrimSpace(command.GoalID) == "" && item.SuggestedGoalID != nil {
+				command.GoalID = *item.SuggestedGoalID
+			}
+			if strings.TrimSpace(command.Title) == "" {
+				command.Title = item.Title
+			}
+			if strings.TrimSpace(command.Description) == "" {
+				command.Description = item.Description
+			}
+			task = persistence.Task{GoalID: command.GoalID, ParentID: command.ParentID, Type: command.Type, Title: command.Title, Description: command.Description, SuccessCriteria: command.SuccessCriteria, MinimumAction: command.MinimumAction, Priority: command.Priority, EstimateMinutes: command.EstimateMinutes, Position: command.Position}
+			if err := a.createTaskTx(tx, userID, &task, "external import converted", "external_import"); err != nil {
+				return err
+			}
+		}
+		now := persistence.Now()
+		result := tx.Model(&persistence.ExternalImport{}).Where("id = ? AND user_id = ? AND revision = ? AND status = 'candidate'", item.ID, userID, expected).Updates(map[string]any{"status": "converted", "task_id": task.ID, "decision_note": strings.TrimSpace(command.DecisionNote), "decided_at": now, "revision": expected + 1, "updated_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrRevision
+		}
+		return createOutbox(tx, userID, "external_import.converted", map[string]any{"import_id": item.ID, "task_id": task.ID})
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := a.Store.DB.WithContext(ctx).First(&item, "id = ?", id).Error; err != nil {
+		return nil, nil, err
+	}
+	return &item, &task, nil
+}
+
+func (a *App) RejectExternalImport(ctx context.Context, userID, id string, expected int, note string) (*persistence.ExternalImport, error) {
+	var item persistence.ExternalImport
+	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&item).Error; err != nil {
+			return notFound(err)
+		}
+		if item.Revision != expected {
+			return ErrRevision
+		}
+		if err := domain.ValidateExternalImportTransition(item.Status, "rejected"); err != nil {
+			return ErrConflict
+		}
+		now := persistence.Now()
+		result := tx.Model(&persistence.ExternalImport{}).Where("id = ? AND user_id = ? AND revision = ? AND status = 'candidate'", item.ID, userID, expected).Updates(map[string]any{"status": "rejected", "decision_note": strings.TrimSpace(note), "decided_at": now, "revision": expected + 1, "updated_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrRevision
+		}
+		return createOutbox(tx, userID, "external_import.rejected", map[string]any{"import_id": item.ID})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Store.DB.WithContext(ctx).First(&item, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
 }
 
 func (a *App) UpdateTask(ctx context.Context, userID, id string, expected int, changes map[string]any) (*persistence.Task, error) {
@@ -678,10 +803,10 @@ func (a *App) CancelJob(ctx context.Context, userID, id string, expected int) (*
 	return &job, nil
 }
 
-func (a *App) AgentCallback(ctx context.Context, id string, attempt, lease int, runToken, status string, output any, errorCode, errorMessage string) (*persistence.AgentJob, error) {
+func (a *App) AgentCallback(ctx context.Context, userID, id string, attempt, lease int, runToken, status string, output any, errorCode, errorMessage string) (*persistence.AgentJob, error) {
 	var job persistence.AgentJob
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		if err := tx.First(&job, "id = ?", id).Error; err != nil {
+		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&job).Error; err != nil {
 			return notFound(err)
 		}
 		if job.Status != "running" || job.AttemptCount != attempt || job.LeaseVersion != lease || job.RunTokenHash != persistence.Hash(runToken) {
@@ -701,7 +826,7 @@ func (a *App) AgentCallback(ctx context.Context, id string, attempt, lease int, 
 			}
 		}
 		updates := map[string]any{"status": status, "output_json": string(encoded), "error_code": errorCode, "error_message": errorMessage, "finished_at": now, "locked_by": "", "locked_until": nil, "run_token_hash": "", "revision": job.Revision + 1, "updated_at": now}
-		result := tx.Model(&persistence.AgentJob{}).Where("id = ? AND status = 'running' AND attempt_count = ? AND lease_version = ? AND run_token_hash = ?", id, attempt, lease, persistence.Hash(runToken)).Updates(updates)
+		result := tx.Model(&persistence.AgentJob{}).Where("id = ? AND user_id = ? AND status = 'running' AND attempt_count = ? AND lease_version = ? AND run_token_hash = ?", id, userID, attempt, lease, persistence.Hash(runToken)).Updates(updates)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -713,7 +838,7 @@ func (a *App) AgentCallback(ctx context.Context, id string, attempt, lease int, 
 	if err != nil {
 		return nil, err
 	}
-	if err := a.Store.DB.WithContext(ctx).First(&job, "id = ?", id).Error; err != nil {
+	if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).First(&job).Error; err != nil {
 		return nil, err
 	}
 	return &job, nil
@@ -1041,6 +1166,45 @@ func (a *App) snapshotTaskTree(tx *gorm.DB, userID, goalID, reason, source strin
 	snapshot, _ := json.Marshal(tasks)
 	record := persistence.TaskTreeRevision{ID: persistence.NewID("treerev"), UserID: userID, GoalID: goalID, Revision: revision + 1, Reason: reason, Source: source, SnapshotJSON: string(snapshot), CreatedAt: persistence.Now()}
 	return tx.Create(&record).Error
+}
+
+func (a *App) createTaskTx(tx *gorm.DB, userID string, task *persistence.Task, reason, source string) error {
+	var goal persistence.Goal
+	if err := tx.Where("id = ? AND user_id = ?", task.GoalID, userID).First(&goal).Error; err != nil {
+		return notFound(err)
+	}
+	if task.ParentID != nil {
+		var parent persistence.Task
+		if err := tx.Where("id = ? AND goal_id = ? AND user_id = ?", *task.ParentID, task.GoalID, userID).First(&parent).Error; err != nil {
+			return ErrValidation
+		}
+	}
+	task.Type = strings.TrimSpace(task.Type)
+	task.Title = strings.TrimSpace(task.Title)
+	task.SuccessCriteria = strings.TrimSpace(task.SuccessCriteria)
+	task.MinimumAction = strings.TrimSpace(task.MinimumAction)
+	if task.Type == "" {
+		task.Type = "task"
+	}
+	if task.Type != "milestone" && task.Type != "task" && task.Type != "action" || task.Title == "" || task.SuccessCriteria == "" || task.MinimumAction == "" || task.Priority < 0 || task.Priority > 100 || task.Position < 0 {
+		return ErrValidation
+	}
+	if task.Priority == 0 {
+		task.Priority = 50
+	}
+	if task.EstimateMinutes == 0 {
+		task.EstimateMinutes = 25
+	}
+	if task.EstimateMinutes < 1 || task.EstimateMinutes > 1440 {
+		return ErrValidation
+	}
+	now := persistence.Now()
+	task.ID, task.UserID, task.Status, task.Revision = persistence.NewID("task"), userID, "ready", 1
+	task.CreatedAt, task.UpdatedAt = now, now
+	if err := tx.Create(task).Error; err != nil {
+		return err
+	}
+	return a.snapshotTaskTree(tx, userID, task.GoalID, reason, source)
 }
 
 func createOutbox(tx *gorm.DB, userID, eventType string, payload any) error {

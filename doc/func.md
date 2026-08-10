@@ -52,7 +52,7 @@ FastTask 不以收集全部待办和安排全部时间为目标，而是：
 ### 3.2 P1 范围
 
 - 流式语音识别、语音播报和免确认语音操作。
-- FastNews、FastRead、FastWrite、FastInsight、FastLabs、FastPPT 的通用事项导入或结果引用。
+- FastNews、FastRead、FastWrite、FastInsight 的通用事项导入或结果引用已实现；FastLabs、FastPPT 和专用双向适配器仍待后续确认。
 - 浏览器、飞书、邮件或移动推送提醒。
 - 团队共享目标和协作权限。
 - 墨水屏写回完成状态。
@@ -542,7 +542,7 @@ MVP：
 - 使用统一用户标识或短期登录 Token。
 - Panel 只调用只读摘要接口，不直接访问 FastTask 数据库。
 
-与 FastNews、FastRead 等其他工具的自动点对点调用未在需求中明确，P1 只提供通用导入能力，不在 MVP 假设特定协议。
+与 FastNews、FastRead 等其他工具的自动点对点调用未在需求中明确。当前已实现通用导入收件箱和 FastRead/FastWrite 可选健康探测，不假设特定双向同步协议。
 
 ## 18. 状态机
 

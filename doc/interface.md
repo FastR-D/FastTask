@@ -173,8 +173,8 @@ serviceBearer:
 |---|---|
 | `panel:summary:read` | FastResearch Panel 读取用户任务摘要 |
 | `agent-jobs:write` | 独立 Agent Worker 回写结构化结果 |
-| `imports:write` | P1 通用事项导入 |
-| `imports:read` | P1 查询导入状态 |
+| `imports:write` | 通用事项导入 |
+| `imports:read` | 查询导入状态 |
 
 服务 Token 使用独立 Audience 和短有效期，不隐式继承用户权限。
 
@@ -883,37 +883,92 @@ If-None-Match: "device-view_dev01_rev_21"
 
 服务认证代表用户时，具体用户绑定应来自受信任的 Subject Claim 或明确 Header 签名协议，不能接受普通客户端任意指定 `user_id`。
 
-## 16. P1 通用外部导入
+## 16. 通用外部导入
 
-当前需求没有明确 FastNews、FastRead、FastWrite、FastInsight、FastLabs 或 FastPPT 的点对点协议。P1 仅保留通用、来源无关的接口：
+FastTask 已实现来源无关的外部导入收件箱。它不直接调用或复制其他工具的全部业务数据，而是保存稳定来源引用、任务所需摘要、Artifact 描述和 Metadata，并要求用户审批后再转换或关联 Task。
 
 | 方法 | 路径 | 认证 | 说明 |
 |---|---|---|---|
 | POST | `/imports` | 用户，或服务 `imports:write`，幂等 | 导入候选事项或外部结果引用 |
+| GET | `/imports` | 用户，或服务 `imports:read` | 按 Status、Source、Kind 或 External ID 游标分页查询导入 |
 | GET | `/imports/{import_id}` | 用户，或服务 `imports:read` | 查询导入状态 |
+| POST | `/imports/{import_id}/conversion` | 用户 + `If-Match`，幂等 | 创建新 Task 或关联已有 Task |
+| PUT | `/imports/{import_id}/rejection` | 用户 + `If-Match`，幂等 | 拒绝候选事项 |
+| GET | `/integrations/status` | 管理员用户 | 探测配置的 FastRead/FastWrite 服务状态 |
 
 建议请求：
 
 ```json
 {
+  "schema_version": "1.0",
+  "trace_id": "trace_01J...",
   "source": {
     "system": "fastread",
     "external_id": "paper_123",
-    "url": "https://example.invalid/papers/123"
+    "url": "http://127.0.0.1:3015/?task_id=paper_123",
+    "content_hash": "sha256:..."
   },
   "kind": "candidate_task",
   "title": "阅读并总结论文 X",
   "description": "重点判断其方法是否适合作为当前实验基线",
   "suggested_goal_id": "goal_01J...",
-  "metadata": {}
+  "artifacts": [
+    {
+      "kind": "json",
+      "uri": "file:///srv/fastread/note_results/paper_123.json",
+      "content_hash": "sha256:..."
+    }
+  ],
+  "metadata": {
+    "page_count": 12
+  }
 }
 ```
 
 规则：
 
 - 导入默认创建候选事项，不直接进入每日三个核心项。
+- 当前支持 `fastinsight`、`fastnews`、`fastread`、`fastwrite` 四个 `source.system`。
+- `source.system + source.external_id` 在同一用户范围内唯一。
+- `kind` 支持 `candidate_task`、`research_material`、`progress_evidence`、`review_issue`、`generated_report`。
+- 创建导入要求 `Idempotency-Key`。HTTP 幂等不替代来源业务唯一键。
 - FastTask 不复制外部系统全部数据，只保存稳定引用和完成任务所需摘要。
-- 具体项目专用字段和双向同步必须通过独立 ADR 和接口版本定义。
+- 服务 Token 必须代表一个受信任用户；调用方不能提交任意 `user_id`。
+- 服务 Token 使用稳定 `client_id` 区分 FastInsight、FastNews、FastRead、FastWrite 等调用方；服务幂等范围包含 `client_id`、代表用户和 Scope 集合。
+- 服务 Token 只能导入或读取，不能执行转换和拒绝。
+- 导入列表使用通用 `limit/cursor` 分页，默认 20 条，最多 100 条。
+- 转换必须提交导入 ETag。创建新 Task 时必须提供可验证的 `success_criteria` 和 `minimum_action`；未提供 Goal 时可使用 `suggested_goal_id`。
+- 也可通过 `existing_task_id` 将导入关联到已有 Task，但不会自动完成 Task 或写入 ProgressEvent。
+- 转换和拒绝是终态，不能互相切换或回到 `candidate`。
+- Artifact URI 只作为引用保存，FastTask 不会自动读取本地文件。
+- 具体项目专用字段和双向同步仍需通过独立 ADR 和接口版本定义。
+
+转换为新 Task：
+
+```json
+{
+  "mode": "create",
+  "type": "task",
+  "title": "阅读并判断论文 X",
+  "success_criteria": "形成带原文证据的基线适用性结论",
+  "minimum_action": "阅读摘要和方法部分并记录三条判断",
+  "priority": 80,
+  "estimate_minutes": 50,
+  "decision_note": "与当前实验方向相关"
+}
+```
+
+关联已有 Task：
+
+```json
+{
+  "mode": "attach",
+  "existing_task_id": "task_01J...",
+  "decision_note": "作为该任务的外部研究材料"
+}
+```
+
+FastRead/FastWrite 健康探测由服务端环境变量配置，不接受请求参数中的 URL。未配置时返回 `configured=false`；不可用不会使 `/health/ready` 失败。FastInsight/FastNews 当前返回 CLI Runner 未配置。
 
 ## 17. 接口注册与测试要求
 

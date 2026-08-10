@@ -13,6 +13,21 @@ var (
 	ErrCycle                 = errors.New("task tree cycle")
 )
 
+var externalImportSources = map[string]bool{
+	"fastinsight": true,
+	"fastnews":    true,
+	"fastread":    true,
+	"fastwrite":   true,
+}
+
+var externalImportKinds = map[string]bool{
+	"candidate_task":    true,
+	"research_material": true,
+	"progress_evidence": true,
+	"review_issue":      true,
+	"generated_report":  true,
+}
+
 type Candidate struct {
 	ID             string
 	Status         string
@@ -82,4 +97,19 @@ func WouldCreateCycle(taskID, parentID string, parents map[string]string) bool {
 		}
 	}
 	return false
+}
+
+func ValidExternalImportSource(value string) bool {
+	return externalImportSources[value]
+}
+
+func ValidExternalImportKind(value string) bool {
+	return externalImportKinds[value]
+}
+
+func ValidateExternalImportTransition(from, to string) error {
+	if from == "candidate" && (to == "converted" || to == "rejected") {
+		return nil
+	}
+	return ErrInvalidTransition
 }
