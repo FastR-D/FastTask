@@ -57,19 +57,30 @@ func serveCommand() *cobra.Command {
 		if err := authService.EnsureAdmin(ctx); err != nil {
 			return fmt.Errorf("ensure admin: %w", err)
 		}
-		app := application.New(store)
+		app := application.NewWithSecret(store, cfg.ProviderEncryptionKey)
 		server := httpapi.New(app, authService, cfg)
 		workerCtx, cancelWorker := context.WithCancel(ctx)
 		defer cancelWorker()
 		if withWorker || withScheduler {
-			var providers []agent.Provider
-			if cfg.HasLLM() {
-				providers = append(providers, agent.NewOpenAI(cfg))
-			}
-			worker := application.NewWorker(app, cfg.WorkerInterval, providers...)
-			if cfg.HasLLM() && cfg.TranscriptionModel != "" {
-				worker.WithTranscriber(agent.NewOpenAI(cfg))
-			}
+			worker := application.NewWorker(app, cfg.WorkerInterval)
+			worker.WithProviderResolver(func(ctx context.Context) (agent.Provider, agent.Transcriber, error) {
+				runtime, err := app.ActiveProviderRuntime(ctx)
+				if err != nil || runtime != nil {
+					if runtime != nil {
+						return runtime.Provider, runtime.Transcriber, nil
+					}
+					return nil, nil, err
+				}
+				if cfg.HasLLM() {
+					provider := agent.NewOpenAI(cfg)
+					var transcriber agent.Transcriber
+					if cfg.TranscriptionModel != "" {
+						transcriber = provider
+					}
+					return provider, transcriber, nil
+				}
+				return nil, nil, nil
+			})
 			go worker.Run(workerCtx)
 		}
 		var maintenance *scheduler.Scheduler

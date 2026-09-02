@@ -1,0 +1,31 @@
+.admin-tabs{display:grid;grid-template-columns:auto auto;justify-content:start;gap:.5rem;margin-bottom:2rem}
+.admin-tabs button,.admin-actions button,.admin-toolbar button{border:1px solid var(--ink);background:transparent;padding:.65rem 1rem}
+.admin-tabs button.active{background:var(--ink);color:white}
+.admin-layout{display:grid;grid-template-columns:330px 1fr;gap:2.2rem;align-items:start}
+.admin-form,.admin-card,.session-panel{border:1px solid var(--ink);background:white;padding:1.7rem;display:grid;gap:.9rem}
+.admin-form h2,.session-panel h3{font-family:'Noto Serif SC',serif;margin:0}
+.admin-form input,.admin-form select,.admin-toolbar input,.edit-stack input{border:0;border-bottom:1px solid var(--ink);background:transparent;padding:.7rem .1rem;outline:none}
+.admin-form button{margin-top:.3rem}
+.admin-form small{color:#777;line-height:1.5}
+.admin-content{min-width:0}
+.admin-toolbar{display:grid;grid-template-columns:1fr auto;gap:.7rem;margin-bottom:1.5rem}
+.admin-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:1.2rem}
+.admin-card.selected{outline:3px solid var(--lime)}
+.admin-card.muted{opacity:.58}
+.admin-card h3{font-family:'Noto Serif SC',serif;margin:.15rem 0}
+.admin-card small,.session-panel span{color:#6e716b}
+.admin-card p{margin:.2rem 0}
+.admin-actions{display:flex;flex-wrap:wrap;gap:.45rem;margin-top:auto}
+.admin-actions .primary{background:var(--ink);color:white}
+.admin-card header,.session-panel div{display:flex;justify-content:space-between;gap:1rem}
+.session-panel{margin-top:2rem}
+.session-panel code{font-size:.7rem}
+.edit-stack{display:grid;gap:.6rem}
+.provider-url{word-break:break-all;color:#5c655f}
+.audit-panel{display:grid;gap:1rem}
+.audit-item{border:1px solid var(--line);background:white;padding:1.2rem;display:grid;gap:.55rem}
+.audit-item header{display:flex;justify-content:space-between;gap:1rem;align-items:center}
+.audit-item time,.audit-item code{font-family:'DM Mono',monospace;font-size:.72rem;color:#5f675f}
+.audit-item p{margin:0;color:#434a44}
+.audit-item code{white-space:pre-wrap;word-break:break-all}
+@media(max-width:900px){.admin-layout{grid-template-columns:1fr}.admin-grid{grid-template-columns:1fr}.session-panel div{flex-direction:column;align-items:flex-start}}

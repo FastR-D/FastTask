@@ -185,6 +185,24 @@ serviceBearer:
 - 设备只能读取绑定用户的必要投影。
 - Panel 只能读取服务 Token Scope 和被代表用户允许的摘要。
 
+### 2.5 后台管理授权
+
+后台管理接口在用户认证之上增加实时角色检查。用户生命周期与会话治理端点：
+
+- `GET|POST /api/v1/admin/users`
+- `GET|PATCH /api/v1/admin/users/{user_id}`
+- `POST /api/v1/admin/users/{user_id}/password`
+- `GET /api/v1/admin/users/{user_id}/sessions`
+- `POST /api/v1/admin/users/{user_id}/session-revocation`
+
+模型 Provider 管理端点：
+
+- `GET|POST /api/v1/admin/model-providers`
+- `PATCH|DELETE /api/v1/admin/model-providers/{provider_id}`
+- `POST /api/v1/admin/model-providers/{provider_id}/activation`
+
+Provider 响应不返回明文 API Key；激活操作使被激活记录成为唯一默认 Provider。最后一名 active admin 不能被降级或禁用。后台操作记录管理审计事件。
+
 ## 3. 错误协议
 
 错误采用 RFC 9457 Problem Details：

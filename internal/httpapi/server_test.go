@@ -30,7 +30,7 @@ type testAPI struct {
 
 func newTestAPI(t *testing.T) testAPI {
 	t.Helper()
-	cfg := config.Config{Listen: "127.0.0.1", Port: 10000, PublicURL: "http://127.0.0.1:10000", DatabasePath: filepath.Join(t.TempDir(), "http.db"), JWTSecret: "http-test-secret-with-enough-characters", PanelJWTSecret: "panel-test-secret-with-enough-characters", TrustedProxies: []string{"127.0.0.1"}, AccessTTL: time.Hour, RefreshTTL: 24 * time.Hour, AdminIdentifier: "admin", AdminPassword: "password-for-tests", AdminName: "Admin", WorkerInterval: time.Millisecond, WebDist: filepath.Join(t.TempDir(), "missing"), Environment: "test"}
+	cfg := config.Config{Listen: "127.0.0.1", Port: 10000, PublicURL: "http://127.0.0.1:10000", DatabasePath: filepath.Join(t.TempDir(), "http.db"), JWTSecret: "http-test-secret-with-enough-characters", PanelJWTSecret: "panel-test-secret-with-enough-characters", ProviderEncryptionKey: "provider-test-secret-with-enough-characters", TrustedProxies: []string{"127.0.0.1"}, AccessTTL: time.Hour, RefreshTTL: 24 * time.Hour, AdminIdentifier: "admin", AdminPassword: "password-for-tests", AdminName: "Admin", WorkerInterval: time.Millisecond, WebDist: filepath.Join(t.TempDir(), "missing"), Environment: "test"}
 	store, err := persistence.Open(cfg.DatabasePath)
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +47,7 @@ func newTestAPI(t *testing.T) testAPI {
 	if err := store.DB.Where("identifier = ?", "admin").First(&user).Error; err != nil {
 		t.Fatal(err)
 	}
-	app := application.New(store)
+	app := application.NewWithSecret(store, cfg.ProviderEncryptionKey)
 	server := New(app, authService, cfg)
 	api := testAPI{server: server, store: store, worker: application.NewWorker(app, time.Millisecond), user: user}
 	login := api.do(t, http.MethodPost, "/api/v1/auth/login", map[string]any{"identifier": "admin", "password": "password-for-tests"}, nil)
@@ -644,6 +644,7 @@ func TestIntegrationHealthRejectsDeceptiveFastReadResponse(t *testing.T) {
 
 func TestIntegrationStatusRequiresAdmin(t *testing.T) {
 	api := newTestAPI(t)
+
 	hash, err := platformauth.HashPassword("member-password")
 	if err != nil {
 		t.Fatal(err)
@@ -671,6 +672,122 @@ func decode(t *testing.T, response *httptest.ResponseRecorder, target any) {
 		t.Fatalf("decode %d %q: %v", response.Code, response.Body.String(), err)
 	}
 }
+func TestAdminPlatformAndModelProviders(t *testing.T) {
+	api := newTestAPI(t)
+	modelStub := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/models" || request.Header.Get("Authorization") == "" {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer modelStub.Close()
+	created := api.do(t, http.MethodPost, "/api/v1/admin/users", map[string]any{"identifier": "researcher", "password": "member-password", "display_name": "Researcher", "role": "member"}, map[string]string{"Idempotency-Key": "admin-user-1"})
+	if created.Code != 201 {
+		t.Fatalf("create user=%d %s", created.Code, created.Body.String())
+	}
+	var member persistence.User
+	decode(t, created, &member)
+
+	memberLogin := api.do(t, http.MethodPost, "/api/v1/auth/login", map[string]any{"identifier": "researcher", "password": "member-password"}, nil)
+	if memberLogin.Code != 200 {
+		t.Fatalf("member login=%d %s", memberLogin.Code, memberLogin.Body.String())
+	}
+	var memberTokens struct {
+		AccessToken string `json:"access_token"`
+	}
+	decode(t, memberLogin, &memberTokens)
+	memberRequest := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users", nil)
+	memberRequest.Header.Set("Authorization", "Bearer "+memberTokens.AccessToken)
+	memberResponse := httptest.NewRecorder()
+	api.server.Engine.ServeHTTP(memberResponse, memberRequest)
+	if memberResponse.Code != 403 {
+		t.Fatalf("member admin access=%d %s", memberResponse.Code, memberResponse.Body.String())
+	}
+	if err := api.store.DB.Model(&persistence.User{}).Where("id = ?", member.ID).Update("status", "disabled").Error; err != nil {
+		t.Fatal(err)
+	}
+	disabledRequest := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	disabledRequest.Header.Set("Authorization", "Bearer "+memberTokens.AccessToken)
+	disabledResponse := httptest.NewRecorder()
+	api.server.Engine.ServeHTTP(disabledResponse, disabledRequest)
+	if disabledResponse.Code != 401 {
+		t.Fatalf("disabled user access=%d %s", disabledResponse.Code, disabledResponse.Body.String())
+	}
+
+	firstProvider := api.do(t, http.MethodPost, "/api/v1/admin/model-providers", map[string]any{"name": "Primary", "base_url": modelStub.URL, "model_name": "primary-model", "api_key": "primary-provider-key", "is_default": true}, map[string]string{"Idempotency-Key": "provider-1"})
+	if firstProvider.Code != 201 {
+		t.Fatalf("create provider=%d %s", firstProvider.Code, firstProvider.Body.String())
+	}
+	var provider persistence.ModelProvider
+	decode(t, firstProvider, &provider)
+	if provider.APIKeyHint == "" || strings.Contains(provider.APIKeyHint, "provider-key") {
+		t.Fatalf("unsafe provider key response=%q", provider.APIKeyHint)
+	}
+	var stored persistence.ModelProvider
+	if err := api.store.DB.First(&stored, "id = ?", provider.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.APIKeyCiphertext == "" || strings.Contains(stored.APIKeyCiphertext, "primary-provider-key") {
+		t.Fatal("provider API key was not encrypted at rest")
+	}
+	runtime, err := api.worker.ActiveProviderRuntime(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime == nil || runtime.Provider.Name() != "openai-compatible/primary-model" {
+		t.Fatalf("active runtime=%v", runtime)
+	}
+
+	second := api.do(t, http.MethodPost, "/api/v1/admin/model-providers", map[string]any{"name": "Secondary", "base_url": modelStub.URL, "model_name": "backup-model", "api_key": "backup-provider-key"}, map[string]string{"Idempotency-Key": "provider-2"})
+	if second.Code != 201 {
+		t.Fatalf("create second=%d %s", second.Code, second.Body.String())
+	}
+	var backup persistence.ModelProvider
+	decode(t, second, &backup)
+	activated := api.do(t, http.MethodPost, "/api/v1/admin/model-providers/"+backup.ID+"/activation", nil, nil)
+	if activated.Code != 200 {
+		t.Fatalf("activate provider=%d %s", activated.Code, activated.Body.String())
+	}
+	var defaults int64
+	if err := api.store.DB.Model(&persistence.ModelProvider{}).Where("is_default = ?", true).Count(&defaults).Error; err != nil {
+		t.Fatal(err)
+	}
+	if defaults != 1 {
+		t.Fatalf("default providers=%d", defaults)
+	}
+	verification := api.do(t, http.MethodPost, "/api/v1/admin/model-providers/"+backup.ID+"/verification", nil, nil)
+	if verification.Code != 200 {
+		t.Fatalf("verify provider=%d %s", verification.Code, verification.Body.String())
+	}
+	var verifyResult struct {
+		Verified bool   `json:"verified"`
+		Provider string `json:"provider"`
+	}
+	decode(t, verification, &verifyResult)
+	if !verifyResult.Verified || verifyResult.Provider != "Secondary" {
+		t.Fatalf("provider verification=%+v", verifyResult)
+	}
+	audit := api.do(t, http.MethodGet, "/api/v1/admin/audit-events?limit=100", nil, nil)
+	if audit.Code != 200 {
+		t.Fatalf("audit=%d %s", audit.Code, audit.Body.String())
+	}
+	var auditResult struct {
+		Items []application.AuditView `json:"items"`
+	}
+	decode(t, audit, &auditResult)
+	if len(auditResult.Items) < 3 {
+		t.Fatalf("audit events=%d", len(auditResult.Items))
+	}
+
+	openapi := api.do(t, http.MethodGet, "/api/v1/openapi.json", nil, nil)
+	for _, path := range []string{"/admin/users", "/admin/users/{user_id}/password", "/admin/model-providers/{provider_id}/activation", "/admin/model-providers/{provider_id}/verification", "/admin/audit-events"} {
+		if !strings.Contains(openapi.Body.String(), path) {
+			t.Fatalf("OpenAPI missing admin contract %s", path)
+		}
+	}
+}
+
 func mustZone(t *testing.T, name string) *time.Location {
 	t.Helper()
 	location, err := time.LoadLocation(name)

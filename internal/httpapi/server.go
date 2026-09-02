@@ -53,11 +53,27 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	engine.Use(requestID(), gin.CustomRecovery(func(c *gin.Context, recovered any) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"title": "Internal Server Error", "status": 500, "detail": "unexpected server error"})
 	}))
-	engine.Use(cors.New(cors.Config{AllowOrigins: []string{cfg.PublicURL}, AllowMethods: []string{"GET", "POST", "PATCH", "PUT", "OPTIONS"}, AllowHeaders: []string{"Authorization", "Content-Type", "If-Match", "If-None-Match", "Idempotency-Key", "X-Device-Token", "X-Service-Token", "X-Request-ID"}, ExposeHeaders: []string{"ETag", "Location", "X-Request-ID"}, MaxAge: 12 * time.Hour}))
+	engine.Use(func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Referrer-Policy", "no-referrer")
+		c.Header("Permissions-Policy", "camera=(), microphone=(self), geolocation=()")
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+		if strings.HasPrefix(c.Request.URL.Path, "/assets/") {
+			c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		} else if !strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.Header("Cache-Control", "no-store")
+		}
+		if cfg.Environment == "production" || strings.HasPrefix(cfg.PublicURL, "https://") {
+			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		c.Next()
+	})
+	engine.Use(cors.New(cors.Config{AllowOrigins: []string{cfg.PublicURL}, AllowMethods: []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"}, AllowHeaders: []string{"Authorization", "Content-Type", "If-Match", "If-None-Match", "Idempotency-Key", "X-Device-Token", "X-Service-Token", "X-Request-ID"}, ExposeHeaders: []string{"ETag", "Location", "X-Request-ID"}, MaxAge: 12 * time.Hour}))
 	engine.GET("/health/live", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
 	engine.GET("/health/ready", func(c *gin.Context) {
 		if err := app.Store.Ready(c.Request.Context()); err != nil {
-			c.JSON(503, gin.H{"status": "not_ready"})
+			c.JSON(503, gin.H{"status": "not_ready", "detail": "database schema is not current"})
 			return
 		}
 		c.JSON(200, gin.H{"status": "ready"})
@@ -98,6 +114,7 @@ func (s *Server) authenticationMiddleware(ctx huma.Context, next func(huma.Conte
 	for _, requirement := range security {
 		if _, ok := requirement["userBearer"]; ok {
 			if authenticated, err := s.auth.Authenticate(authorization); err == nil {
+				ctx = huma.WithContext(ctx, platformauth.WithPrincipal(ctx.Context(), authenticated))
 				ctx = huma.WithValue(ctx, principalContextKey{}, authenticated)
 				next(ctx)
 				return
@@ -171,6 +188,7 @@ func (s *Server) register() {
 	s.registerPanel()
 	s.registerImports()
 	s.registerIntegrationStatus()
+	s.registerAdmin()
 }
 
 func register[I, O any](api huma.API, id, method, path, summary string, security []map[string][]string, handler func(context.Context, *I) (*O, error)) {
@@ -180,6 +198,8 @@ func register[I, O any](api huma.API, id, method, path, summary string, security
 func operationStatus(id string) int {
 	switch id {
 	case "create-goal", "create-task", "create-daily-plan", "add-daily-plan-item", "create-work-session", "create-conversation", "create-device", "create-import":
+		return http.StatusCreated
+	case "create-admin-user", "create-model-provider":
 		return http.StatusCreated
 	case "generate-task-tree", "revise-task-tree", "generate-daily-plan", "generate-support-items", "create-conversation-message", "create-voice-transcription", "retry-agent-job":
 		return http.StatusAccepted
@@ -194,7 +214,7 @@ func (s *Server) registerAuth() {
 	type loginInput struct {
 		Body struct {
 			Identifier string `json:"identifier" minLength:"1"`
-			Password   string `json:"password" minLength:"8"`
+			Password   string `json:"password"`
 		}
 	}
 	type tokenBody struct {
@@ -1660,6 +1680,8 @@ func mapError(err error) error {
 		return huma.Error422UnprocessableEntity(err.Error())
 	case errors.Is(err, application.ErrStaleAgentAttempt):
 		return huma.Error409Conflict("stale agent attempt")
+	case errors.Is(err, application.ErrForbidden):
+		return huma.Error403Forbidden("administrator permission required")
 	default:
 		return huma.Error500InternalServerError("internal server error")
 	}

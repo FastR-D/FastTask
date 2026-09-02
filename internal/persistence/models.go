@@ -21,6 +21,31 @@ type Session struct {
 	ExpiresAt, CreatedAt, UpdatedAt                           time.Time
 }
 
+type AdminAuditEvent struct {
+	ID           string    `json:"id"`
+	ActorUserID  string    `json:"actor_user_id"`
+	TargetUserID *string   `json:"target_user_id,omitempty"`
+	Action       string    `json:"action"`
+	DetailJSON   string    `json:"detail_json"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type ModelProvider struct {
+	ID                 string    `json:"id"`
+	Name               string    `json:"name"`
+	ProviderType       string    `json:"provider_type"`
+	BaseURL            string    `json:"base_url"`
+	ModelName          string    `json:"model_name"`
+	TranscriptionModel string    `json:"transcription_model"`
+	APIKeyCiphertext   string    `json:"-"`
+	APIKeyHint         string    `json:"api_key_hint"`
+	Status             string    `json:"status"`
+	IsDefault          bool      `json:"is_default"`
+	Revision           int       `json:"revision"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
 type Goal struct {
 	ID              string    `json:"id"`
 	UserID          string    `json:"-"`

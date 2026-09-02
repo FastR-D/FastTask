@@ -417,7 +417,7 @@ type Transactor interface {
 
 ### 10.1 抽象
 
-需求明确要求底层 Agent/模型可切换。统一接口示例：
+需求明确要求底层 Agent/模型可切换。当前 OpenAI-compatible Adapter 支持对话、任务树提案和可选音频转写；通用 Runner 目标接口示例：
 
 ```go
 type Runner interface {
@@ -437,6 +437,8 @@ Provider 不负责：
 - 访问 Huma DTO。
 - 直接写 Repository。
 - 保存或输出密钥。
+
+Worker 在执行每个 Job 前解析当前默认 Provider；后台切换无需重启。默认 Provider 来自数据库配置，未配置时回退到 OpenAI-compatible 环境变量，最后回退到确定性本地 Provider。
 
 ### 10.2 Claude Code/Codex 适配
 

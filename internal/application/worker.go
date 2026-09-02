@@ -15,16 +15,26 @@ import (
 )
 
 type Worker struct {
-	app         *App
-	identity    string
-	interval    time.Duration
-	provider    agent.Provider
-	transcriber agent.Transcriber
+	app              *App
+	identity         string
+	interval         time.Duration
+	provider         agent.Provider
+	transcriber      agent.Transcriber
+	providerResolver func(ctx context.Context) (agent.Provider, agent.Transcriber, error)
 }
 
 func (w *Worker) WithTranscriber(transcriber agent.Transcriber) *Worker {
 	w.transcriber = transcriber
 	return w
+}
+
+func (w *Worker) WithProviderResolver(resolver func(ctx context.Context) (agent.Provider, agent.Transcriber, error)) *Worker {
+	w.providerResolver = resolver
+	return w
+}
+
+func (w *Worker) ActiveProviderRuntime(ctx context.Context) (*ProviderRuntimeConfig, error) {
+	return w.app.ActiveProviderRuntime(ctx)
 }
 
 func NewWorker(app *App, interval time.Duration, providers ...agent.Provider) *Worker {
@@ -95,6 +105,19 @@ func (w *Worker) execute(ctx context.Context, job persistence.AgentJob) (any, er
 	if job.CancelRequested {
 		return nil, errors.New("cancelled")
 	}
+	provider, transcriber := w.provider, w.transcriber
+	if w.providerResolver != nil {
+		resolvedProvider, resolvedTranscriber, err := w.providerResolver(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if resolvedProvider != nil {
+			provider = resolvedProvider
+		}
+		if resolvedTranscriber != nil {
+			transcriber = resolvedTranscriber
+		}
+	}
 	switch job.Type {
 	case "task_tree_generation", "task_tree_revision":
 		var goal persistence.Goal
@@ -112,7 +135,7 @@ func (w *Worker) execute(ctx context.Context, job persistence.AgentJob) (any, er
 			{"op": "create", "type": "task", "title": "复盘结果并调整路线", "success_criteria": "记录结果、阻碍和下一步", "minimum_action": "写下当前最大阻碍", "priority": 60, "estimate_minutes": 25},
 		}
 		providerName := "local-deterministic"
-		if w.provider != nil {
+		if provider != nil {
 			var input map[string]any
 			_ = json.Unmarshal([]byte(job.InputJSON), &input)
 			instruction := fmt.Sprint(input["instruction"])
@@ -122,11 +145,11 @@ func (w *Worker) execute(ctx context.Context, job persistence.AgentJob) (any, er
 				tree, _ := json.Marshal(tasks)
 				instruction += "\n现有任务（修订时可使用 update/move/supersede，target_id 必须来自这里）：" + string(tree)
 			}
-			generated, err := w.provider.TaskProposal(ctx, goal.Title, goal.SuccessCriteria, instruction)
+			generated, err := provider.TaskProposal(ctx, goal.Title, goal.SuccessCriteria, instruction)
 			if err != nil {
 				return nil, err
 			}
-			patch, providerName = generated, w.provider.Name()
+			patch, providerName = generated, provider.Name()
 		}
 		return map[string]any{"provider": providerName, "proposal": patch, "assumptions": []string{"结构变更应用前需用户确认"}}, nil
 	case "daily_plan_generation":
@@ -161,24 +184,24 @@ func (w *Worker) execute(ctx context.Context, job persistence.AgentJob) (any, er
 		content := fmt.Sprint(input["content"])
 		reply := "已分析你的输入。建议先执行一个 5-15 分钟的最小行动，再根据结果调整任务树。"
 		providerName := "local-deterministic"
-		if w.provider != nil {
-			generated, err := w.provider.ConversationReply(ctx, content)
+		if provider != nil {
+			generated, err := provider.ConversationReply(ctx, content)
 			if err != nil {
 				return nil, err
 			}
-			reply, providerName = generated, w.provider.Name()
+			reply, providerName = generated, provider.Name()
 		}
 		return map[string]any{"reply": reply, "echo": content, "provider": providerName}, nil
 	case "voice_transcription":
 		var input map[string]any
 		_ = json.Unmarshal([]byte(job.InputJSON), &input)
 		path, name := textValue(input["path"]), textValue(input["filename"])
-		if w.transcriber != nil {
-			transcript, err := w.transcriber.Transcribe(ctx, path)
+		if transcriber != nil {
+			transcript, err := transcriber.Transcribe(ctx, path)
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"transcript": transcript, "provider": w.transcriber.Name()}, nil
+			return map[string]any{"transcript": transcript, "provider": transcriber.Name()}, nil
 		}
 		return map[string]any{"transcript": "[演示转写，未配置 STT] 音频文件：" + name, "provider": "local-demo-no-stt"}, nil
 	case "support_generation":
