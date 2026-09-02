@@ -52,8 +52,8 @@ func TestMigrationsWALAndReopen(t *testing.T) {
 	if err := reopened.DB.Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version).Error; err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("schema version=%d, want 2", version)
+	if version != 3 {
+		t.Fatalf("schema version=%d, want 3", version)
 	}
 }
 
@@ -77,8 +77,8 @@ func TestMigrationUpgradeFromVersionOne(t *testing.T) {
 	if err := store.DB.Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version).Error; err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("schema version=%d, want 2", version)
+	if version != 3 {
+		t.Fatalf("schema version=%d, want 3", version)
 	}
 	if !store.DB.Migrator().HasTable(&ExternalImport{}) {
 		t.Fatal("external_imports table was not created")

@@ -1,8 +1,9 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError, idem, login, logout, request, token } from './api'
 import type { Conversation, Device, Goal, Job, Message, Plan, PlanItem, Proposal, Task, TaskTree, User, WorkSession } from './types'
+import { Admin } from './Admin'
 
-type Tab = 'today' | 'goals' | 'dialogue' | 'devices'
+type Tab = 'today' | 'goals' | 'dialogue' | 'devices' | 'admin'
 
 export function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(token.get()))
@@ -29,11 +30,11 @@ function Login({ onLogin }: { onLogin: () => void }) {
     </section>
     <form className="login-card" onSubmit={submit}>
       <div><p className="eyebrow">WELCOME BACK</p><h2>进入工作台</h2></div>
-      <label>账号<input name="identifier" defaultValue="admin" required /></label>
-      <label>密码<input name="password" type="password" defaultValue="fasttask-admin" required /></label>
+      <label>账号<input name="identifier" autoComplete="username" required /></label>
+      <label>密码<input name="password" type="password" autoComplete="current-password" required /></label>
       {error && <p className="error">{error}</p>}
       <button className="primary" disabled={busy}>{busy ? '正在验证…' : '开始今天'}</button>
-      <small>首次启动默认账号仅用于本地开发，生产部署必须通过环境变量替换。</small>
+      <small>生产环境请使用管理员下发账号，登录状态仅在当前浏览器标签会话中保留。</small>
     </form>
   </main>
 }
@@ -46,7 +47,7 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
   return <div className="app-shell">
     <aside className="rail">
       <div className="brand"><span className="brand-mark">3</span><div><b>FastTask</b><small>research momentum</small></div></div>
-      <nav>{([['today','今日'],['goals','目标树'],['dialogue','对话'],['devices','设备']] as [Tab,string][]).map(([id,label],index)=><button key={id} className={tab===id?'active':''} onClick={()=>setTab(id)}><span>0{index+1}</span>{label}</button>)}</nav>
+      <nav>{navItems(user).map(([id,label],index)=><button key={id} className={tab===id?'active':''} onClick={()=>setTab(id)}><span>0{index+1}</span>{label}</button>)}</nav>
       <div className="profile"><span className="avatar">{user?.display_name?.slice(0,1) || 'F'}</span><div><b>{user?.display_name || '加载中'}</b><small>{user?.timezone}</small></div><button className="text-button" onClick={onLogout}>退出</button></div>
     </aside>
     <main className="canvas">
@@ -55,9 +56,16 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
       {tab==='goals' && <Goals onNotice={setNotice}/>} 
       {tab==='dialogue' && <Dialogue onNotice={setNotice}/>} 
       {tab==='devices' && <Devices onNotice={setNotice}/>} 
+      {tab==='admin' && user?.role==='admin' && <Admin user={user} onNotice={setNotice}/>}
     </main>
-    <nav className="mobile-nav">{([['today','今日'],['goals','目标'],['dialogue','对话'],['devices','设备']] as [Tab,string][]).map(([id,label])=><button key={id} className={tab===id?'active':''} onClick={()=>setTab(id)}>{label}</button>)}</nav>
+    <nav className="mobile-nav">{navItems(user).map(([id,label])=><button key={id} className={tab===id?'active':''} onClick={()=>setTab(id)}>{label}</button>)}</nav>
   </div>
+}
+
+function navItems(user: User | null): [Tab,string][] {
+  const items: [Tab,string][] = [['today','今日'],['goals','目标树'],['dialogue','对话'],['devices','设备']]
+  if (user?.role === 'admin') items.push(['admin','后台'])
+  return items
 }
 
 function Today({ onNotice }: { onNotice: (s:string)=>void }) {

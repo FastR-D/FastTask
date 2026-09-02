@@ -20,10 +20,12 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-//go:embed migrations/*.sql
+//go:embed all:migrations/*.sql
 var embeddedMigrations embed.FS
 
 type Store struct{ DB *gorm.DB }
+
+const ExpectedSchemaVersion = 3
 
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -144,6 +146,13 @@ func Hash(value string) string {
 func IsNotFound(err error) bool { return errors.Is(err, gorm.ErrRecordNotFound) }
 
 func (s *Store) Ready(ctx context.Context) error {
+	var version int
+	if err := s.DB.WithContext(ctx).Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version).Error; err != nil {
+		return err
+	}
+	if version != ExpectedSchemaVersion {
+		return fmt.Errorf("schema version %d, want %d", version, ExpectedSchemaVersion)
+	}
 	var result int
 	return s.DB.WithContext(ctx).Raw("SELECT 1").Scan(&result).Error
 }

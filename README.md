@@ -18,6 +18,7 @@ FastTask 是一个面向研究生和科研人员的长期目标推进系统。�
 - 墨水屏独立只读 Token、ETag 和 `304 Not Modified`。
 - FastResearch Panel 只读摘要接口。
 - FastInsight、FastNews、FastRead、FastWrite 通用外部导入收件箱，支持来源去重、用户审批和任务转换。
+- 统一后台管理平台：管理员用户、活跃会话、OpenAI-compatible 模型 Provider 和后续管理模块入口。
 - 可选 FastRead/FastWrite 健康探测，不影响 FastTask Readiness。
 - Gin + Huma v2，自动生成 OpenAPI 和 API 文档。
 - SQLite WAL、版本化 SQL Migration、一致性备份和恢复验证。
@@ -116,6 +117,8 @@ go run ./cmd/fasttask serve --with-worker --with-scheduler
 | `OPENAI_TRANSCRIPTION_MODEL` | 空 | OpenAI-compatible 音频转写模型；为空时明确使用演示转写 |
 
 LLM 未配置时，Worker 使用确定性本地 Provider，所有手工功能和测试仍可运行。LLM 配置完整时，任务树提案和对话回复使用真实模型；模型输出仍会经过 JSON 和领域校验，且任务树变更必须由用户确认。设置 `OPENAI_TRANSCRIPTION_MODEL` 后，语音作业会把真实音频发送到兼容的 `/audio/transcriptions` 接口；未设置时结果会明确标注为演示转写，不冒充真实识别。
+
+环境变量只是本地启动和兜底配置。管理员可以在后台创建多个 OpenAI-compatible Provider，设置其中一个为默认；Worker 在每个 Agent Job 执行前解析默认配置，切换后无需重启。Provider API Key 使用服务端密钥通过 AES-GCM 加密入库，API 响应只返回掩码。
 
 生产配置示例：
 
@@ -241,6 +244,10 @@ FASTTASK_E2E_URL=http://127.0.0.1:10001 node scripts/e2e.mjs
 ### 设备是独立只读身份
 
 墨水屏 Token 仅在创建或轮换时返回一次，数据库只保存 SHA-256 摘要。设备只能读取当天最多三个核心项，不能调用用户写接口。
+
+### 后台管理有独立授权边界
+
+`/api/v1/admin/*` 只允许数据库中当前状态为 active、role 为 admin 的用户访问。用户禁用、密码重置和会话撤销会立即撤销刷新与访问会话；最后一名活跃管理员不能被降级或禁用。用户变更、Provider 变更和默认模型切换写入 `admin_audit_events`。
 
 ## 数据库和备份
 

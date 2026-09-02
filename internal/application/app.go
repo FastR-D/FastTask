@@ -26,11 +26,21 @@ var (
 	ErrStaleAgentAttempt    = errors.New("stale agent attempt")
 	ErrIdempotencyKeyReuse  = errors.New("idempotency key reused")
 	ErrExternalImportExists = errors.New("external import already exists")
+	ErrForbidden            = errors.New("administrator permission required")
 )
 
-type App struct{ Store *persistence.Store }
+type App struct {
+	Store     *persistence.Store
+	secretKey []byte
+}
 
-func New(store *persistence.Store) *App { return &App{Store: store} }
+func New(store *persistence.Store) *App {
+	return &App{Store: store}
+}
+
+func NewWithSecret(store *persistence.Store, secret string) *App {
+	return &App{Store: store, secretKey: deriveSecretKey(secret)}
+}
 
 func (a *App) CreateGoal(ctx context.Context, userID string, goal *persistence.Goal) error {
 	now := persistence.Now()

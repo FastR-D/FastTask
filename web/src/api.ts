@@ -1,5 +1,6 @@
 const API = '/api/v1'
 let refreshInFlight: Promise<boolean> | null = null
+const REFRESH_KEY = 'fasttask_refresh'
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message) }
@@ -8,7 +9,7 @@ export class ApiError extends Error {
 export const token = {
 	get: () => sessionStorage.getItem('fasttask_access'),
 	set: (value: string) => sessionStorage.setItem('fasttask_access', value),
-	clear: () => { sessionStorage.removeItem('fasttask_access'); localStorage.removeItem('fasttask_refresh') },
+  clear: () => { sessionStorage.removeItem('fasttask_access'); sessionStorage.removeItem(REFRESH_KEY) },
 }
 
 async function execute<T>(path: string, init: RequestInit, retry: boolean): Promise<{ data: T; etag: string | null }> {
@@ -31,13 +32,13 @@ async function execute<T>(path: string, init: RequestInit, retry: boolean): Prom
 }
 
 async function refreshAccess() {
-	const refreshToken = localStorage.getItem('fasttask_refresh')
+	const refreshToken = sessionStorage.getItem(REFRESH_KEY)
 	if (!refreshToken) return false
 	const refreshed = await fetch(`${API}/auth/refresh`, { method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':`browser-${refreshToken.slice(-12)}`}, body:JSON.stringify({refresh_token:refreshToken}) })
 	if (!refreshed.ok) return false
 	const credentials = await refreshed.json()
 	token.set(credentials.access_token)
-	localStorage.setItem('fasttask_refresh', credentials.refresh_token)
+		sessionStorage.setItem(REFRESH_KEY, credentials.refresh_token)
 	return true
 }
 
@@ -48,7 +49,7 @@ export function idem() { return crypto.randomUUID() }
 export async function login(identifier: string, password: string) {
   const { data } = await request<{access_token:string;refresh_token:string;user:unknown}>('/auth/login', { method: 'POST', body: JSON.stringify({ identifier, password }) })
   token.set(data.access_token)
-  localStorage.setItem('fasttask_refresh', data.refresh_token)
+  sessionStorage.setItem(REFRESH_KEY, data.refresh_token)
   return data
 }
 

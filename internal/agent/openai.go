@@ -37,10 +37,34 @@ type OpenAI struct {
 }
 
 func NewOpenAI(cfg config.Config) *OpenAI {
-	return &OpenAI{baseURL: cfg.OpenAIBaseURL, model: cfg.OpenAIModel, apiKey: cfg.OpenAIAPIKey, transcriptionModel: cfg.TranscriptionModel, client: &http.Client{Timeout: 45 * time.Second}}
+	return NewOpenAIValues(cfg.OpenAIBaseURL, cfg.OpenAIModel, cfg.OpenAIAPIKey, cfg.TranscriptionModel)
+}
+
+func NewOpenAIValues(baseURL, model, apiKey, transcriptionModel string) *OpenAI {
+	return &OpenAI{baseURL: strings.TrimRight(baseURL, "/"), model: model, apiKey: apiKey, transcriptionModel: transcriptionModel, client: &http.Client{Timeout: 45 * time.Second}}
 }
 
 func (o *OpenAI) Name() string { return "openai-compatible/" + o.model }
+
+func (o *OpenAI) Verify(ctx context.Context) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/models", nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+o.apiKey)
+	response, err := o.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("provider request: %w", err)
+	}
+	defer response.Body.Close()
+	if _, err := io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10)); err != nil {
+		return err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("provider returned status %d", response.StatusCode)
+	}
+	return nil
+}
 
 func (o *OpenAI) TaskProposal(ctx context.Context, title, criteria, instruction string) ([]map[string]any, error) {
 	prompt := fmt.Sprintf(`你是 FastTask 的科研任务规划器。请为目标生成 2 到 6 个可执行节点。

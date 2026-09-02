@@ -339,8 +339,11 @@ Repository -> HTTP DTO
 - 用户会话、Refresh Token 和服务身份。
 - 墨水屏设备 Token。
 - FastResearch Panel 用户标识映射。
+- 管理员操作审计。
 
 设计决策：即使 MVP 只有一个实验室，也保留 `workspace_id`，避免数据模型永久绑定单租户假设。MVP 只启用一个默认工作空间和 `admin/member` 基础角色，不提供共享目标或复杂团队协作；共享授权属于 P1。
+
+管理员可创建用户、更新档案与角色、重置密码、禁用账号、查看活跃 Session 并批量撤销会话。禁用、重置密码和显式撤销都会使 Session 立即失效；系统保留最后一名 active admin。
 
 ### 7.2 Goal 与 Task Tree
 

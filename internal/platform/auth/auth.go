@@ -164,6 +164,9 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (persistence
 		if err := tx.First(&user, "id = ?", session.UserID).Error; err != nil {
 			return err
 		}
+		if user.Status != "active" {
+			return errors.New("user is disabled")
+		}
 		newRefresh, err := randomToken(32)
 		if err != nil {
 			return err
@@ -220,7 +223,11 @@ func (s *Service) Authenticate(token string) (Principal, error) {
 	if err := s.store.DB.Model(&persistence.Session{}).Where("id = ? AND user_id = ? AND status = 'active' AND expires_at > ?", c.SID, c.Subject, persistence.Now()).Count(&count).Error; err != nil || count != 1 {
 		return Principal{}, errors.New("session revoked")
 	}
-	return Principal{UserID: c.Subject, SessionID: c.SID, Role: c.Role}, nil
+	var user persistence.User
+	if err := s.store.DB.First(&user, "id = ? AND status = 'active'", c.Subject).Error; err != nil {
+		return Principal{}, errors.New("user is disabled")
+	}
+	return Principal{UserID: c.Subject, SessionID: c.SID, Role: user.Role}, nil
 }
 
 func (s *Service) AuthenticatePanel(token string) (Principal, error) {
@@ -308,8 +315,8 @@ func (s *Service) issueAccess(user persistence.User, sessionID string) (string, 
 }
 
 func HashPassword(password string) (string, error) {
-	if len(password) < 8 {
-		return "", errors.New("password must contain at least 8 characters")
+	if len(password) < 12 {
+		return "", errors.New("password must contain at least 12 characters")
 	}
 	salt := make([]byte, 16)
 	if _, err := cryptorand.Read(salt); err != nil {
