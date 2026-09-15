@@ -45,10 +45,11 @@ function UserAdmin({ currentID, onNotice }: { currentID: string; onNotice: (valu
 
   async function createUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const form = new FormData(event.currentTarget)
+    const formElement = event.currentTarget
+    const form = new FormData(formElement)
     try {
       await request('/admin/users', { method: 'POST', headers: { 'Idempotency-Key': idem() }, body: JSON.stringify({ identifier: form.get('identifier'), password: form.get('password'), display_name: form.get('display_name'), timezone: form.get('timezone') || 'Asia/Shanghai', locale: 'zh-CN', role: form.get('role') }) })
-      event.currentTarget.reset(); onNotice('用户已创建'); loadUsers()
+      formElement.reset(); onNotice('用户已创建'); loadUsers()
     } catch (e) { onNotice(errorText(e)) }
   }
   async function patchUser(target: User, body: Record<string, unknown>, message: string) {
@@ -122,10 +123,11 @@ function ProviderAdmin({ onNotice }: { onNotice: (value: string) => void }) {
 
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const form = new FormData(event.currentTarget)
+    const formElement = event.currentTarget
+    const form = new FormData(formElement)
     try {
       await request('/admin/model-providers', { method: 'POST', headers: { 'Idempotency-Key': idem() }, body: JSON.stringify({ name: form.get('name'), base_url: form.get('base_url'), model_name: form.get('model_name'), transcription_model: form.get('transcription_model'), api_key: form.get('api_key'), is_default: providers.length === 0 }) })
-      event.currentTarget.reset(); setApiKey(''); onNotice('Provider 已创建'); load()
+      formElement.reset(); setApiKey(''); onNotice('Provider 已创建'); load()
     } catch (e) { onNotice(errorText(e)) }
   }
   async function activate(provider: ModelProvider) {
