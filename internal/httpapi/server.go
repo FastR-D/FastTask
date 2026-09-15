@@ -568,19 +568,19 @@ func (s *Server) registerTaskTree() {
 			if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.GoalID, userID).First(&goal).Error; err != nil {
 				return nil, mapError(err)
 			}
-			base := 0
+			var base int
+			if err := s.app.Store.DB.WithContext(ctx).Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", goal.ID).Select("COALESCE(MAX(revision),0)").Scan(&base).Error; err != nil {
+				return nil, mapError(err)
+			}
 			if jobType == "task_tree_revision" && input.IfMatch == "" {
 				return nil, mapError(application.ErrPrecondition)
 			}
 			if input.IfMatch != "" {
-				var err error
-				base, err = revisionFromETag(input.IfMatch)
+				expected, err := revisionFromETag(input.IfMatch)
 				if err != nil {
 					return nil, mapError(err)
 				}
-				var current int
-				s.app.Store.DB.Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", goal.ID).Select("COALESCE(MAX(revision),0)").Scan(&current)
-				if current != base {
+				if base != expected {
 					return nil, mapError(application.ErrRevision)
 				}
 			}

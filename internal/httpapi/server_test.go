@@ -255,6 +255,40 @@ func TestAgentConversationVoiceAndOwnership(t *testing.T) {
 	}
 }
 
+func TestGenerationJobSnapshotsCurrentTaskTreeRevision(t *testing.T) {
+	api := newTestAPI(t)
+	goalResponse := api.do(t, http.MethodPost, "/api/v1/goals", map[string]any{"title": "Revision snapshot", "success_criteria": "Keep proposals current"}, map[string]string{"Idempotency-Key": "snapshot-goal"})
+	var goal persistence.Goal
+	decode(t, goalResponse, &goal)
+	createTask := func(key, title string, position int) {
+		response := api.do(t, http.MethodPost, "/api/v1/tasks", map[string]any{"goal_id": goal.ID, "type": "task", "title": title, "success_criteria": "A verifiable result", "minimum_action": "Write the first step", "estimate_minutes": 25, "priority": 70, "position": position}, map[string]string{"Idempotency-Key": key})
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create task status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	createTask("snapshot-task-1", "Initial task", 0)
+
+	jobResponse := api.do(t, http.MethodPost, fmt.Sprintf("/api/v1/goals/%s/task-tree/generation-jobs", goal.ID), map[string]any{"instruction": "Generate a useful plan"}, map[string]string{"Idempotency-Key": "snapshot-job"})
+	if jobResponse.Code != http.StatusAccepted {
+		t.Fatalf("generation job=%d %s", jobResponse.Code, jobResponse.Body.String())
+	}
+	var job persistence.AgentJob
+	decode(t, jobResponse, &job)
+	if job.BaseRevision != 1 {
+		t.Fatalf("job base revision=%d, want 1", job.BaseRevision)
+	}
+
+	createTask("snapshot-task-2", "Concurrent update", 1)
+	if err := api.worker.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	result := api.do(t, http.MethodGet, "/api/v1/agent-jobs/"+job.ID, nil, nil)
+	decode(t, result, &job)
+	if job.Status != "failed" {
+		t.Fatalf("stale generation job status=%q, want failed", job.Status)
+	}
+}
+
 func TestRevisionAndSecondActiveSessionAreRejected(t *testing.T) {
 	api := newTestAPI(t)
 	goalResponse := api.do(t, http.MethodPost, "/api/v1/goals", map[string]any{"title": "Revision", "success_criteria": "checked"}, map[string]string{"Idempotency-Key": "goal-r"})
