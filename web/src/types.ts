@@ -3,7 +3,7 @@ export interface Goal { id: string; title: string; description: string; success_
 export interface Task { id: string; goal_id: string; parent_id?: string; type: string; title: string; description: string; status: string; priority: number; estimate_minutes: number; success_criteria: string; minimum_action: string; revision: number }
 export interface Plan { id: string; local_date: string; timezone: string; status: string; revision: number; current_revision: number }
 export interface PlanItem { id: string; daily_plan_id: string; task_id?: string; kind: string; title: string; commitment: string; minimum_action: string; status: string; target_minutes: number; revision: number }
-export interface Job { id: string; type: string; status: string; output_json?: string; error_code?: string; error_message?: string; revision: number }
+export interface Job { id: string; type: string; status: string; retry_of_job_id?: string; subject_type?: string; subject_id?: string; output_json?: string; error_code?: string; error_message?: string; base_revision: number; attempt_count: number; max_attempts: number; cancel_requested: boolean; run_after: string; created_at: string; updated_at: string; started_at?: string; finished_at?: string; revision: number }
 export interface Device { id: string; name: string; kind: string; status: string; timezone: string; revision: number }
 export interface WorkSession { id: string; task_id: string; daily_plan_item_id?: string; status: string; target_minutes: number; duration_seconds: number; started_at: string; revision: number }
 export interface Conversation { id: string; title: string; status: string; revision: number }
