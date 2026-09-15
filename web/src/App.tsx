@@ -4,7 +4,7 @@ import type { Conversation, Device, Goal, Job, Message, Plan, PlanItem, Proposal
 import { Admin } from './Admin'
 import { GoalMapView, Review } from './Lens'
 
-type Tab = 'today' | 'goals' | 'dialogue' | 'review' | 'devices' | 'admin'
+type Tab = 'today' | 'goals' | 'dialogue' | 'jobs' | 'review' | 'devices' | 'admin'
 
 export function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(token.get()))
@@ -56,6 +56,7 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
       {tab==='today' && <Today onNotice={setNotice}/>} 
       {tab==='goals' && <Goals onNotice={setNotice}/>} 
       {tab==='dialogue' && <Dialogue onNotice={setNotice}/>} 
+      {tab==='jobs' && <JobQueue onNotice={setNotice}/>}
       {tab==='review' && <Review onNotice={setNotice}/>} 
       {tab==='devices' && <Devices onNotice={setNotice}/>} 
       {tab==='admin' && user?.role==='admin' && <Admin user={user} onNotice={setNotice}/>}
@@ -65,7 +66,7 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
 }
 
 function navItems(user: User | null): [Tab,string][] {
-  const items: [Tab,string][] = [['today','今日'],['goals','目标树'],['dialogue','对话'],['review','复盘'],['devices','设备']]
+  const items: [Tab,string][] = [['today','今日'],['goals','目标树'],['dialogue','对话'],['jobs','任务队列'],['review','复盘'],['devices','设备']]
   if (user?.role === 'admin') items.push(['admin','后台'])
   return items
 }
@@ -127,6 +128,36 @@ function Dialogue({ onNotice }: { onNotice:(s:string)=>void }) {
   async function toggleRecord(){if(recording){recorder.current?.stop();setRecording(false);return}try{const stream=await navigator.mediaDevices.getUserMedia({audio:true});const media=new MediaRecorder(stream);chunks.current=[];media.ondataavailable=e=>chunks.current.push(e.data);media.onstop=async()=>{stream.getTracks().forEach(t=>t.stop());const form=new FormData();form.append('audio',new Blob(chunks.current,{type:'audio/webm'}),'voice.webm');try{const {data}=await request<Job>('/voice-transcription-jobs',{method:'POST',headers:{'Idempotency-Key':idem()},body:form});const job=await waitJob(data.id);if(job.output_json){const output=JSON.parse(job.output_json);setText(output.transcript||'')}onNotice('转写完成，请编辑确认后发送')}catch(e){onNotice(errorText(e))}};media.start();recorder.current=media;setRecording(true)}catch{onNotice('浏览器无法访问麦克风，请检查权限') }}
   return <section className="dialogue-page"><header className="page-head compact"><div><p className="eyebrow">CONVERSATION</p><h1>把阻碍说清楚，<br/>再决定<em>要不要修改地图</em>。</h1></div></header><div className="chat-shell"><aside>{conversations.map(c=><button key={c.id} className={current?.id===c.id?'selected':''} onClick={()=>{setCurrent(c);request<{items:Message[]}>(`/conversations/${c.id}/messages`).then(r=>setMessages(r.data.items))}}>{c.title}</button>)}</aside><div className="chat"><div className="messages">{messages.map(m=><div key={m.id} className={`message ${m.role}`}><span>{m.role==='user'?'你':'Agent'}</span><p>{m.content}</p></div>)}{messages.length===0&&<div className="empty-state"><h2>从当前阻碍开始</h2><p>例如：这个实验任务太大，请拆成今天能开始的两步。</p></div>}</div><div className="composer"><textarea value={text} onChange={e=>setText(e.target.value)} placeholder="报告进展、阻碍，或请求调整任务树…"/><button className={recording?'recording':''} onClick={toggleRecord}>{recording?'停止':'语音'}</button><button className="primary" onClick={send}>发送</button></div></div></div></section>
 }
+
+type JobFilter = 'active' | 'queued' | 'running' | 'all' | 'failed' | 'succeeded'
+
+export function JobQueue({ onNotice }: { onNotice:(s:string)=>void }) {
+  const [jobs,setJobs]=useState<Job[]>([]);const [filter,setFilter]=useState<JobFilter>('active');const [loading,setLoading]=useState(true);const [connected,setConnected]=useState(true);const [updatedAt,setUpdatedAt]=useState<Date|null>(null);const [now,setNow]=useState(Date.now());const [mutating,setMutating]=useState('')
+  useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer)},[])
+  useEffect(()=>{let stopped=false;let timer:number|undefined;let controller:AbortController|undefined
+    async function poll(){controller?.abort();controller=new AbortController();try{const {data}=await request<{items:Job[]}>('/agent-jobs',{signal:controller.signal});if(stopped)return;setJobs(data.items);setConnected(true);setUpdatedAt(new Date());setLoading(false)}catch(e){if(stopped||e instanceof DOMException&&e.name==='AbortError')return;setConnected(false);setLoading(false)}finally{if(!stopped)timer=window.setTimeout(poll,2000)}}
+    poll();return()=>{stopped=true;controller?.abort();if(timer)clearTimeout(timer)}
+  },[])
+  async function act(job:Job,action:'cancel'|'retry'){setMutating(job.id);try{const path=action==='cancel'?'cancellation':'retries';await request(`/agent-jobs/${job.id}/${path}`,{method:action==='cancel'?'PUT':'POST',headers:{'If-Match':etag('job',job.id,job.revision),'Idempotency-Key':idem()}});onNotice(action==='cancel'?'已提交取消请求':'已创建重试作业');const {data}=await request<{items:Job[]}>('/agent-jobs');setJobs(data.items);setUpdatedAt(new Date())}catch(e){onNotice(errorText(e))}finally{setMutating('')}}
+  const activeStatuses=new Set(['queued','running']);const counts={active:jobs.filter(j=>activeStatuses.has(j.status)).length,queued:jobs.filter(j=>j.status==='queued').length,running:jobs.filter(j=>j.status==='running').length,failed:jobs.filter(j=>j.status==='failed').length,succeeded:jobs.filter(j=>j.status==='succeeded').length}
+  const visible=jobs.filter(job=>filter==='all'||filter==='active'&&activeStatuses.has(job.status)||job.status===filter).slice(0,50)
+  return <section className="jobs-page"><header className="page-head compact"><div><p className="eyebrow">AGENT JOBS / LIVE</p><h1>每一个后台动作，<br/>都应该<em>看得见进度</em>。</h1></div><div className={`live-indicator ${connected?'online':'offline'}`}><span/><div><b>{connected?'实时连接':'连接中断'}</b><small>{updatedAt?`更新于 ${updatedAt.toLocaleTimeString('zh-CN',{hour12:false})}`:'正在连接队列'}</small></div></div></header>
+    <div className="job-stats"><button className={filter==='active'?'active':''} onClick={()=>setFilter('active')}><span>活跃</span><b>{counts.active}</b></button><button className={filter==='queued'?'active':''} onClick={()=>setFilter('queued')}><span>排队</span><b>{counts.queued}</b></button><button className={filter==='running'?'active':''} onClick={()=>setFilter('running')}><span>运行中</span><b>{counts.running}</b></button><button className={filter==='failed'?'active':''} onClick={()=>setFilter('failed')}><span>失败</span><b>{counts.failed}</b></button><button className={filter==='succeeded'?'active':''} onClick={()=>setFilter('succeeded')}><span>成功</span><b>{counts.succeeded}</b></button><button className={filter==='all'?'active':''} onClick={()=>setFilter('all')}><span>全部</span><b>{jobs.length}</b></button></div>
+    {!connected&&<div className="queue-warning">暂时无法刷新队列，正在保留最后一次成功读取的数据并自动重连。</div>}
+    {loading?<p className="empty">正在连接任务队列…</p>:visible.length===0?<div className="empty-state"><span>✓</span><h2>{filter==='active'?'当前没有活跃作业':'该分类暂时没有作业'}</h2><p>任务拆解、计划生成、对话回复和语音转写会实时出现在这里。</p></div>:<div className="job-list">{visible.map(job=><JobRow key={job.id} job={job} now={now} busy={mutating===job.id} onAction={act}/>)}</div>}
+  </section>
+}
+
+function JobRow({job,now,busy,onAction}:{job:Job;now:number;busy:boolean;onAction:(job:Job,action:'cancel'|'retry')=>void}){
+  const active=job.status==='queued'||job.status==='running';const start=job.started_at?new Date(job.started_at).getTime():new Date(job.created_at).getTime();const end=job.finished_at?new Date(job.finished_at).getTime():now;const elapsed=Math.max(0,Math.floor((end-start)/1000));const retrying=job.status==='queued'&&job.attempt_count>0
+  return <article className={`job-row status-${job.status}`}><div className="job-state"><span className={active?'pulse-job':''}/><b>{retrying?'等待重试':jobStatus(job.status)}</b><small>{formatDuration(elapsed)}</small></div><div className="job-main"><div className="job-title"><h3>{jobType(job.type)}</h3><code>{job.id}</code></div><p>{job.subject_type?`${subjectType(job.subject_type)} · ${shortID(job.subject_id)}`:'系统作业'}{job.base_revision>0?` · 基于版本 ${job.base_revision}`:''}</p><div className="attempt-track"><i style={{width:`${Math.min(100,Math.max(8,(job.attempt_count/Math.max(1,job.max_attempts))*100))}%`}}/><span>尝试 {job.attempt_count}/{job.max_attempts}</span></div>{job.error_message&&<details className="job-error"><summary>{job.error_code||'最近一次错误'}</summary><p>{job.error_message}</p></details>}<small className="job-time">创建 {new Date(job.created_at).toLocaleString()} · 更新 {new Date(job.updated_at).toLocaleString()}</small></div><div className="job-controls">{active&&<button disabled={busy||job.cancel_requested} onClick={()=>onAction(job,'cancel')}>{job.cancel_requested?'取消中':'取消'}</button>}{['failed','cancelled'].includes(job.status)&&<button className="primary" disabled={busy} onClick={()=>onAction(job,'retry')}>{busy?'处理中':'重试'}</button>}</div></article>
+}
+
+function jobStatus(status:string){return ({queued:'排队中',running:'运行中',succeeded:'已成功',failed:'已失败',cancelled:'已取消'} as Record<string,string>)[status]||status}
+function jobType(type:string){return ({task_tree_generation:'生成任务树',task_tree_revision:'修订任务树',daily_plan_generation:'生成每日计划',support_item_generation:'生成辅助任务',conversation:'生成对话回复',voice_transcription:'语音转写'} as Record<string,string>)[type]||type.replaceAll('_',' ')}
+function subjectType(type:string){return ({goal:'目标',conversation:'对话',daily_plan:'每日计划',audio:'音频'} as Record<string,string>)[type]||type}
+function shortID(id?:string){return id?id.length>18?id.slice(0,10)+'…'+id.slice(-6):id:'—'}
+function formatDuration(seconds:number){const minutes=Math.floor(seconds/60);const rest=seconds%60;return minutes?`${minutes}分${rest.toString().padStart(2,'0')}秒`:`${rest}秒`}
 
 function Devices({ onNotice }: { onNotice:(s:string)=>void }) {
   const [devices,setDevices]=useState<Device[]>([]);const [shownToken,setShownToken]=useState('')
