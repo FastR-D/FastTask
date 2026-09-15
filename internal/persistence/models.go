@@ -79,6 +79,21 @@ type Task struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
+type TaskCoord struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"-"`
+	TaskID    string    `json:"task_id"`
+	Lens      string    `json:"lens"`
+	X         int       `json:"x"`
+	Y         int       `json:"y"`
+	Source    string    `json:"source"`
+	Pinned    bool      `json:"pinned"`
+	Rationale string    `json:"rationale"`
+	Revision  int       `json:"revision"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type TaskTreeRevision struct {
 	ID           string    `json:"id"`
 	UserID       string    `json:"-"`

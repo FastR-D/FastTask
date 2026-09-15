@@ -796,3 +796,295 @@ func mustZone(t *testing.T, name string) *time.Location {
 	}
 	return location
 }
+
+func (a testAPI) createGoalAndTask(t *testing.T, key string) (persistence.Goal, persistence.Task) {
+	t.Helper()
+	goalResponse := a.do(t, http.MethodPost, "/api/v1/goals", map[string]any{"title": "透镜目标 " + key, "success_criteria": "可验证结果"}, map[string]string{"Idempotency-Key": "lens-goal-" + key})
+	if goalResponse.Code != http.StatusCreated {
+		t.Fatalf("create goal=%d %s", goalResponse.Code, goalResponse.Body.String())
+	}
+	var goal persistence.Goal
+	decode(t, goalResponse, &goal)
+	taskResponse := a.do(t, http.MethodPost, "/api/v1/tasks", map[string]any{"goal_id": goal.ID, "type": "task", "title": "跑通基线实验", "success_criteria": "得到可复现的基线数字", "minimum_action": "打开实验脚本并运行一次", "estimate_minutes": 50, "priority": 80, "position": 0}, map[string]string{"Idempotency-Key": "lens-task-" + key})
+	if taskResponse.Code != http.StatusCreated {
+		t.Fatalf("create task=%d %s", taskResponse.Code, taskResponse.Body.String())
+	}
+	var task persistence.Task
+	decode(t, taskResponse, &task)
+	return goal, task
+}
+
+func TestLensContract(t *testing.T) {
+	api := newTestAPI(t)
+
+	lenses := api.do(t, http.MethodGet, "/api/v1/lenses", nil, nil)
+	if lenses.Code != http.StatusOK {
+		t.Fatalf("list lenses=%d %s", lenses.Code, lenses.Body.String())
+	}
+	var lensBody struct {
+		Items []struct {
+			ID        string `json:"id"`
+			Title     string `json:"title"`
+			Threshold int    `json:"threshold"`
+			X         struct {
+				Key       string `json:"key"`
+				Label     string `json:"label"`
+				Min       int    `json:"min"`
+				Max       int    `json:"max"`
+				LowLabel  string `json:"low_label"`
+				HighLabel string `json:"high_label"`
+			} `json:"x"`
+			Y struct {
+				Key string `json:"key"`
+				Min int    `json:"min"`
+				Max int    `json:"max"`
+			} `json:"y"`
+			Quadrants []struct {
+				Key    string `json:"key"`
+				Label  string `json:"label"`
+				Advice string `json:"advice"`
+			} `json:"quadrants"`
+		} `json:"items"`
+	}
+	decode(t, lenses, &lensBody)
+	if len(lensBody.Items) != 1 || lensBody.Items[0].ID != "research_risk" {
+		t.Fatalf("lenses = %#v", lensBody.Items)
+	}
+	lens := lensBody.Items[0]
+	if lens.Threshold != 50 || lens.X.Key != "uncertainty" || lens.Y.Key != "contribution" || lens.X.Min != 0 || lens.X.Max != 100 {
+		t.Fatalf("lens definition = %#v", lens)
+	}
+	if lens.Title == "" || lens.X.Label == "" || lens.X.LowLabel == "" || lens.X.HighLabel == "" {
+		t.Fatalf("lens labels must not be empty: %#v", lens)
+	}
+	if len(lens.Quadrants) != 4 {
+		t.Fatalf("quadrants = %#v", lens.Quadrants)
+	}
+	for index, key := range []string{"A", "B", "C", "D"} {
+		if lens.Quadrants[index].Key != key || lens.Quadrants[index].Label == "" || lens.Quadrants[index].Advice == "" {
+			t.Fatalf("quadrant %d = %#v", index, lens.Quadrants[index])
+		}
+	}
+
+	_, task := api.createGoalAndTask(t, "coords")
+	path := "/api/v1/tasks/" + task.ID + "/coords"
+	first := api.do(t, http.MethodPut, path, map[string]any{"x": 70, "y": 85, "rationale": "方法未定，直接决定验收"}, nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first coord write=%d %s", first.Code, first.Body.String())
+	}
+	var coord persistence.TaskCoord
+	decode(t, first, &coord)
+	if coord.Revision != 1 || !coord.Pinned || coord.Source != "user" || coord.X != 70 || coord.Y != 85 || coord.Lens != "research_risk" {
+		t.Fatalf("coord = %#v", coord)
+	}
+	if coord.TaskID != task.ID || coord.UserID != "" {
+		t.Fatalf("coord leaked or lost ownership: %#v", coord)
+	}
+	if first.Header().Get("ETag") != application.StrongETag("coord", coord.ID, coord.Revision) {
+		t.Fatalf("etag = %q", first.Header().Get("ETag"))
+	}
+
+	second := api.do(t, http.MethodPut, path, map[string]any{"x": 10, "y": 20}, nil)
+	if second.Code != http.StatusPreconditionRequired {
+		t.Fatalf("second write without If-Match=%d %s", second.Code, second.Body.String())
+	}
+	stale := api.do(t, http.MethodPut, path, map[string]any{"x": 10, "y": 20}, map[string]string{"If-Match": application.StrongETag("coord", coord.ID, 99)})
+	if stale.Code != http.StatusPreconditionFailed {
+		t.Fatalf("stale If-Match=%d %s", stale.Code, stale.Body.String())
+	}
+	malformed := api.do(t, http.MethodPut, path, map[string]any{"x": 10, "y": 20}, map[string]string{"If-Match": "garbage"})
+	if malformed.Code != http.StatusPreconditionFailed {
+		t.Fatalf("malformed If-Match=%d %s", malformed.Code, malformed.Body.String())
+	}
+	outOfRange := api.do(t, http.MethodPut, path, map[string]any{"x": 101, "y": 20}, map[string]string{"If-Match": application.StrongETag("coord", coord.ID, coord.Revision)})
+	if outOfRange.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("out of range coord=%d %s", outOfRange.Code, outOfRange.Body.String())
+	}
+	negative := api.do(t, http.MethodPut, path, map[string]any{"x": -1, "y": 20}, nil)
+	if negative.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("negative coord=%d %s", negative.Code, negative.Body.String())
+	}
+	unknownLens := api.do(t, http.MethodPut, path, map[string]any{"lens": "custom", "x": 10, "y": 20}, map[string]string{"If-Match": application.StrongETag("coord", coord.ID, coord.Revision)})
+	if unknownLens.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unknown lens=%d %s", unknownLens.Code, unknownLens.Body.String())
+	}
+	updated := api.do(t, http.MethodPut, path, map[string]any{"x": 10, "y": 20}, map[string]string{"If-Match": application.StrongETag("coord", coord.ID, coord.Revision)})
+	if updated.Code != http.StatusOK {
+		t.Fatalf("matching If-Match=%d %s", updated.Code, updated.Body.String())
+	}
+	var moved persistence.TaskCoord
+	decode(t, updated, &moved)
+	if moved.Revision != 2 || moved.X != 10 || moved.Y != 20 || !moved.Pinned {
+		t.Fatalf("updated coord = %#v", moved)
+	}
+
+	missing := api.do(t, http.MethodPut, "/api/v1/tasks/"+persistence.NewID("task")+"/coords", map[string]any{"x": 10, "y": 20}, nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("unknown task coord=%d %s", missing.Code, missing.Body.String())
+	}
+	anonymous := httptest.NewRequest(http.MethodPut, path, strings.NewReader(`{"x":10,"y":20}`))
+	anonymous.Header.Set("Content-Type", "application/json")
+	anonymousResponse := httptest.NewRecorder()
+	api.server.Engine.ServeHTTP(anonymousResponse, anonymous)
+	if anonymousResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous coord write=%d", anonymousResponse.Code)
+	}
+
+	openapi := api.do(t, http.MethodGet, "/api/v1/openapi.json", nil, nil)
+	for _, fragment := range []string{"/tasks/{task_id}/coords", "/lenses", "put-task-coord", "list-lenses"} {
+		if !strings.Contains(openapi.Body.String(), fragment) {
+			t.Fatalf("OpenAPI missing %s", fragment)
+		}
+	}
+}
+
+func TestWeeklyReviewContract(t *testing.T) {
+	api := newTestAPI(t)
+	_, task := api.createGoalAndTask(t, "review")
+	coord := api.do(t, http.MethodPut, "/api/v1/tasks/"+task.ID+"/coords", map[string]any{"x": 80, "y": 90}, nil)
+	if coord.Code != http.StatusOK {
+		t.Fatalf("coord write=%d %s", coord.Code, coord.Body.String())
+	}
+
+	review := api.do(t, http.MethodGet, "/api/v1/reviews/weekly", nil, nil)
+	if review.Code != http.StatusOK {
+		t.Fatalf("weekly review=%d %s", review.Code, review.Body.String())
+	}
+	var body application.WeeklyReview
+	decode(t, review, &body)
+	if body.Week == "" || body.Timezone == "" || body.StartDate == "" || body.EndDate == "" {
+		t.Fatalf("review header = %#v", body)
+	}
+	if len(body.Focus.Quadrants) != 4 {
+		t.Fatalf("quadrants = %#v", body.Focus.Quadrants)
+	}
+	for _, quadrant := range body.Focus.Quadrants {
+		if quadrant.Label == "" {
+			t.Fatalf("quadrant without label: %#v", quadrant)
+		}
+	}
+	if body.Summary.Source != "template" || body.Summary.Rule == "" || body.Summary.Text == "" {
+		t.Fatalf("summary = %#v", body.Summary)
+	}
+	if body.LLMNote != "" {
+		t.Fatalf("llm_note = %q", body.LLMNote)
+	}
+	if !strings.Contains(review.Body.String(), `"llm_note":""`) {
+		t.Fatalf("llm_note must always be present: %s", review.Body.String())
+	}
+
+	invalid := api.do(t, http.MethodGet, "/api/v1/reviews/weekly?week=2026-W99", nil, nil)
+	if invalid.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid week=%d %s", invalid.Code, invalid.Body.String())
+	}
+	explicit := api.do(t, http.MethodGet, "/api/v1/reviews/weekly?week=2026-W37&timezone=Europe/Berlin", nil, nil)
+	if explicit.Code != http.StatusOK {
+		t.Fatalf("explicit week=%d %s", explicit.Code, explicit.Body.String())
+	}
+	var explicitBody application.WeeklyReview
+	decode(t, explicit, &explicitBody)
+	if explicitBody.Week != "2026-W37" || explicitBody.Timezone != "Europe/Berlin" || explicitBody.StartDate != "2026-09-07" || explicitBody.EndDate != "2026-09-13" {
+		t.Fatalf("explicit review = %#v", explicitBody)
+	}
+	previous := api.do(t, http.MethodGet, "/api/v1/reviews/weekly?week=2026-W01", nil, nil)
+	if previous.Code != http.StatusOK {
+		t.Fatalf("previous week=%d %s", previous.Code, previous.Body.String())
+	}
+	var previousBody application.WeeklyReview
+	decode(t, previous, &previousBody)
+	if previousBody.StartDate != "2025-12-29" {
+		t.Fatalf("cross year week start = %s", previousBody.StartDate)
+	}
+
+	openapi := api.do(t, http.MethodGet, "/api/v1/openapi.json", nil, nil)
+	for _, fragment := range []string{"/reviews/weekly", "get-weekly-review"} {
+		if !strings.Contains(openapi.Body.String(), fragment) {
+			t.Fatalf("OpenAPI missing %s", fragment)
+		}
+	}
+}
+
+func TestGoalMapContract(t *testing.T) {
+	api := newTestAPI(t)
+	goal, task := api.createGoalAndTask(t, "map")
+	second := api.do(t, http.MethodPost, "/api/v1/tasks", map[string]any{"goal_id": goal.ID, "type": "action", "title": "记录实验条件", "success_criteria": "写下三条实验条件", "minimum_action": "打开实验记录", "estimate_minutes": 25, "priority": 60, "position": 1}, map[string]string{"Idempotency-Key": "lens-task-map-2"})
+	if second.Code != http.StatusCreated {
+		t.Fatalf("create second task=%d %s", second.Code, second.Body.String())
+	}
+	var unplotted persistence.Task
+	decode(t, second, &unplotted)
+	coord := api.do(t, http.MethodPut, "/api/v1/tasks/"+task.ID+"/coords", map[string]any{"x": 70, "y": 85, "rationale": "方法未定"}, nil)
+	if coord.Code != http.StatusOK {
+		t.Fatalf("coord write=%d %s", coord.Code, coord.Body.String())
+	}
+	var stored persistence.TaskCoord
+	decode(t, coord, &stored)
+
+	response := api.do(t, http.MethodGet, "/api/v1/goals/"+goal.ID+"/map", nil, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("goal map=%d %s", response.Code, response.Body.String())
+	}
+	var body application.GoalMap
+	decode(t, response, &body)
+	if body.GoalID != goal.ID || body.Lens != "research_risk" || body.Threshold != 50 {
+		t.Fatalf("map header = %#v", body)
+	}
+	if len(body.Nodes) != 2 {
+		t.Fatalf("nodes = %#v", body.Nodes)
+	}
+	if body.Unplotted != 1 {
+		t.Fatalf("unplotted = %d", body.Unplotted)
+	}
+	byTask := map[string]application.GoalMapNode{}
+	for _, node := range body.Nodes {
+		byTask[node.TaskID] = node
+	}
+	plotted := byTask[task.ID]
+	if plotted.X != 70 || plotted.Y != 85 || plotted.Quadrant != "A" || plotted.Source != "user" || !plotted.Pinned {
+		t.Fatalf("plotted node = %#v", plotted)
+	}
+	if plotted.CoordID != stored.ID || plotted.CoordRevision != stored.Revision || plotted.Rationale != "方法未定" {
+		t.Fatalf("plotted node coord reference = %#v", plotted)
+	}
+	defaulted := byTask[unplotted.ID]
+	if defaulted.X != 50 || defaulted.Y != 50 || defaulted.Source != "default" || defaulted.CoordID != "" || defaulted.CoordRevision != 0 {
+		t.Fatalf("unplotted node = %#v", defaulted)
+	}
+	if defaulted.FocusMinutes != 0 || defaulted.DaysSinceProgress != 0 {
+		t.Fatalf("unplotted node metrics = %#v", defaulted)
+	}
+
+	invalidLens := api.do(t, http.MethodGet, "/api/v1/goals/"+goal.ID+"/map?lens=unknown", nil, nil)
+	if invalidLens.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unknown lens map=%d %s", invalidLens.Code, invalidLens.Body.String())
+	}
+	explicitLens := api.do(t, http.MethodGet, "/api/v1/goals/"+goal.ID+"/map?lens=research_risk", nil, nil)
+	if explicitLens.Code != http.StatusOK {
+		t.Fatalf("explicit lens map=%d %s", explicitLens.Code, explicitLens.Body.String())
+	}
+
+	now := persistence.Now()
+	other := persistence.User{ID: persistence.NewID("user"), Identifier: "map-other", PasswordHash: "hash", DisplayName: "Other", Timezone: "Asia/Shanghai", Locale: "zh-CN", Role: "member", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := api.store.DB.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	foreign := persistence.Goal{ID: persistence.NewID("goal"), UserID: other.ID, Title: "Private", SuccessCriteria: "hidden", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := api.store.DB.Create(&foreign).Error; err != nil {
+		t.Fatal(err)
+	}
+	hidden := api.do(t, http.MethodGet, "/api/v1/goals/"+foreign.ID+"/map", nil, nil)
+	if hidden.Code != http.StatusNotFound {
+		t.Fatalf("cross-user map=%d %s", hidden.Code, hidden.Body.String())
+	}
+	missing := api.do(t, http.MethodGet, "/api/v1/goals/"+persistence.NewID("goal")+"/map", nil, nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing goal map=%d %s", missing.Code, missing.Body.String())
+	}
+
+	openapi := api.do(t, http.MethodGet, "/api/v1/openapi.json", nil, nil)
+	for _, fragment := range []string{"/goals/{goal_id}/map", "get-goal-map"} {
+		if !strings.Contains(openapi.Body.String(), fragment) {
+			t.Fatalf("OpenAPI missing %s", fragment)
+		}
+	}
+}

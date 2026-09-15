@@ -72,7 +72,7 @@ func (o *OpenAI) TaskProposal(ctx context.Context, title, criteria, instruction 
 验收标准：%s
 用户指令：%s
 只返回 JSON 数组，不要 Markdown。
-创建节点使用 op=create，并包含 client_ref、可选 parent_ref、type（milestone/task/action）、title、success_criteria、minimum_action、priority（0-100）、estimate_minutes（5-1440）。parent_ref 必须引用数组中更早的 client_ref。
+创建节点使用 op=create，并包含 client_ref、可选 parent_ref、type（milestone/task/action）、title、success_criteria、minimum_action、priority（0-100）、estimate_minutes（5-1440）。parent_ref 必须引用数组中更早的 client_ref。可选坐标字段：uncertainty（0-100，0=完全知道怎么做，100=方法未知需要探索）、contribution（0-100，对目标验收标准的直接贡献）、coord_rationale（一句话说明打分依据，不超过 40 字）。坐标字段可以省略，省略时不要填 0。
 修订现有节点可以使用 op=update、op=move 或 op=supersede，并提供 target_id；move 提供 parent_id 或 null。最小行动必须是 5-15 分钟内可以开始且与目标直接相关的动作。`, title, criteria, instruction)
 	content, err := o.complete(ctx, "你只输出合法 JSON，绝不输出代码块或额外解释。", prompt, 1800)
 	if err != nil {

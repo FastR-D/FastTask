@@ -444,6 +444,7 @@ Panel 和其他项目不得直接读取 FastTask SQLite 文件。
 | `task_nodes` | `id`, `goal_id`, `parent_id`, `type`, `status`, `minimum_action`, `revision` | 任务树节点 |
 | `task_dependencies` | `task_id`, `depends_on_task_id` | 强依赖 |
 | `task_tree_revisions` | `goal_id`, `revision`, `reason`, `source`, `snapshot` | 任务树版本 |
+| `task_coords` | `task_id`, `lens`, `x`, `y`, `source`, `pinned`, `rationale`, `revision` | 任务在预设透镜下的二维坐标，来自 Agent 提案或用户覆盖，见 `doc/lens.md` |
 | `execution_advices` | `task_id`, `first_step`, `steps`, `fallback_action`, `version` | 执行建议 |
 | `daily_plans` | `user_id`, `local_date`, `timezone`, `status`, `algorithm_version`, `current_revision` | 每日计划当前聚合 |
 | `daily_plan_revisions` | `daily_plan_id`, `revision`, `input_snapshot`, `input_hash`, `plan_snapshot`, `reason` | 初始及同日重规划的完整版本 |
@@ -465,6 +466,7 @@ erDiagram
     GOAL ||--o{ TASK_NODE : contains
     TASK_NODE ||--o{ TASK_NODE : parent_of
     TASK_NODE ||--o{ EXECUTION_ADVICE : has
+    TASK_NODE ||--o| TASK_COORD : plotted_as
     USER ||--o{ DAILY_PLAN : has
     DAILY_PLAN ||--o{ DAILY_PLAN_ITEM : contains
     TASK_NODE ||--o{ DAILY_PLAN_ITEM : scheduled_as
@@ -486,6 +488,8 @@ erDiagram
 - 已完成任务不能被物理删除，只能归档或由新版本替代。
 - 历史计划项保存生成时的任务标题、承诺和最低行动快照。
 - 同一用户默认最多一个活动 Work Session。
+- `UNIQUE(task_id, lens)`：一个任务在一个透镜下只有一个坐标。用户覆盖后 `pinned=1`，Agent 提案不得再改写；坐标缺失或越界不影响提案应用。
+- 坐标是旁路数据：不参与每日候选过滤与确定性排序，不修改 `tasks` 表结构，不影响墨水屏 Poll 与 Panel 摘要契约。
 - Token 只保存哈希，明文仅创建时返回一次。
 
 ## 9. 关键业务链路

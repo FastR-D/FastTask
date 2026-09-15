@@ -180,6 +180,7 @@ func (s *Server) register() {
 	s.registerGoals()
 	s.registerTasks()
 	s.registerTaskTree()
+	s.registerLens()
 	s.registerPlans()
 	s.registerSessions()
 	s.registerConversations()
@@ -1676,7 +1677,8 @@ func mapError(err error) error {
 		return huma.NewError(http.StatusPreconditionRequired, "If-Match is required")
 	case errors.Is(err, application.ErrConflict), errors.Is(err, application.ErrActiveSession), errors.Is(err, application.ErrExternalImportExists), errors.Is(err, domain.ErrCoreLimit), errors.Is(err, domain.ErrSupportBeforeCoreDone):
 		return huma.Error409Conflict(err.Error())
-	case errors.Is(err, application.ErrValidation), errors.Is(err, domain.ErrCycle):
+	case errors.Is(err, application.ErrValidation), errors.Is(err, domain.ErrCycle),
+		errors.Is(err, domain.ErrCoord), errors.Is(err, domain.ErrLens), errors.Is(err, domain.ErrValidation):
 		return huma.Error422UnprocessableEntity(err.Error())
 	case errors.Is(err, application.ErrStaleAgentAttempt):
 		return huma.Error409Conflict("stale agent attempt")
