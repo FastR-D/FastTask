@@ -130,9 +130,9 @@ func (w *Worker) execute(ctx context.Context, job persistence.AgentJob) (any, er
 			return nil, ErrRevision
 		}
 		patch := []map[string]any{
-			{"op": "create", "type": "milestone", "title": "明确验收路径", "success_criteria": "形成可验证的阶段成果", "minimum_action": "列出三个可验证成果", "priority": 90, "estimate_minutes": 50},
-			{"op": "create", "type": "task", "title": "完成第一个可验证推进", "success_criteria": goal.SuccessCriteria, "minimum_action": "打开工作材料并写下第一步", "priority": 80, "estimate_minutes": 50},
-			{"op": "create", "type": "task", "title": "复盘结果并调整路线", "success_criteria": "记录结果、阻碍和下一步", "minimum_action": "写下当前最大阻碍", "priority": 60, "estimate_minutes": 25},
+			{"op": "create", "type": "milestone", "title": "明确验收路径", "success_criteria": "形成可验证的阶段成果", "minimum_action": "列出三个可验证成果", "priority": 90, "estimate_minutes": 50, "uncertainty": 40, "contribution": 90},
+			{"op": "create", "type": "task", "title": "完成第一个可验证推进", "success_criteria": goal.SuccessCriteria, "minimum_action": "打开工作材料并写下第一步", "priority": 80, "estimate_minutes": 50, "uncertainty": 70, "contribution": 85},
+			{"op": "create", "type": "task", "title": "复盘结果并调整路线", "success_criteria": "记录结果、阻碍和下一步", "minimum_action": "写下当前最大阻碍", "priority": 60, "estimate_minutes": 25, "uncertainty": 30, "contribution": 60},
 		}
 		providerName := "local-deterministic"
 		if provider != nil {

@@ -2,8 +2,9 @@ import { FormEvent, useEffect, useRef, useState } from 'react'
 import { ApiError, idem, login, logout, request, token } from './api'
 import type { Conversation, Device, Goal, Job, Message, Plan, PlanItem, Proposal, Task, TaskTree, User, WorkSession } from './types'
 import { Admin } from './Admin'
+import { GoalMapView, Review } from './Lens'
 
-type Tab = 'today' | 'goals' | 'dialogue' | 'devices' | 'admin'
+type Tab = 'today' | 'goals' | 'dialogue' | 'review' | 'devices' | 'admin'
 
 export function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(token.get()))
@@ -55,6 +56,7 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
       {tab==='today' && <Today onNotice={setNotice}/>} 
       {tab==='goals' && <Goals onNotice={setNotice}/>} 
       {tab==='dialogue' && <Dialogue onNotice={setNotice}/>} 
+      {tab==='review' && <Review onNotice={setNotice}/>} 
       {tab==='devices' && <Devices onNotice={setNotice}/>} 
       {tab==='admin' && user?.role==='admin' && <Admin user={user} onNotice={setNotice}/>}
     </main>
@@ -63,7 +65,7 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
 }
 
 function navItems(user: User | null): [Tab,string][] {
-  const items: [Tab,string][] = [['today','今日'],['goals','目标树'],['dialogue','对话'],['devices','设备']]
+  const items: [Tab,string][] = [['today','今日'],['goals','目标树'],['dialogue','对话'],['review','复盘'],['devices','设备']]
   if (user?.role === 'admin') items.push(['admin','后台'])
   return items
 }
@@ -100,7 +102,7 @@ function Today({ onNotice }: { onNotice: (s:string)=>void }) {
 }
 
 function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
-	const [goals,setGoals]=useState<Goal[]>([]);const [tasks,setTasks]=useState<Task[]>([]);const [selected,setSelected]=useState<Goal|null>(null);const [showCreate,setShowCreate]=useState(false);const [tree,setTree]=useState<TaskTree|null>(null);const [treeETag,setTreeETag]=useState('');const [revisionInstruction,setRevisionInstruction]=useState('')
+	const [goals,setGoals]=useState<Goal[]>([]);const [tasks,setTasks]=useState<Task[]>([]);const [selected,setSelected]=useState<Goal|null>(null);const [showCreate,setShowCreate]=useState(false);const [tree,setTree]=useState<TaskTree|null>(null);const [treeETag,setTreeETag]=useState('');const [revisionInstruction,setRevisionInstruction]=useState('');const [view,setView]=useState<'list'|'map'>('list');const [focusTask,setFocusTask]=useState('')
 	async function load(goal=selected){const g=await request<{items:Goal[]}>('/goals');setGoals(g.data.items);const t=await request<{items:Task[]}>('/tasks');setTasks(t.data.items);const active=goal||g.data.items[0]||null;if(!selected&&active)setSelected(active);if(active){const response=await request<TaskTree>(`/goals/${active.id}/task-tree`);setTree(response.data);setTreeETag(response.etag||etag('tree',active.id,response.data.revision))}}
   useEffect(()=>{load().catch(e=>onNotice(errorText(e)))},[])
   async function createGoal(event:FormEvent<HTMLFormElement>){event.preventDefault();const form=new FormData(event.currentTarget);try{await request('/goals',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({title:form.get('title'),description:form.get('description'),success_criteria:form.get('criteria'),target_date:form.get('target')||null})});setShowCreate(false);onNotice('目标已创建');load()}catch(e){onNotice(errorText(e))}}
@@ -109,8 +111,8 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
 	async function decide(proposal:Proposal,apply:boolean){if(!selected)return;try{if(apply){await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/application`,{method:'POST',headers:{'If-Match':treeETag,'Idempotency-Key':idem()}});onNotice('提案已确认并应用')}else{await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/rejection`,{method:'PUT',headers:{'If-Match':etag('proposal',proposal.id,proposal.revision)}});onNotice('提案已拒绝')}await load(selected)}catch(e){onNotice(errorText(e))}}
   return <section><header className="page-head compact"><div><p className="eyebrow">GOAL MAP</p><h1>目标不是终点，<br/>它是一张<em>可修正的地图</em>。</h1></div><button className="primary" onClick={()=>setShowCreate(v=>!v)}>新建目标</button></header>
     {showCreate&&<form className="inline-form" onSubmit={createGoal}><input name="title" placeholder="目标标题" required/><input name="criteria" placeholder="什么状态算真正完成？" required/><input name="target" type="date"/><textarea name="description" placeholder="背景与约束"/><button className="primary">创建</button></form>}
-		<div className="goal-layout"><div className="goal-list">{goals.map(goal=><button key={goal.id} className={selected?.id===goal.id?'selected':''} onClick={()=>{setSelected(goal);load(goal)}}><span className={`status ${goal.status}`}/><div><b>{goal.title}</b><small>{goal.success_criteria}</small></div></button>)}{goals.length===0&&<p className="empty">先建立第一个长期目标。</p>}</div>
-		<div className="tree-panel">{selected?<><div className="tree-head"><div><p className="meta">{selected.status.toUpperCase()} · TREE REV {tree?.revision??0}</p><h2>{selected.title}</h2><p>{selected.success_criteria}</p></div><button onClick={()=>askAgent(false)}>让 Agent 拆解</button></div>{tree?.proposals.map(proposal=><ProposalCard key={proposal.id} proposal={proposal} onApply={()=>decide(proposal,true)} onReject={()=>decide(proposal,false)}/>)}<div className="revision-request"><input value={revisionInstruction} onChange={e=>setRevisionInstruction(e.target.value)} placeholder="例如：把实验任务拆小，并移到当前里程碑下"/><button onClick={()=>askAgent(true)} disabled={!revisionInstruction.trim()}>生成修订提案</button></div><div className="task-stack">{tasks.filter(t=>t.goal_id===selected.id).map(task=><article key={task.id}><span className="task-type">{task.type}</span><div><h3>{task.title}</h3><p>{task.success_criteria}</p><small>下一步 · {task.minimum_action}</small></div><strong>{task.priority}</strong></article>)}</div><form className="task-create" onSubmit={addTask}><input name="title" placeholder="手工添加一个真实任务" required/><input name="criteria" placeholder="完成标准" required/><input name="minimum" placeholder="5-15 分钟最小行动" required/><button>添加</button></form></>:<div className="empty">选择一个目标查看任务树。</div>}</div></div>
+		<div className="goal-layout"><div className="goal-list">{goals.map(goal=><button key={goal.id} className={selected?.id===goal.id?'selected':''} onClick={()=>{setSelected(goal);setView('list');setFocusTask('');load(goal)}}><span className={`status ${goal.status}`}/><div><b>{goal.title}</b><small>{goal.success_criteria}</small></div></button>)}{goals.length===0&&<p className="empty">先建立第一个长期目标。</p>}</div>
+		<div className="tree-panel">{selected?<><div className="tree-head"><div><p className="meta">{selected.status.toUpperCase()} · TREE REV {tree?.revision??0}</p><h2>{selected.title}</h2><p>{selected.success_criteria}</p></div><button onClick={()=>askAgent(false)}>让 Agent 拆解</button></div><div className="view-switch"><button className={view==='list'?'active':''} onClick={()=>setView('list')}>列表</button><button className={view==='map'?'active':''} onClick={()=>setView('map')}>地图</button></div>{tree?.proposals.map(proposal=><ProposalCard key={proposal.id} proposal={proposal} onApply={()=>decide(proposal,true)} onReject={()=>decide(proposal,false)}/>)}<div className="revision-request"><input value={revisionInstruction} onChange={e=>setRevisionInstruction(e.target.value)} placeholder="例如：把实验任务拆小，并移到当前里程碑下"/><button onClick={()=>askAgent(true)} disabled={!revisionInstruction.trim()}>生成修订提案</button></div>{view==='map'?<GoalMapView goal={selected} onNotice={onNotice} onOpenTask={id=>{setFocusTask(id);setView('list')}}/>:<div className="task-stack">{tasks.filter(t=>t.goal_id===selected.id).map(task=><article key={task.id} className={focusTask===task.id?'focused':''}><span className="task-type">{task.type}</span><div><h3>{task.title}</h3><p>{task.success_criteria}</p><small>下一步 · {task.minimum_action}</small></div><strong>{task.priority}</strong></article>)}</div>}<form className="task-create" onSubmit={addTask}><input name="title" placeholder="手工添加一个真实任务" required/><input name="criteria" placeholder="完成标准" required/><input name="minimum" placeholder="5-15 分钟最小行动" required/><button>添加</button></form></>:<div className="empty">选择一个目标查看任务树。</div>}</div></div>
   </section>
 }
 

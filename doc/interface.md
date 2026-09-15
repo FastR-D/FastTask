@@ -988,7 +988,230 @@ FastTask 已实现来源无关的外部导入收件箱。它不直接调用或�
 
 FastRead/FastWrite 健康探测由服务端环境变量配置，不接受请求参数中的 URL。未配置时返回 `configured=false`；不可用不会使 `/health/ready` 失败。FastInsight/FastNews 当前返回 CLI Runner 未配置。
 
-## 17. 接口注册与测试要求
+## 17. 决策透镜与周复盘
+
+设计判断见 `doc/lens.md`，实现规格见 `doc/lens-impl.md`。坐标是旁路能力：不进入每日计划的候选过滤与确定性排序，不改变墨水屏 Poll 与 Panel 摘要契约，不修改 `tasks` 表结构。
+
+| 方法 | 路径 | OperationID | 认证 | 状态 | 幂等 | 说明 |
+|---|---|---|---|---|---|---|
+| GET | `/lenses` | `list-lenses` | 用户 Bearer | 200 | 只读 | 返回预设透镜定义，前端据此渲染轴与四区文案，不得硬编码 |
+| PUT | `/tasks/{task_id}/coords` | `put-task-coord` | 用户 Bearer，更新需 `If-Match` | 200 | 是，`(task_id, lens)` 上的 upsert | 用户覆盖坐标，写入后 `source=user`、`pinned=true` |
+| GET | `/reviews/weekly` | `get-weekly-review` | 用户 Bearer | 200 | 只读 | 周复盘，实时聚合不落库，不同步调用 LLM |
+| GET | `/goals/{goal_id}/map` | `get-goal-map` | 用户 Bearer | 200 | 只读 | 单个目标的叶子任务地图数据 |
+
+### 17.1 透镜定义
+
+`GET /lenses` 返回：
+
+```json
+{
+  "items": [
+    {
+      "id": "research_risk",
+      "title": "科研风险透镜",
+      "threshold": 50,
+      "x": {
+        "key": "uncertainty",
+        "label": "不确定性",
+        "min": 0,
+        "max": 100,
+        "low_label": "知道怎么做",
+        "high_label": "方法未知"
+      },
+      "y": {
+        "key": "contribution",
+        "label": "贡献度",
+        "min": 0,
+        "max": 100,
+        "low_label": "间接",
+        "high_label": "直接决定验收"
+      },
+      "quadrants": [
+        { "key": "A", "label": "关键风险区", "advice": "尽早验证，拖延成本最高" },
+        { "key": "B", "label": "主推进区", "advice": "稳定产出" },
+        { "key": "C", "label": "时间黑洞", "advice": "降级、拆小或砍掉" },
+        { "key": "D", "label": "消耗区", "advice": "必要，但不应占主要时间" }
+      ]
+    }
+  ]
+}
+```
+
+规则：
+
+- v1 只有 `research_risk` 一个透镜；`lens` 字段为后续扩展预留。
+- 分区边界固定 50/50，不可配置；边界值 50 归入高侧（`>= 50` 为高）。
+- 分区只用于复盘归类与地图着色，不进入每日计划排序。
+
+### 17.2 坐标写入
+
+请求：
+
+```http
+PUT /api/v1/tasks/task_01J.../coords HTTP/1.1
+If-Match: "coord_01J..._rev_1"
+
+{
+  "lens": "research_risk",
+  "x": 70,
+  "y": 85,
+  "rationale": "方法未定，直接决定验收"
+}
+```
+
+成功返回 `200`，响应体是坐标资源，并返回新 ETag：
+
+```http
+HTTP/1.1 200 OK
+ETag: "coord_01J..._rev_2"
+
+{
+  "id": "coord_01J...",
+  "task_id": "task_01J...",
+  "lens": "research_risk",
+  "x": 70,
+  "y": 85,
+  "source": "user",
+  "pinned": true,
+  "rationale": "方法未定，直接决定验收",
+  "revision": 2,
+  "created_at": "2026-09-07T02:11:00Z",
+  "updated_at": "2026-09-09T08:40:00Z"
+}
+```
+
+状态码与 Revision 规则：
+
+| 情况 | 状态码 |
+|---|---|
+| 该 `(task_id, lens)` 尚无坐标且未提供 `If-Match` | `200`，创建坐标，`revision = 1` |
+| 已存在坐标且未提供 `If-Match` | `428 Precondition Required` |
+| `If-Match` 与当前 `revision` 不一致或格式非法 | `412 Precondition Failed` |
+| 提供了 `If-Match` 但坐标不存在 | `404 Not Found` |
+| 任务不存在或不属于当前用户 | `404 Not Found` |
+| `x`/`y` 越界（不在 0-100）或 `lens` 未知 | `422 Unprocessable Entity` |
+
+其他规则：
+
+- `lens` 缺省为 `research_risk`；`rationale` 最长 120 字节，超长截断。
+- 用户写入一律 `source=user`、`pinned=true`；每次成功写入 `revision + 1`。
+- `pinned=true` 的坐标不会被后续 Agent 提案覆盖；Agent 的坐标只记录在提案中供用户查看。
+- Agent 坐标随任务树提案一起落库，共享同一次用户确认，不额外增加确认步骤。
+- Agent 提案中坐标字段缺失或越界不影响提案应用：两个字段都缺失时不写坐标行，任一字段缺失或越界时该值回落中心点 50。
+- `user_id` 不出现在任何响应体中。
+
+### 17.3 周复盘
+
+```http
+GET /api/v1/reviews/weekly?week=2026-W37&timezone=Asia/Shanghai HTTP/1.1
+```
+
+- `week`：ISO 周标识 `2026-W37`，缺省为当前周；格式非法或周号超出该 ISO 年实际周数返回 `422`。
+- `timezone`：可选，解析顺序为 请求参数 → `users.timezone` → `Asia/Shanghai`；无效时区回落 `Asia/Shanghai`，不报错。
+
+```json
+{
+  "week": "2026-W37",
+  "timezone": "Asia/Shanghai",
+  "start_date": "2026-09-07",
+  "end_date": "2026-09-13",
+  "focus": {
+    "total_minutes": 672,
+    "unplotted_minutes": 30,
+    "quadrants": [
+      { "key": "A", "label": "关键风险区", "minutes": 95, "share": 0.141, "previous_minutes": 135, "delta_minutes": -40 },
+      { "key": "B", "label": "主推进区", "minutes": 180, "share": 0.268, "previous_minutes": 120, "delta_minutes": 60 },
+      { "key": "C", "label": "时间黑洞", "minutes": 40, "share": 0.06, "previous_minutes": 40, "delta_minutes": 0 },
+      { "key": "D", "label": "消耗区", "minutes": 357, "share": 0.531, "previous_minutes": 300, "delta_minutes": 57 }
+    ]
+  },
+  "stalled": [
+    {
+      "task_id": "task_01J...",
+      "title": "跑通基线实验",
+      "goal_id": "goal_01J...",
+      "quadrant": "A",
+      "days_since_progress": 19
+    }
+  ],
+  "evidence": {
+    "result": 3,
+    "step": 5,
+    "time": 2,
+    "minimum_action": 8,
+    "total": 18,
+    "minimum_action_share": 0.444
+  },
+  "summary": {
+    "source": "template",
+    "rule": "stalled_risk",
+    "text": "你标为关键风险的「跑通基线实验」已 19 天没有实质推进。"
+  },
+  "llm_note": ""
+}
+```
+
+口径与规则：
+
+- 有效专注分钟 = `SUM(work_sessions.duration_seconds) / 60`（整除，不四舍五入），仅统计 `status IN ('completed','stopped')` 且 `duration_seconds > 0`、`ended_at` 落在周窗口内的 Session；`invalidated` 一律排除。
+- 实质推进只认 `progress_events.type IN ('result','step')`；`time` 与 `minimum_action` 不算实质推进。
+- 无坐标行的任务视为未标注，其分钟只进 `unplotted_minutes`，不摊入四区。
+- `share` 与 `minimum_action_share` 是 0-1 浮点，保留三位小数，分母为 0 时取 0，不出现 NaN。
+- `quadrants` 恒定输出 A、B、C、D 四项，零值也出现，前端不做补齐。
+- `stalled` 取 A 区、任务状态不属于 `completed`/`cancelled`/`superseded`、距上次实质推进 ≥ 14 天的任务，按天数倒序，最多 5 条；无实质推进记录时以 `tasks.created_at` 为起点，天数按用户时区的本地日期相减。
+- 证据构成统计本周 `kind='core'` 且 `status='satisfied'` 的当日计划项，按 `daily_plans.local_date` 字符串比较落在周一到周日之间。
+- `summary.source` 当前恒为 `template`，`rule` 取值 `stalled_risk` / `drain_dominant` / `minimum_action_heavy` / `risk_improving` / `neutral` / `empty`，按该顺序命中第一条；总结句为陈述与建议口吻，不评分、不排名。
+- `llm_note` 恒为空字符串；LLM 润色作为后续 `weekly_review_note` 作业异步交付，不在只读接口中同步调用模型。
+- 零数据周返回合法空结果，不报错、不编造。
+- 该接口只读，不写库、不需要 `Idempotency-Key`、不返回 ETag。
+
+### 17.4 目标地图
+
+```http
+GET /api/v1/goals/goal_01J.../map?lens=research_risk HTTP/1.1
+```
+
+```json
+{
+  "goal_id": "goal_01J...",
+  "lens": "research_risk",
+  "threshold": 50,
+  "target_date": "2026-12-31",
+  "unplotted": 1,
+  "nodes": [
+    {
+      "task_id": "task_01J...",
+      "title": "跑通基线实验",
+      "type": "task",
+      "status": "ready",
+      "revision": 3,
+      "x": 70,
+      "y": 85,
+      "quadrant": "A",
+      "source": "agent",
+      "pinned": false,
+      "rationale": "方法未定，直接决定验收",
+      "coord_id": "coord_01J...",
+      "coord_revision": 1,
+      "focus_minutes": 125,
+      "days_since_progress": 19
+    }
+  ]
+}
+```
+
+规则：
+
+- 节点集合是该目标的叶子任务：`type` 为 `task` 或 `action` 且不是任何其他任务的 `parent_id`，状态排除 `cancelled` 与 `superseded`。
+- 一次只渲染一个目标，不提供跨目标全量地图。
+- 无坐标的任务同样返回：`x`/`y` 为 50、`source` 为 `default`、`coord_id` 为空字符串、`coord_revision` 为 0，并计入 `unplotted`。
+- `focus_minutes` 与复盘同口径，但为全时段累计，不限本周。
+- `coord_revision` 供前端拖拽后拼 `If-Match`；`coord_id` 为空时首次写入不带 `If-Match`。
+- `target_date` 为空时返回空字符串。
+- `lens` 未知返回 `422`；目标不存在或不属于当前用户返回 `404`。
+- 地图是目标详情页下的可选视图，默认视图仍是树形列表；不打开地图不影响任何既有功能。
+
+## 18. 接口注册与测试要求
 
 每个 Huma Operation 必须定义：
 
@@ -1009,7 +1232,7 @@ CI 必须：
 
 所有使用 `Idempotency-Key` 的业务写操作必须在同一个数据库事务中提交业务结果、幂等请求摘要和可重放响应快照。不得先提交业务数据再补写幂等记录。
 
-## 18. 待确认接口项
+## 19. 待确认接口项
 
 - Panel 单点登录采用 JWT、一次性 Ticket 还是可信反向代理身份。
 - 用户账号由 FastTask 管理还是 FastResearch 统一管理。

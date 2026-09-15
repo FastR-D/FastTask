@@ -1054,6 +1054,11 @@ func (a *App) ApplyProposal(ctx context.Context, userID string, proposal *persis
 					return err
 				}
 				byID[task.ID] = task
+				if coord, ok := coordFromPatch(patch); ok {
+					if err := createAgentCoord(tx, userID, task.ID, coord, now); err != nil {
+						return err
+					}
+				}
 				if ref := textValue(patch["client_ref"]); ref != "" {
 					refs[ref] = task.ID
 				}
@@ -1117,6 +1122,13 @@ func (a *App) ApplyProposal(ctx context.Context, userID string, proposal *persis
 				}
 				if result.RowsAffected != 1 {
 					return ErrRevision
+				}
+				if op == "update" {
+					if coord, ok := coordFromPatch(patch); ok {
+						if err := updateAgentCoord(tx, userID, targetID, coord, now); err != nil {
+							return err
+						}
+					}
 				}
 			default:
 				return ErrValidation

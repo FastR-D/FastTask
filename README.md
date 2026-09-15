@@ -17,6 +17,7 @@ FastTask 是一个面向研究生和科研人员的长期目标推进系统。�
 - 持久化 Agent Job、Attempt、Lease、Fencing Token、重试和取消。
 - 墨水屏独立只读 Token、ETag 和 `304 Not Modified`。
 - FastResearch Panel 只读摘要接口。
+- 任务坐标透镜、周复盘与可选的目标地图。
 - FastInsight、FastNews、FastRead、FastWrite 通用外部导入收件箱，支持来源去重、用户审批和任务转换。
 - 统一后台管理平台：管理员用户、活跃会话、OpenAI-compatible 模型 Provider 和后续管理模块入口。
 - 可选 FastRead/FastWrite 健康探测，不影响 FastTask Readiness。
@@ -189,6 +190,13 @@ go vet ./...
 - 真实音频内容传给 STT Adapter，并在作业完成后清理临时文件。
 - 登录、目标、任务、计划、对话、语音、设备和 Panel 的 HTTP 闭环。
 - OpenAPI 路径和 Security Scheme。
+- 坐标取值域、四区边界稳定性和未知透镜拒绝。
+- 坐标首次写入创建、缺失或过期 `If-Match` 分别返回 `428` 与 `412`、跨用户 `404`、越界 `422`。
+- Agent 提案落坐标、坐标缺失或越界时提案仍成功、`pinned` 坐标不被 Agent 覆盖。
+- ISO 周窗口跨年边界、非法周号拒绝、总结句优先级和空周合法结果。
+- 周复盘四区聚合、`invalidated` 排除、`stopped` 计入、未标注分钟不进四区、`time`/`minimum_action` 不算实质推进。
+- 目标地图叶子筛选、未标注节点缺省坐标和跨用户 `404`。
+- v3 旧库升级到 v4 后 Readiness 正常且既有数据未丢。
 
 ### 前端测试和生产构建
 
@@ -268,6 +276,18 @@ bin/fasttask backup --output backups/fasttask.db
 
 备份命令使用 SQLite `VACUUM INTO` 生成一致性文件并执行 `PRAGMA integrity_check`。
 
+### Schema 版本
+
+当前 `ExpectedSchemaVersion = 4`（migration `000004_task_coords`，新增 `task_coords` 表）。
+
+`serve` 启动时会自动执行 Migration。若用旧二进制创建的数据库直接跑新二进制而没有迁移，`/health/ready` 会返回 `503`，此时先执行：
+
+```bash
+bin/fasttask migrate
+```
+
+升级前建议先 `bin/fasttask backup`。坐标只落在新表，不修改 `tasks` 结构，既有数据不受影响。
+
 ## tmux 运行
 
 ```bash
@@ -298,6 +318,8 @@ tmux kill-session -t fasttask
 - `doc/func.md`
 - `doc/interface.md`
 - `doc/tech.md`
+- [`doc/lens.md`](doc/lens.md)：决策透镜、周复盘与目标地图的产品判断
+- [`doc/lens-impl.md`](doc/lens-impl.md)：决策透镜的可执行实现规格
 - [`doc/integration/README.md`](doc/integration/README.md)：FastInsight、FastNews、FastRead、FastWrite 对接与协作总览
 
 实现中的 HTTP DTO 和 OpenAPI 是字段级事实来源；文档用于解释产品语义、架构边界和演进决策。
