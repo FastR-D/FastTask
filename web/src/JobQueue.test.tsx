@@ -19,11 +19,13 @@ describe('JobQueue', () => {
 
     expect(await screen.findByText('生成对话回复')).toBeInTheDocument()
     expect(screen.getByText('运行中', { selector: '.job-state b' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /失败1/ })).toBeInTheDocument()
+    const failedChip = screen.getByText('失败').closest('mdui-chip')
+    expect(failedChip).not.toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: /失败1/ }))
+    fireEvent.click(screen.getByText('失败'))
     expect(await screen.findByText('生成每日计划')).toBeInTheDocument()
     expect(screen.getByText('MODEL_TIMEOUT')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
+    expect(failedChip).toHaveAttribute('selected')
+    expect(screen.getByText('重试').closest('mdui-button')).not.toBeNull()
   })
 })

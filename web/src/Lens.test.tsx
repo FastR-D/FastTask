@@ -137,13 +137,14 @@ describe('Review', () => {
 		render(<Review onNotice={vi.fn()} />)
 		await screen.findByText(/stalled_risk/)
 
-		const next = screen.getByRole('button', { name: '下一周' })
+		const next = screen.getByText('下一周').closest('mdui-button')
+		expect(next).not.toBeNull()
 		expect(next).toBeDisabled()
-		fireEvent.click(screen.getByRole('button', { name: '上一周' }))
+		fireEvent.click(screen.getByText('上一周'))
 
 		expect(await screen.findByText('2026-W36 的确定性总结。')).toBeInTheDocument()
 		expect(calls.some(call => call.url.endsWith('/reviews/weekly?week=2026-W36'))).toBe(true)
-		expect(screen.getByRole('button', { name: '下一周' })).toBeEnabled()
+		expect(screen.getByText('下一周').closest('mdui-button')).toBeEnabled()
 	})
 
 	it('shows the empty state for a week without focus time', async () => {
