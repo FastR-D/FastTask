@@ -21,6 +21,15 @@ type Worker struct {
 	provider         agent.Provider
 	transcriber      agent.Transcriber
 	providerResolver func(ctx context.Context) (agent.Provider, agent.Transcriber, error)
+	agentRunner      *AgentService
+}
+
+// WithAgentRunner attaches the agent runtime so the worker can execute
+// type="agent_run" jobs (doc/agent-impl.md §8). The run loop persists its own
+// state, messages and chunk log, so MaterializeJobResult is a no-op for it.
+func (w *Worker) WithAgentRunner(runner *AgentService) *Worker {
+	w.agentRunner = runner
+	return w
 }
 
 func (w *Worker) WithTranscriber(transcriber agent.Transcriber) *Worker {
@@ -119,6 +128,11 @@ func (w *Worker) execute(ctx context.Context, job persistence.AgentJob) (any, er
 		}
 	}
 	switch job.Type {
+	case "agent_run":
+		if w.agentRunner == nil {
+			return nil, fmt.Errorf("agent runtime is not configured")
+		}
+		return w.agentRunner.ExecuteRun(ctx, job)
 	case "task_tree_generation", "task_tree_revision":
 		var goal persistence.Goal
 		if err := w.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", job.SubjectID, job.UserID).First(&goal).Error; err != nil {

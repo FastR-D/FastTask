@@ -35,10 +35,14 @@ type Server struct {
 	API    huma.API
 	app    *application.App
 	auth   *platformauth.Service
+	agent  *application.AgentService
 	cfg    config.Config
 }
 
-func New(app *application.App, authService *platformauth.Service, cfg config.Config) *Server {
+func New(app *application.App, authService *platformauth.Service, cfg config.Config, agent *application.AgentService) *Server {
+	if agent == nil {
+		agent = application.NewAgentService(app.Store)
+	}
 	if cfg.AudioDir == "" {
 		cfg.AudioDir = filepath.Join(filepath.Dir(cfg.DatabasePath), "audio")
 	}
@@ -96,9 +100,10 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	humaConfig.Components.Schemas = huma.NewMapRegistry("#/components/schemas/", schemaNamer)
 	humagin.MultipartMaxMemory = 8 << 20
 	api := humagin.NewWithGroup(engine, v1, humaConfig)
-	server := &Server{Engine: engine, API: api, app: app, auth: authService, cfg: cfg}
+	server := &Server{Engine: engine, API: api, app: app, auth: authService, agent: agent, cfg: cfg}
 	api.UseMiddleware(server.authenticationMiddleware)
 	server.register()
+	server.registerAgent()
 	server.static()
 	return server
 }
