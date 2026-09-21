@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/FastR-D/FastTask/internal/agent"
 	"github.com/FastR-D/FastTask/internal/agent/protocol"
 	"github.com/FastR-D/FastTask/internal/persistence"
 	"gorm.io/gorm"
@@ -17,23 +19,95 @@ import (
 // log (doc/agent-impl.md §3, §8). It is an application-layer service (wiring.md
 // §4, AgentService / arch.md §7.5) and never exposes *gorm.DB upward.
 //
-// Phase B implements an ECHO executor: no model, no tools. Its purpose is to
-// validate the transport end to end before the tool loop lands in phase C
-// (agent-impl.md §11). Everything around the executor — thread/run/message
-// persistence, the chunk log, state accumulation, resume — is the real thing.
+// When a ChatProvider is resolvable the run executes the multi-turn tool loop
+// (§6). When none is configured — no LLM, matching the README's "LLM 未配置时
+// Worker 使用确定性本地 Provider" — it falls back to a deterministic reply so the
+// product and its tests keep working without a model.
 type AgentService struct {
-	store *persistence.Store
-	repo  *persistence.AgentRepository
+	store        *persistence.Store
+	app          *App
+	repo         *persistence.AgentRepository
+	tools        *ToolRegistry
+	chat         ChatResolver
+	limits       LoopLimits
+	systemPrompt string
 }
 
-// NewAgentService builds the agent runtime over a store.
-func NewAgentService(store *persistence.Store) *AgentService {
-	return &AgentService{store: store, repo: persistence.NewAgentRepository(store)}
+// ChatResolver resolves the tool-calling model for a run, mirroring the Worker's
+// provider resolver. It returns (nil, nil) when no model is configured, which
+// selects the deterministic fallback rather than an error.
+type ChatResolver func(ctx context.Context) (agent.ChatProvider, error)
+
+// LoopLimits are the conservative bounds from agent-impl.md §6. They are
+// overridable for tests and tunable after observing a real model (§11).
+type LoopLimits struct {
+	MaxTurns        int           // single run's model turns (default 8)
+	WallClock       time.Duration // single run wall clock (default 180s)
+	ToolTimeout     time.Duration // single tool execution (default 10s)
+	MaxOutputTokens int           // per-turn output cap; 0 defers to the provider
+}
+
+// DefaultLoopLimits returns the §6 conservative defaults.
+func DefaultLoopLimits() LoopLimits {
+	return LoopLimits{MaxTurns: 8, WallClock: 180 * time.Second, ToolTimeout: 10 * time.Second}
+}
+
+// AgentOption configures an AgentService at construction.
+type AgentOption func(*AgentService)
+
+// WithChatResolver installs the model resolver. Without it the service runs the
+// deterministic fallback.
+func WithChatResolver(resolver ChatResolver) AgentOption {
+	return func(s *AgentService) { s.chat = resolver }
+}
+
+// WithToolRegistry overrides the default read-only tool set (phase D adds
+// proposal tools).
+func WithToolRegistry(registry *ToolRegistry) AgentOption {
+	return func(s *AgentService) { s.tools = registry }
+}
+
+// WithLoopLimits overrides the §6 bounds (used by tests).
+func WithLoopLimits(limits LoopLimits) AgentOption {
+	return func(s *AgentService) { s.limits = limits }
+}
+
+// WithSystemPrompt overrides the server-side system prompt. The client-supplied
+// system field is always ignored (§2.2); this is the authoritative one.
+func WithSystemPrompt(prompt string) AgentOption {
+	return func(s *AgentService) { s.systemPrompt = prompt }
+}
+
+// NewAgentService builds the agent runtime over an App. It registers the default
+// read-only tools (§5.1); a chat resolver supplied via options enables the real
+// loop, otherwise runs use the deterministic fallback.
+func NewAgentService(app *App, opts ...AgentOption) *AgentService {
+	registry, err := NewToolRegistry(NewReadonlyTools(app)...)
+	if err != nil {
+		// Unreachable for the built-in read-only set (unique names, no identity
+		// fields). Degrade to "no tools" rather than crash boot.
+		registry, _ = NewToolRegistry()
+	}
+	s := &AgentService{
+		store:        app.Store,
+		app:          app,
+		repo:         persistence.NewAgentRepository(app.Store),
+		tools:        registry,
+		limits:       DefaultLoopLimits(),
+		systemPrompt: defaultSystemPrompt,
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Repository exposes the underlying agent repository for the HTTP layer's
 // streaming reads (chunk replay, run lookup). All access stays user-scoped.
 func (s *AgentService) Repository() *persistence.AgentRepository { return s.repo }
+
+// Tools exposes the tool registry (used by tests and phase D proposal wiring).
+func (s *AgentService) Tools() *ToolRegistry { return s.tools }
 
 // --- Transport request contract (doc/agent-impl.md §2.2, §2.3) ---
 
@@ -246,8 +320,12 @@ func (d *dbSink) Emit(ctx context.Context, chunk protocol.Chunk) error {
 
 // ExecuteRun runs one agent_run job to completion. It is called by the Worker
 // (§8), so it runs independently of any HTTP request: a client disconnect does
-// not cancel it (§4.3). Phase B is an echo; phase C replaces the body with the
-// tool-calling loop while keeping this contract.
+// not cancel it (§4.3).
+//
+// It sets up the run session (isRunning, threadId push, message replay, assistant
+// shell), then dispatches to the multi-turn tool loop when a ChatProvider is
+// configured (§6), or to a deterministic reply when no model is available (the
+// README's "LLM 未配置时使用确定性本地 Provider" behaviour).
 func (s *AgentService) ExecuteRun(ctx context.Context, job persistence.AgentJob) (map[string]any, error) {
 	userID := job.UserID
 	runID := job.SubjectID
@@ -267,121 +345,23 @@ func (s *AgentService) ExecuteRun(ctx context.Context, job persistence.AgentJob)
 		return nil, err
 	}
 
-	sink := &dbSink{repo: s.repo, userID: userID, run: runID}
-	state := protocol.NewState()
-	state.IsRunning = true
-	state.FastTask.ThreadID = run.ThreadID
-
-	fail := func(code string, err error) (map[string]any, error) {
-		_ = s.repo.SetRunStatus(ctx, userID, runID, persistence.RunFailed, code, err.Error())
+	sess, err := s.beginRun(ctx, job, run)
+	if err != nil {
+		_ = s.repo.SetRunStatus(ctx, userID, runID, persistence.RunFailed, "STATE_ERROR", err.Error())
 		return nil, err
 	}
 
-	emitState := func(ops ...protocol.Operation) error {
-		return sink.Emit(ctx, protocol.UpdateState(ops...))
-	}
-	mustSet := func(path []string, value any) error {
-		op, err := protocol.Set(path, value)
+	var provider agent.ChatProvider
+	if s.chat != nil {
+		provider, err = s.chat(ctx)
 		if err != nil {
-			return err
-		}
-		return emitState(op)
-	}
-
-	// isRunning=true and the threadId push (§2.2) come first so the client can
-	// attach a brand-new thread before any message renders.
-	if err := mustSet(protocol.IsRunningPath(), true); err != nil {
-		return fail("STATE_ERROR", err)
-	}
-	if err := mustSet(protocol.FastTaskThreadIDPath(), run.ThreadID); err != nil {
-		return fail("STATE_ERROR", err)
-	}
-
-	// Replay existing thread messages into authoritative state (§2.6). The user
-	// message persisted at submit time is included here.
-	existing, err := s.repo.ListThreadMessages(ctx, userID, run.ThreadID)
-	if err != nil {
-		return fail("STATE_ERROR", err)
-	}
-	for i, m := range existing {
-		pm, err := s.toProtocolMessage(ctx, userID, m, protocol.CompleteStatus(""))
-		if err != nil {
-			return fail("STATE_ERROR", err)
-		}
-		state.Messages = append(state.Messages, pm)
-		if err := mustSet(protocol.MessagePath(i), pm); err != nil {
-			return fail("STATE_ERROR", err)
+			return sess.failRun("PROVIDER_ERROR", err)
 		}
 	}
-
-	userText := lastUserText(state.Messages)
-
-	// Create the assistant message and stream an echo into it (§2.7.1):
-	// set shell -> set empty text part -> append-text deltas -> set status.
-	assistant := &persistence.AgentMessage{UserID: userID, ThreadID: run.ThreadID, RunID: runID, Role: "assistant"}
-	if err := s.repo.CreateMessage(ctx, assistant); err != nil {
-		return fail("STATE_ERROR", err)
+	if provider == nil {
+		return s.deterministicReply(sess)
 	}
-	assistantIdx := assistant.Seq - 1
-
-	shell := protocol.Message{
-		ID: assistant.ID, Role: protocol.RoleAssistant, Parts: []protocol.Part{},
-		CreatedAt: protocol.RFC3339(assistant.CreatedAt), Status: protocol.RunningStatus(),
-	}
-	state.Messages = append(state.Messages, shell)
-	if err := mustSet(protocol.MessagePath(assistantIdx), shell); err != nil {
-		return fail("STATE_ERROR", err)
-	}
-	emptyText := protocol.TextPart("")
-	if err := mustSet(protocol.PartPath(assistantIdx, 0), emptyText); err != nil {
-		return fail("STATE_ERROR", err)
-	}
-	state.Messages[assistantIdx].Parts = []protocol.Part{emptyText}
-
-	echo := echoReply(userText)
-	for _, delta := range splitDeltas(echo, 12) {
-		appendOp, err := protocol.AppendText(protocol.PartTextPath(assistantIdx, 0), delta)
-		if err != nil {
-			return fail("STATE_ERROR", err)
-		}
-		if err := emitState(appendOp); err != nil {
-			return fail("STATE_ERROR", err)
-		}
-		state.Messages[assistantIdx].Parts[0].Text += delta
-	}
-
-	// Persist the assistant part with its full text for history/state rebuild.
-	if err := s.repo.CreatePart(ctx, &persistence.AgentMessagePart{
-		UserID: userID, MessageID: assistant.ID, Idx: 0, Type: "text", Text: echo, ArgsJSON: "{}",
-	}); err != nil {
-		return fail("STATE_ERROR", err)
-	}
-
-	// Finish: assistant status complete, isRunning false (§2.7.1).
-	complete := protocol.CompleteStatus(protocol.ReasonStop)
-	state.Messages[assistantIdx].Status = complete
-	if err := mustSet(protocol.MessageStatusPath(assistantIdx), complete); err != nil {
-		return fail("STATE_ERROR", err)
-	}
-	state.IsRunning = false
-	if err := mustSet(protocol.IsRunningPath(), false); err != nil {
-		return fail("STATE_ERROR", err)
-	}
-
-	encodedState, err := json.Marshal(state)
-	if err != nil {
-		return fail("STATE_ERROR", err)
-	}
-	// checkpoint_seq is the number of chunks reflected in state_json, so a resume
-	// replays only chunks with seq >= checkpoint and never re-applies append-text
-	// already folded into the returned state (§2.8).
-	if err := s.repo.SaveRunState(ctx, userID, runID, string(encodedState), sink.emitted); err != nil {
-		return fail("STATE_ERROR", err)
-	}
-	if err := s.repo.SetRunStatus(ctx, userID, runID, persistence.RunSucceeded, "", ""); err != nil {
-		return fail("STATE_ERROR", err)
-	}
-	return map[string]any{"run_id": runID, "status": persistence.RunSucceeded, "chunks": sink.emitted, "echo": true}, nil
+	return s.toolLoop(sess, provider)
 }
 
 // toProtocolMessage rebuilds a wire message from persisted rows.
