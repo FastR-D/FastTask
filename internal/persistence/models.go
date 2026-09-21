@@ -298,3 +298,71 @@ type OutboxEvent struct {
 	CreatedAt                                  time.Time
 	ProcessedAt                                *time.Time
 }
+
+// AgentRun is one execution of the agent loop for a thread (doc/agent-impl.md
+// §3, §4). ThreadID is the reused conversations.id. JobID links the AgentJob
+// that currently carries the run; a run outlives individual jobs because an
+// approval receipt starts a new job against the same run (§4.0, §7.2).
+// StateJSON is the retained snapshot used to resume a stream (§2.8).
+type AgentRun struct {
+	ID              string     `json:"id"`
+	UserID          string     `json:"-"`
+	ThreadID        string     `json:"thread_id"`
+	JobID           string     `json:"job_id,omitempty"`
+	Status          string     `json:"status"`
+	StateJSON       string     `json:"-"`
+	CheckpointSeq   int        `json:"checkpoint_seq"`
+	ParentMessageID *string    `json:"parent_message_id,omitempty"`
+	ErrorCode       string     `json:"error_code,omitempty"`
+	ErrorMessage    string     `json:"error_message,omitempty"`
+	Revision        int        `json:"revision"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+}
+
+// AgentMessage is one message in a thread. Seq is thread-scoped and monotonic,
+// guaranteeing ordering (§3.1). ParentID is reserved for future branching and is
+// nil in v1, where a thread is strictly linear (§4.1).
+type AgentMessage struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"-"`
+	ThreadID  string    `json:"thread_id"`
+	RunID     string    `json:"run_id"`
+	ParentID  *string   `json:"parent_id,omitempty"`
+	Role      string    `json:"role"`
+	Seq       int       `json:"seq"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// AgentMessagePart is one part of a message: text, tool-call, or tool-result
+// (§2.7). ToolCallID is the unique locator for add-tool-result receipts (§7).
+// ApprovalStatus and ProposalID carry the proposal-approval state (§7).
+type AgentMessagePart struct {
+	ID             string    `json:"id"`
+	UserID         string    `json:"-"`
+	MessageID      string    `json:"message_id"`
+	Idx            int       `json:"idx"`
+	Type           string    `json:"type"`
+	Text           string    `json:"text,omitempty"`
+	ToolCallID     *string   `json:"tool_call_id,omitempty"`
+	ToolName       string    `json:"tool_name,omitempty"`
+	ArgsJSON       string    `json:"args_json,omitempty"`
+	ResultJSON     string    `json:"result_json,omitempty"`
+	IsError        bool      `json:"is_error,omitempty"`
+	ArtifactJSON   string    `json:"artifact_json,omitempty"`
+	ApprovalStatus string    `json:"approval_status,omitempty"`
+	ProposalID     *string   `json:"proposal_id,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// AgentRunChunk is one emitted protocol chunk in a run's persistent log. Chunks
+// are replayed on reconnect (§2.8, §8). The primary key is (RunID, Seq).
+type AgentRunChunk struct {
+	RunID     string    `gorm:"primaryKey" json:"run_id"`
+	Seq       int       `gorm:"primaryKey" json:"seq"`
+	UserID    string    `json:"-"`
+	ChunkJSON string    `json:"chunk_json"`
+	CreatedAt time.Time `json:"created_at"`
+}
