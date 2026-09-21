@@ -322,4 +322,15 @@ tmux kill-session -t fasttask
 - [`doc/lens-impl.md`](doc/lens-impl.md)：决策透镜的可执行实现规格
 - [`doc/integration/README.md`](doc/integration/README.md)：FastInsight、FastNews、FastRead、FastWrite 对接与协作总览
 
-实现中的 HTTP DTO 和 OpenAPI 是字段级事实来源；文档用于解释产品语义、架构边界和演进决策。
+### 规划中的能力
+
+以下文档描述尚未实现的能力，实现前请先读对应的 ADR：
+
+- [`doc/agent.md`](doc/agent.md)：Agent 的产品判断、工具分级与审批边界
+- [`doc/agent-impl.md`](doc/agent-impl.md)：Agent 运行时的可执行实现规格（传输协议、数据模型、循环规则）
+- [`doc/wiring.md`](doc/wiring.md)：fx 组合根与 `application.App` 的拆分规格
+- [`doc/frontend.md`](doc/frontend.md)：前端架构与 mdui/assistant-ui 的交界契约
+- [`doc/pwa.md`](doc/pwa.md)：移动端 PWA 规格
+- [`doc/adr/README.md`](doc/adr/README.md)：架构决策记录索引
+
+实现中的 HTTP DTO 和 OpenAPI 是字段级事实来源；文档用于解释产品语义、架构边界和演进决策。`doc/agent*.md`、`doc/wiring.md`、`doc/frontend.md` 和 `doc/pwa.md` 描述的是目标状态，与当前代码存在有意的差距。
