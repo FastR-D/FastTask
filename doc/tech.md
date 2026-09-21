@@ -35,6 +35,11 @@ FastTask 初期部署在实验室 Mini 主机，并通过阿里云反向代理�
 | `pkg/errors` | 兼容错误栈包装 | 仅在必要边界使用，分类以标准 `errors.Is/As` 为主 |
 | logrus | 结构化日志 | 继承参考项目，统一 JSON Formatter |
 | React + TypeScript + Vite | 响应式管理界面 | 支持任务树、对话、计时和移动端；客户端由 OpenAPI 生成 |
+| `go.uber.org/fx` | 组合根、依赖装配、生命周期 | 见 [ADR-0001](adr/0001-fx-composition-root.md)；只允许出现在 `internal/bootstrap` 和 `cmd` |
+| `@assistant-ui/react` | Agent 对话界面与工具审批 | 无样式 primitives，见 [ADR-0002](adr/0002-assistant-transport.md)、[`doc/frontend.md`](frontend.md) |
+| assistant-transport 协议 | Agent 前后端传输 | 服务端持有权威状态；Go 侧自实现编码器，见 [`doc/agent-impl.md`](agent-impl.md) §2 |
+| mdui | Material You 组件与响应式布局 | 基于 Lit 的 Web Components，无官方 React 封装，依赖 React 19 的自定义元素支持 |
+| `vite-plugin-pwa` | PWA manifest 与 Service Worker | 见 [`doc/pwa.md`](pwa.md) |
 
 依赖版本由 `go.mod` 和 `go.sum` 固定，不在构建脚本中使用 `@latest`。Huma、Gin、Go 和 SQLite Driver 作为联动升级组验证。
 

@@ -20,6 +20,7 @@
 - 普通响应 `Content-Type: application/json`。
 - 错误响应 `Content-Type: application/problem+json`。
 - API 输入、输出、校验、Security Scheme 和 OpenAPI 文档由 Huma Operation 定义。
+- **例外**：`/api/v1/agent/*` 的三个流式端点由裸 Gin Handler 实现，不经 Huma。原因是 Huma 的 `sse` 包强制写 `event:` 行，而 assistant-transport 解码器要求使用默认事件名。这三个端点的 OpenAPI 描述需手工维护，契约细节见 [`doc/agent-impl.md`](agent-impl.md) §2。除此之外，Huma 仍是全部接口的字段级事实来源。
 
 ### 1.2 OpenAPI 和文档
 
