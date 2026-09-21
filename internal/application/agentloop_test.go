@@ -153,9 +153,19 @@ func TestToolLoopNoToolCallsSucceeds(t *testing.T) {
 	if first.Messages[0].Role != "system" || !strings.Contains(first.Messages[0].Content, "最多三个") {
 		t.Fatalf("system prompt not server-owned: %#v", first.Messages[0])
 	}
-	// Readonly tools are advertised (§6).
-	if len(first.Tools) != 7 {
-		t.Fatalf("advertised %d tools, want 7 readonly", len(first.Tools))
+	// Readonly + proposal tools are advertised (§6). Phase D adds the proposal
+	// tool, so the loop offers 7 readonly + 1 proposal = 8.
+	if len(first.Tools) != 8 {
+		t.Fatalf("advertised %d tools, want 8 (7 readonly + 1 proposal)", len(first.Tools))
+	}
+	var sawProposal bool
+	for _, tool := range first.Tools {
+		if tool.Name == "propose_task_tree_patch" {
+			sawProposal = true
+		}
+	}
+	if !sawProposal {
+		t.Fatal("proposal tool not advertised to the model")
 	}
 }
 

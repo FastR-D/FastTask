@@ -37,10 +37,27 @@ type ToolContext struct {
 // ToolResult is the outcome of a tool execution. Exactly one of Result or
 // IsError is meaningful: on error, Text is a structured message fed back to the
 // model so it can self-correct (§5.2) rather than failing the whole run.
+//
+// Proposal, when set, means the tool created a pending Proposal and the run must
+// pause for user approval (§7). The loop then emits the approval part, adds the
+// proposal to fasttask.pendingProposals, and transitions to awaiting_approval.
 type ToolResult struct {
-	Result  any
-	IsError bool
-	Text    string
+	Result   any
+	IsError  bool
+	Text     string
+	Proposal *PendingProposalRef
+}
+
+// PendingProposalRef describes a Proposal awaiting approval, carrying exactly the
+// fields the wire state's fasttask.pendingProposals entry needs (§2.7) plus the
+// structured diff the approval card renders.
+type PendingProposalRef struct {
+	ProposalID   string `json:"id"`
+	GoalID       string `json:"goalId"`
+	BaseRevision int    `json:"baseRevision"`
+	Summary      string `json:"summary"`
+	Kind         string `json:"kind"`
+	Diff         any    `json:"diff,omitempty"`
 }
 
 // Tool is a controlled projection of an application use case (§5). The Execute
