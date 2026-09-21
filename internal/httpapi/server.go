@@ -41,7 +41,7 @@ type Server struct {
 
 func New(app *application.App, authService *platformauth.Service, cfg config.Config, agent *application.AgentService) *Server {
 	if agent == nil {
-		agent = application.NewAgentService(app.Store)
+		agent = application.NewAgentService(app)
 	}
 	if cfg.AudioDir == "" {
 		cfg.AudioDir = filepath.Join(filepath.Dir(cfg.DatabasePath), "audio")

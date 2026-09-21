@@ -49,7 +49,7 @@ func newTestAPI(t *testing.T) testAPI {
 		t.Fatal(err)
 	}
 	app := application.NewWithSecret(store, cfg.ProviderEncryptionKey)
-	agentService := application.NewAgentService(store)
+	agentService := application.NewAgentService(app)
 	server := New(app, authService, cfg, agentService)
 	api := testAPI{server: server, store: store, agent: agentService, worker: application.NewWorker(app, time.Millisecond).WithAgentRunner(agentService), user: user}
 	login := api.do(t, http.MethodPost, "/api/v1/auth/login", map[string]any{"identifier": "admin", "password": "password-for-tests"}, nil)
