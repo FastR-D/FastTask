@@ -82,10 +82,11 @@ func WithSystemPrompt(prompt string) AgentOption {
 // read-only tools (§5.1); a chat resolver supplied via options enables the real
 // loop, otherwise runs use the deterministic fallback.
 func NewAgentService(app *App, opts ...AgentOption) *AgentService {
-	registry, err := NewToolRegistry(NewReadonlyTools(app)...)
+	builtIn := append(NewReadonlyTools(app), NewProposalTools(app)...)
+	registry, err := NewToolRegistry(builtIn...)
 	if err != nil {
-		// Unreachable for the built-in read-only set (unique names, no identity
-		// fields). Degrade to "no tools" rather than crash boot.
+		// Unreachable for the built-in set (unique names, no identity fields).
+		// Degrade to "no tools" rather than crash boot.
 		registry, _ = NewToolRegistry()
 	}
 	s := &AgentService{
@@ -153,22 +154,33 @@ type CommandPart struct {
 }
 
 // SubmitResult is returned by SubmitCommands so the HTTP layer can stream the
-// run it just created.
+// run it just created or resumed.
 type SubmitResult struct {
 	ThreadID  string `json:"threadId"`
 	RunID     string `json:"runId"`
 	NewThread bool   `json:"newThread"`
+	// FromSeq is the chunk-log cursor the client should stream from. A fresh run
+	// streams from 0; a run resumed after approval streams from its awaiting
+	// checkpoint so already-rendered chunks (and their append-text) are not
+	// re-applied (§2.8, §7.2).
+	FromSeq int `json:"fromSeq"`
 }
 
 // ErrEmptyCommand is returned when a commands request carries no usable
-// add-message text (phase B does not yet accept tool results).
+// add-message text and no tool-result receipt.
 var ErrEmptyCommand = errors.New("agent command has no message text")
 
 // SubmitCommands performs the transactional half of POST /agent/commands
 // (§8): resolve-or-create the thread, enforce one active run per user, persist
 // the user message, and create the agent_run + AgentJob(type="agent_run") that
 // the Worker will execute. It writes no assistant output; that streams later.
+//
+// An add-tool-result command is routed to the approval flow instead (§7.2): it
+// resolves the pending proposal and resumes the SAME run rather than creating one.
 func (s *AgentService) SubmitCommands(ctx context.Context, userID string, req CommandsRequest) (SubmitResult, error) {
+	if cmd, ok := firstToolResult(req.Commands); ok {
+		return s.ResolveApproval(ctx, userID, cmd)
+	}
 	text, err := extractUserText(req.Commands)
 	if err != nil {
 		return SubmitResult{}, err
@@ -318,6 +330,18 @@ func (d *dbSink) Emit(ctx context.Context, chunk protocol.Chunk) error {
 	return nil
 }
 
+// checkpoint is the seq the next chunk will take, i.e. the count of chunks
+// committed so far across ALL segments of the run. It is the resume cursor: a
+// client caught up to checkpoint needs seq >= checkpoint next (§2.8). Using
+// lastSeq+1 (not emitted) keeps it correct when a run resumes after approval and
+// the sink for the new segment starts counting from zero.
+func (d *dbSink) checkpoint() int {
+	if d.emitted == 0 {
+		return d.lastSeq
+	}
+	return d.lastSeq + 1
+}
+
 // ExecuteRun runs one agent_run job to completion. It is called by the Worker
 // (§8), so it runs independently of any HTTP request: a client disconnect does
 // not cancel it (§4.3).
@@ -345,7 +369,21 @@ func (s *AgentService) ExecuteRun(ctx context.Context, job persistence.AgentJob)
 		return nil, err
 	}
 
-	sess, err := s.beginRun(ctx, job, run)
+	// A run that paused at awaiting_approval already has an assistant message; an
+	// approval receipt re-queues it to continue the SAME run and message (§7.2).
+	// A fresh run has none yet. This distinguishes resume from first execution.
+	priorAssistant, err := s.existingAssistantMessage(ctx, userID, runID)
+	if err != nil {
+		_ = s.repo.SetRunStatus(ctx, userID, runID, persistence.RunFailed, "STATE_ERROR", err.Error())
+		return nil, err
+	}
+
+	var sess *runSession
+	if priorAssistant != nil {
+		sess, err = s.resumeRun(ctx, job, run, *priorAssistant)
+	} else {
+		sess, err = s.beginRun(ctx, job, run)
+	}
 	if err != nil {
 		_ = s.repo.SetRunStatus(ctx, userID, runID, persistence.RunFailed, "STATE_ERROR", err.Error())
 		return nil, err
@@ -359,9 +397,29 @@ func (s *AgentService) ExecuteRun(ctx context.Context, job persistence.AgentJob)
 		}
 	}
 	if provider == nil {
+		// No model: a fresh run gets the deterministic reply. A resumed run has
+		// already delivered its proposal outcome, so just close it cleanly.
+		if sess.resumed {
+			return sess.succeed()
+		}
 		return s.deterministicReply(sess)
 	}
 	return s.toolLoop(sess, provider)
+}
+
+// existingAssistantMessage returns the run's assistant message if one was already
+// created (a resumed run), or nil for a fresh run.
+func (s *AgentService) existingAssistantMessage(ctx context.Context, userID, runID string) (*persistence.AgentMessage, error) {
+	messages, err := s.repo.ListRunMessages(ctx, userID, runID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range messages {
+		if messages[i].Role == "assistant" {
+			return &messages[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // toProtocolMessage rebuilds a wire message from persisted rows.
@@ -377,7 +435,14 @@ func (s *AgentService) toProtocolMessage(ctx context.Context, userID string, m p
 	for _, p := range parts {
 		switch p.Type {
 		case "tool-call":
-			tp := protocol.ToolCallPart(derefString(p.ToolCallID), p.ToolName, nil)
+			tp := protocol.ToolCallPart(derefString(p.ToolCallID), p.ToolName, decodeArgsMap(p.ArgsJSON))
+			if p.ResultJSON != "" {
+				var result any
+				if err := json.Unmarshal([]byte(p.ResultJSON), &result); err == nil {
+					tp.Result = result
+				}
+			}
+			tp.IsError = p.IsError
 			tp.Approval = approvalFromStatus(p.ApprovalStatus)
 			wire.Parts = append(wire.Parts, tp)
 		default:
@@ -385,6 +450,18 @@ func (s *AgentService) toProtocolMessage(ctx context.Context, userID string, m p
 		}
 	}
 	return wire, nil
+}
+
+// decodeArgsMap parses persisted tool-call args back into a map for the wire part.
+func decodeArgsMap(raw string) map[string]any {
+	if strings.TrimSpace(raw) == "" {
+		return map[string]any{}
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return map[string]any{}
+	}
+	return args
 }
 
 func approvalFromStatus(status string) *protocol.Approval {

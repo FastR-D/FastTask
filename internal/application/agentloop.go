@@ -49,6 +49,11 @@ type runSession struct {
 	assistantIdx int
 	userText     string
 	turns        int
+	// resumed marks a run continuing after an approval receipt (§7.2); it reuses
+	// the existing assistant message instead of creating one. resumeContext is the
+	// model conversation reconstructed from the persisted parts of that message.
+	resumed       bool
+	resumeContext []agent.ChatMessage
 }
 
 // beginRun sets up the run session: emit isRunning + threadId, replay existing
@@ -189,7 +194,7 @@ func (s *runSession) saveState() error {
 	}
 	// checkpoint_seq counts the chunks folded into state_json so a resume replays
 	// only seq >= checkpoint and never re-applies append-text (§2.8).
-	return s.svc.repo.SaveRunState(s.ctx, s.userID, s.run.ID, string(encoded), s.sink.emitted)
+	return s.svc.repo.SaveRunState(s.ctx, s.userID, s.run.ID, string(encoded), s.sink.checkpoint())
 }
 
 func (s *runSession) jobCancelRequested() (bool, error) {
@@ -331,15 +336,22 @@ func (t *turnSink) TextDelta(_ context.Context, delta string) error {
 }
 
 // toolLoop drives the multi-turn tool-calling loop (§6). Readonly tool calls are
-// executed and fed back; a turn with no tool calls ends the run. Proposal tools
-// and the awaiting_approval transition land in phase D.
+// executed and fed back; a turn with no tool calls ends the run. A proposal tool
+// call pauses the run at awaiting_approval (§7); a resumed run continues from
+// the reconstructed context with the approval outcome already fed back.
 func (s *AgentService) toolLoop(sess *runSession, provider agent.ChatProvider) (map[string]any, error) {
 	limits := s.limits
 	if limits.MaxTurns <= 0 {
 		limits = DefaultLoopLimits()
 	}
 	deadline := time.Now().Add(limits.WallClock)
+	// A fresh run starts from the system prompt + thread history; a resumed run
+	// starts from the reconstructed context that already includes the resolved
+	// proposal tool call and its result (§7.2).
 	messages := sess.initialMessages(s.systemPrompt)
+	if sess.resumed {
+		messages = append([]agent.ChatMessage{{Role: "system", Content: s.systemPrompt}}, sess.resumeContext...)
+	}
 	tools := s.tools.Definitions(ToolReadonly, ToolProposal)
 	tc := ToolContext{UserID: sess.userID, ThreadID: sess.run.ThreadID, RunID: sess.run.ID}
 
@@ -436,14 +448,10 @@ func (s *AgentService) executeToolCall(sess *runSession, tc ToolContext, call ag
 	if problems := s.tools.ValidateArgs(call.Name, args); len(problems) > 0 {
 		return s.finishToolCall(sess, call, partIdx, ToolResult{IsError: true, Text: "invalid arguments: " + strings.Join(problems, "; ")}), false
 	}
-	if tool.Level() != ToolReadonly {
-		// Phase D wires proposal tools to the approval flow. Until then no proposal
-		// tool is registered, so this is defensive.
-		return s.finishToolCall(sess, call, partIdx, toolError("tool %q is not available in this phase", call.Name)), false
-	}
 
-	// Readonly tools execute OUTSIDE any transaction (§5.2) with a per-call timeout
-	// (§6). A timeout or domain error is fed back to the model, not fatal.
+	// Both readonly and proposal tools execute OUTSIDE any business transaction
+	// (§5.2) with a per-call timeout (§6). A proposal tool writes only the
+	// Proposal staging record, never a business table (invariant 1).
 	toolCtx, cancel := context.WithTimeout(sess.ctx, timeout)
 	defer cancel()
 	result, execErr := tool.Execute(toolCtx, tc, args)
@@ -454,6 +462,16 @@ func (s *AgentService) executeToolCall(sess *runSession, tc ToolContext, call ag
 			result = ToolResult{IsError: true, Text: fmt.Sprintf("tool %q failed: %v", call.Name, execErr)}
 		}
 	}
+
+	// A proposal tool that created a pending Proposal pauses the run for user
+	// approval (§6, §7): emit the approval part, surface it in fasttask state,
+	// and signal awaiting so the loop transitions to awaiting_approval.
+	if result.Proposal != nil && !result.IsError {
+		if err := sess.recordProposal(partIdx, call, result); err != nil {
+			return s.finishToolCall(sess, call, partIdx, toolError("failed to record proposal: %v", err)), false
+		}
+		return result, true
+	}
 	return s.finishToolCall(sess, call, partIdx, result), false
 }
 
@@ -461,6 +479,33 @@ func (s *AgentService) executeToolCall(sess *runSession, tc ToolContext, call ag
 func (s *AgentService) finishToolCall(sess *runSession, call agent.ToolCall, partIdx int, result ToolResult) ToolResult {
 	_ = sess.setToolCallResult(partIdx, result)
 	return result
+}
+
+// recordProposal marks a tool-call part as awaiting approval, adds the proposal
+// to the fasttask business state (§2.7), and persists the part with its proposal
+// link so the approval receipt can find it (§7).
+func (s *runSession) recordProposal(partIdx int, call agent.ToolCall, result ToolResult) error {
+	ref := result.Proposal
+	part := &s.state.Messages[s.assistantIdx].Parts[partIdx]
+	part.Result = result.Result
+	part.Approval = &protocol.Approval{Status: protocol.ApprovalPending}
+	if err := s.emitSet(protocol.PartPath(s.assistantIdx, partIdx), *part); err != nil {
+		return err
+	}
+	s.state.FastTask.PendingProposals = append(s.state.FastTask.PendingProposals, protocol.PendingProposal{
+		ID: ref.ProposalID, GoalID: ref.GoalID, BaseRevision: ref.BaseRevision, Summary: ref.Summary,
+	})
+	if err := s.emitSet(protocol.FastTaskPath(), s.state.FastTask); err != nil {
+		return err
+	}
+	resultJSON, _ := json.Marshal(result.Result)
+	toolCallID := call.ID
+	proposalID := ref.ProposalID
+	return s.svc.repo.CreatePart(s.ctx, &persistence.AgentMessagePart{
+		UserID: s.userID, MessageID: s.assistantID, Idx: partIdx, Type: "tool-call",
+		ToolCallID: &toolCallID, ToolName: call.Name, ArgsJSON: normalizeArgs(call.Arguments),
+		ResultJSON: string(resultJSON), ApprovalStatus: protocol.ApprovalPending, ProposalID: &proposalID,
+	})
 }
 
 // saveAwaitingApproval persists state and flips the run to awaiting_approval
@@ -478,6 +523,125 @@ func (s *runSession) saveAwaitingApproval() (map[string]any, error) {
 		return nil, err
 	}
 	return map[string]any{"run_id": s.run.ID, "status": persistence.RunAwaitingApproval, "chunks": s.sink.emitted}, nil
+}
+
+// resumeRun rebuilds a session for a run continuing after an approval receipt
+// (§7.2): it reuses the SAME assistant message and message index, replays the
+// thread into authoritative state, and reconstructs the model context from the
+// persisted parts so the loop can carry on from the resolved tool call.
+func (s *AgentService) resumeRun(ctx context.Context, job persistence.AgentJob, run *persistence.AgentRun, assistant persistence.AgentMessage) (*runSession, error) {
+	sink := &dbSink{repo: s.repo, userID: run.UserID, run: run.ID}
+	sess := &runSession{
+		svc: s, ctx: ctx, userID: run.UserID, run: run, jobID: job.ID, sink: sink,
+		state: protocol.NewState(), resumed: true,
+	}
+	sess.state.IsRunning = true
+	sess.state.FastTask.ThreadID = run.ThreadID
+
+	if err := sess.emitSet(protocol.IsRunningPath(), true); err != nil {
+		return nil, err
+	}
+
+	existing, err := s.repo.ListThreadMessages(ctx, run.UserID, run.ThreadID)
+	if err != nil {
+		return nil, err
+	}
+	for i, m := range existing {
+		status := protocol.CompleteStatus("")
+		if m.ID == assistant.ID {
+			// The reused assistant message goes back to running while it continues.
+			status = protocol.RunningStatus()
+			sess.assistantID = m.ID
+			sess.assistantIdx = i
+		}
+		pm, err := s.toProtocolMessage(ctx, run.UserID, m, status)
+		if err != nil {
+			return nil, err
+		}
+		sess.state.Messages = append(sess.state.Messages, pm)
+		if err := sess.emitSet(protocol.MessagePath(i), pm); err != nil {
+			return nil, err
+		}
+	}
+	if sess.assistantID == "" {
+		return nil, errors.New("resume could not locate the assistant message")
+	}
+	// Re-emit the (now updated) fasttask state so resolved proposals drop off the
+	// pending list on the client.
+	sess.state.FastTask.PendingProposals = s.pendingProposals(ctx, run.UserID, run.ThreadID)
+	if err := sess.emitSet(protocol.FastTaskPath(), sess.state.FastTask); err != nil {
+		return nil, err
+	}
+	sess.userText = lastUserText(sess.state.Messages)
+
+	// Reconstruct the model conversation from persisted parts: prior turns become
+	// assistant/tool messages so the model sees the approval outcome and continues.
+	sess.resumeContext = s.rebuildModelContext(ctx, run.UserID, sess.state.Messages, sess.assistantIdx)
+	return sess, nil
+}
+
+// pendingProposals lists proposals still awaiting approval across the thread's
+// runs, so a resumed run's fasttask state reflects only what is truly pending.
+func (s *AgentService) pendingProposals(ctx context.Context, userID, threadID string) []protocol.PendingProposal {
+	out := []protocol.PendingProposal{}
+	var proposals []persistence.Proposal
+	s.store.DB.WithContext(ctx).
+		Where("user_id = ? AND status = 'pending'", userID).
+		Order("created_at DESC").Limit(20).Find(&proposals)
+	for _, p := range proposals {
+		out = append(out, protocol.PendingProposal{ID: p.ID, GoalID: p.GoalID, BaseRevision: p.BaseRevision, Summary: p.Instruction})
+	}
+	_ = threadID
+	return out
+}
+
+// rebuildModelContext converts the wire messages before and including the reused
+// assistant message into model turns. Text parts become assistant content; each
+// tool-call part with a recorded result becomes an assistant tool_call plus a
+// tool message, so the model resumes with the approval outcome in context (§7).
+func (s *AgentService) rebuildModelContext(ctx context.Context, userID string, messages []protocol.Message, assistantIdx int) []agent.ChatMessage {
+	out := make([]agent.ChatMessage, 0, len(messages)+2)
+	for i := 0; i <= assistantIdx && i < len(messages); i++ {
+		m := messages[i]
+		switch m.Role {
+		case protocol.RoleUser:
+			if text := strings.TrimSpace(textOfParts(m.Parts)); text != "" {
+				out = append(out, agent.ChatMessage{Role: "user", Content: text})
+			}
+		case protocol.RoleAssistant:
+			var content strings.Builder
+			var calls []agent.ToolCall
+			var results []agent.ChatMessage
+			for _, part := range m.Parts {
+				switch part.Type {
+				case protocol.PartText:
+					content.WriteString(part.Text)
+				case protocol.PartToolCall:
+					argsJSON := "{}"
+					if part.Args != nil {
+						if encoded, err := json.Marshal(part.Args); err == nil {
+							argsJSON = string(encoded)
+						}
+					}
+					calls = append(calls, agent.ToolCall{ID: part.ToolCallID, Name: part.ToolName, Arguments: argsJSON})
+					resultContent := "{}"
+					if part.Result != nil {
+						if encoded, err := json.Marshal(part.Result); err == nil {
+							resultContent = string(encoded)
+						}
+					}
+					results = append(results, agent.ChatMessage{Role: "tool", ToolCallID: part.ToolCallID, Name: part.ToolName, Content: resultContent})
+				}
+			}
+			if content.Len() > 0 || len(calls) > 0 {
+				out = append(out, agent.ChatMessage{Role: "assistant", Content: content.String(), ToolCalls: calls})
+				out = append(out, results...)
+			}
+		}
+	}
+	_ = ctx
+	_ = userID
+	return out
 }
 
 // partIndexOfCall finds the assistant-message part index for a tool call id.

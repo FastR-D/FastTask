@@ -73,12 +73,15 @@ func (s *Server) handleAgentCommands(c *gin.Context) {
 	}
 	// §2.2: state/system/tools in the body are untrusted and ignored. SubmitCommands
 	// reads none of them; the server is the sole source of authoritative state.
+	// An add-tool-result command is routed to the approval flow (§7.2): it resolves
+	// the pending proposal synchronously (§7.3) and resumes the same run, streaming
+	// only the continuation from the run's checkpoint (result.FromSeq).
 	result, err := s.agent.SubmitCommands(c.Request.Context(), principal.UserID, req)
 	if err != nil {
 		agentSubmitError(c, err)
 		return
 	}
-	s.streamRun(c, principal.UserID, result.RunID, 0)
+	s.streamRun(c, principal.UserID, result.RunID, result.FromSeq)
 }
 
 // handleAgentResumeState implements POST /agent/resume-state (§2.8): 204 when no
@@ -245,13 +248,18 @@ func decodeAgentBody(c *gin.Context, target any) error {
 	return nil
 }
 
-// agentSubmitError maps SubmitCommands failures to HTTP statuses. A cross-user or
-// missing thread is 404 (§2.2); a busy thread is 409 (§9.3); an empty command is
-// 422.
+// agentSubmitError maps SubmitCommands / ResolveApproval failures to HTTP
+// statuses. A cross-user or missing thread/tool-call is 404 (§2.2, §7.4); a busy
+// thread or duplicate approval receipt is 409 (§9.3, §7.4); a proposal whose base
+// revision moved is 412 (§7.4); an empty/invalid command is 422.
 func agentSubmitError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, application.ErrEmptyCommand):
 		agentAbort(c, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, application.ErrApprovalDuplicate), errors.Is(err, application.ErrApprovalNotAwaiting):
+		agentAbort(c, http.StatusConflict, err.Error())
+	case errors.Is(err, application.ErrRevision):
+		agentAbort(c, http.StatusPreconditionFailed, "the task tree changed before this approval; the proposal was marked conflict")
 	case errors.Is(err, persistence.ErrActiveRunExists):
 		agentAbort(c, http.StatusConflict, "an agent run is already active")
 	case persistence.IsNotFound(err):
