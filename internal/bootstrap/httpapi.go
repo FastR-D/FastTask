@@ -29,8 +29,8 @@ var HTTPModule = fx.Module("httpapi",
 )
 
 // NewAPI builds the HTTP API surface (Gin engine + Huma registry).
-func NewAPI(app *application.App, auth *platformauth.Service, cfg config.Config) *httpapi.Server {
-	return httpapi.New(app, auth, cfg)
+func NewAPI(app *application.App, auth *platformauth.Service, cfg config.Config, agent *application.AgentService) *httpapi.Server {
+	return httpapi.New(app, auth, cfg, agent)
 }
 
 // NewHTTPServer builds the net/http server. WriteTimeout is deliberately 0: the

@@ -16,12 +16,13 @@ var WorkerModule = fx.Module("worker",
 	fx.Invoke(registerWorkerLifecycle),
 )
 
-// NewWorker builds the worker with the per-job provider resolver. The resolver
-// prefers the admin-configured default provider and falls back to environment
-// configuration, matching the historical inline behaviour.
-func NewWorker(app *application.App, cfg config.Config) *application.Worker {
+// NewWorker builds the worker with the per-job provider resolver and the agent
+// runtime. The resolver prefers the admin-configured default provider and falls
+// back to environment configuration, matching the historical inline behaviour.
+func NewWorker(app *application.App, cfg config.Config, agent *application.AgentService) *application.Worker {
 	worker := application.NewWorker(app, cfg.WorkerInterval)
 	worker.WithProviderResolver(ProviderResolver(app, cfg))
+	worker.WithAgentRunner(agent)
 	return worker
 }
 

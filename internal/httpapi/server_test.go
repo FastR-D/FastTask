@@ -24,6 +24,7 @@ type testAPI struct {
 	server *Server
 	store  *persistence.Store
 	worker *application.Worker
+	agent  *application.AgentService
 	access string
 	user   persistence.User
 }
@@ -48,8 +49,9 @@ func newTestAPI(t *testing.T) testAPI {
 		t.Fatal(err)
 	}
 	app := application.NewWithSecret(store, cfg.ProviderEncryptionKey)
-	server := New(app, authService, cfg)
-	api := testAPI{server: server, store: store, worker: application.NewWorker(app, time.Millisecond), user: user}
+	agentService := application.NewAgentService(store)
+	server := New(app, authService, cfg, agentService)
+	api := testAPI{server: server, store: store, agent: agentService, worker: application.NewWorker(app, time.Millisecond).WithAgentRunner(agentService), user: user}
 	login := api.do(t, http.MethodPost, "/api/v1/auth/login", map[string]any{"identifier": "admin", "password": "password-for-tests"}, nil)
 	if login.Code != 200 {
 		t.Fatalf("login status=%d body=%s", login.Code, login.Body.String())
