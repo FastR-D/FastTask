@@ -23,6 +23,6 @@ func NewScheduler(store *persistence.Store) (*scheduler.Scheduler, error) {
 func registerSchedulerLifecycle(lc fx.Lifecycle, maintenance *scheduler.Scheduler, obs LifecycleObserver) {
 	lc.Append(fx.Hook{
 		OnStart: func(context.Context) error { obs.Started("scheduler"); maintenance.Start(); return nil },
-		OnStop: func(context.Context) error { obs.Stopped("scheduler"); return maintenance.Shutdown() },
+		OnStop:  func(context.Context) error { obs.Stopped("scheduler"); return maintenance.Shutdown() },
 	})
 }

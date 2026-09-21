@@ -180,6 +180,124 @@ func TestUpgradeFromVersionThreePreservesData(t *testing.T) {
 	}
 }
 
+// TestUpgradeFromVersionFourPreservesData covers the v4 -> v5 release path that
+// adds the agent runtime tables (doc/agent-impl.md §3.2). Existing data must
+// survive, /health/ready must pass after migration, and the new tables must be
+// writable.
+func TestUpgradeFromVersionFourPreservesData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v4.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"000001_init.up.sql", "000002_external_imports.up.sql", "000003_admin_platform.up.sql", "000004_task_coords.up.sql"} {
+		contents, err := embeddedMigrations.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DB.Exec(string(contents)).Error; err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+	}
+	var version int
+	if err := store.DB.Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version).Error; err != nil {
+		t.Fatal(err)
+	}
+	if version != 4 {
+		t.Fatalf("prepared database is at version %d, want 4", version)
+	}
+	if err := store.Ready(context.Background()); err == nil {
+		t.Fatal("version 4 database reported ready under the v5 binary")
+	}
+	now := Now()
+	user := User{ID: NewID("user"), Identifier: "upgrade-v4", PasswordHash: "hash", DisplayName: "Upgrade", Timezone: "Asia/Shanghai", Locale: "zh-CN", Role: "member", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := store.DB.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	conversation := Conversation{ID: NewID("conv"), UserID: user.ID, Title: "升级前的对话", Status: "active", Revision: 2, CreatedAt: now, UpdatedAt: now}
+	if err := store.DB.Create(&conversation).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacyMessage := ConversationMessage{ID: NewID("msg"), UserID: user.ID, ConversationID: conversation.ID, Role: "user", Content: "旧扁平消息必须保留", CreatedAt: now}
+	if err := store.DB.Create(&legacyMessage).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate v4 database: %v", err)
+	}
+	if err := reopened.Ready(context.Background()); err != nil {
+		t.Fatalf("readiness after upgrade: %v", err)
+	}
+	for _, model := range []any{&AgentRun{}, &AgentMessage{}, &AgentMessagePart{}, &AgentRunChunk{}} {
+		if !reopened.DB.Migrator().HasTable(model) {
+			t.Fatalf("agent runtime table missing after upgrade: %T", model)
+		}
+	}
+	var migratedConversation Conversation
+	if err := reopened.DB.First(&migratedConversation, "id = ?", conversation.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migratedConversation.Title != conversation.Title || migratedConversation.Revision != 2 {
+		t.Fatalf("existing conversation changed during upgrade: %#v", migratedConversation)
+	}
+	var migratedMessage ConversationMessage
+	if err := reopened.DB.First(&migratedMessage, "id = ?", legacyMessage.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migratedMessage.Content != "旧扁平消息必须保留" {
+		t.Fatalf("legacy conversation message changed during upgrade: %#v", migratedMessage)
+	}
+
+	// The reused conversations table now also backs agent threads: a run and its
+	// message/part/chunk log must be writable against the upgraded schema.
+	run := AgentRun{ID: NewID("run"), UserID: user.ID, ThreadID: conversation.ID, Status: "queued", StateJSON: "{}", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := reopened.DB.Create(&run).Error; err != nil {
+		t.Fatalf("write agent_run after upgrade: %v", err)
+	}
+	message := AgentMessage{ID: NewID("amsg"), UserID: user.ID, ThreadID: conversation.ID, RunID: run.ID, Role: "assistant", Seq: 1, CreatedAt: now}
+	if err := reopened.DB.Create(&message).Error; err != nil {
+		t.Fatalf("write agent_message after upgrade: %v", err)
+	}
+	part := AgentMessagePart{ID: NewID("apart"), UserID: user.ID, MessageID: message.ID, Idx: 0, Type: "text", Text: "hello", ArgsJSON: "{}", CreatedAt: now, UpdatedAt: now}
+	if err := reopened.DB.Create(&part).Error; err != nil {
+		t.Fatalf("write agent_message_part after upgrade: %v", err)
+	}
+	chunk := AgentRunChunk{RunID: run.ID, Seq: 0, UserID: user.ID, ChunkJSON: `{"type":"step-start"}`, CreatedAt: now}
+	if err := reopened.DB.Create(&chunk).Error; err != nil {
+		t.Fatalf("write agent_run_chunk after upgrade: %v", err)
+	}
+	duplicateChunk := chunk
+	if err := reopened.DB.Create(&duplicateChunk).Error; err == nil {
+		t.Fatal("duplicate (run_id, seq) chunk accepted")
+	}
+	// A second active run on the same thread must be rejected by the partial
+	// unique index (agent-impl.md §3.1).
+	secondRun := run
+	secondRun.ID = NewID("run")
+	secondRun.Status = "running"
+	if err := reopened.DB.Create(&secondRun).Error; err == nil {
+		t.Fatal("second queued/running run on one thread accepted")
+	}
+	if err := reopened.Migrate(context.Background()); err != nil {
+		t.Fatalf("second migrate must be a no-op: %v", err)
+	}
+	if err := reopened.DB.Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version).Error; err != nil {
+		t.Fatal(err)
+	}
+	if version != ExpectedSchemaVersion {
+		t.Fatalf("schema version=%d, want %d", version, ExpectedSchemaVersion)
+	}
+}
+
 func TestExternalImportSourceUniquenessIsUserScoped(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()
