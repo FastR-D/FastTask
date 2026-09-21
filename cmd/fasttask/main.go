@@ -1,23 +1,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"net/http"
 	"os"
-	"os/signal"
-	"path/filepath"
 	"runtime"
-	"syscall"
-	"time"
 
-	"github.com/FastR-D/FastTask/internal/agent"
-	"github.com/FastR-D/FastTask/internal/application"
+	"github.com/FastR-D/FastTask/internal/bootstrap"
 	"github.com/FastR-D/FastTask/internal/config"
-	"github.com/FastR-D/FastTask/internal/httpapi"
-	"github.com/FastR-D/FastTask/internal/persistence"
-	platformauth "github.com/FastR-D/FastTask/internal/platform/auth"
-	"github.com/FastR-D/FastTask/internal/scheduler"
 	"github.com/spf13/cobra"
 )
 
@@ -43,70 +32,7 @@ func serveCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		store, err := persistence.Open(cfg.DatabasePath)
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
-		defer stop()
-		if err := store.Migrate(ctx); err != nil {
-			return fmt.Errorf("migrate database: %w", err)
-		}
-		authService := platformauth.New(store, cfg)
-		if err := authService.EnsureAdmin(ctx); err != nil {
-			return fmt.Errorf("ensure admin: %w", err)
-		}
-		app := application.NewWithSecret(store, cfg.ProviderEncryptionKey)
-		server := httpapi.New(app, authService, cfg)
-		workerCtx, cancelWorker := context.WithCancel(ctx)
-		defer cancelWorker()
-		if withWorker || withScheduler {
-			worker := application.NewWorker(app, cfg.WorkerInterval)
-			worker.WithProviderResolver(func(ctx context.Context) (agent.Provider, agent.Transcriber, error) {
-				runtime, err := app.ActiveProviderRuntime(ctx)
-				if err != nil || runtime != nil {
-					if runtime != nil {
-						return runtime.Provider, runtime.Transcriber, nil
-					}
-					return nil, nil, err
-				}
-				if cfg.HasLLM() {
-					provider := agent.NewOpenAI(cfg)
-					var transcriber agent.Transcriber
-					if cfg.TranscriptionModel != "" {
-						transcriber = provider
-					}
-					return provider, transcriber, nil
-				}
-				return nil, nil, nil
-			})
-			go worker.Run(workerCtx)
-		}
-		var maintenance *scheduler.Scheduler
-		if withScheduler {
-			maintenance, err = scheduler.New(store)
-			if err != nil {
-				return err
-			}
-			maintenance.Start()
-			defer maintenance.Shutdown()
-		}
-		httpServer := &http.Server{Addr: cfg.Address(), Handler: server.Engine, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 1 << 20}
-		errors := make(chan error, 1)
-		go func() { fmt.Printf("FastTask listening on %s\n", cfg.Address()); errors <- httpServer.ListenAndServe() }()
-		select {
-		case <-ctx.Done():
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			cancelWorker()
-			return httpServer.Shutdown(shutdownCtx)
-		case err := <-errors:
-			if err == http.ErrServerClosed {
-				return nil
-			}
-			return err
-		}
+		return bootstrap.Serve(cmd.Context(), cfg, bootstrap.ServeOptions{WithWorker: withWorker, WithScheduler: withScheduler})
 	}}
 	cmd.Flags().BoolVar(&withWorker, "with-worker", true, "run persistent agent worker")
 	cmd.Flags().BoolVar(&withScheduler, "with-scheduler", true, "run maintenance scheduler")
@@ -119,12 +45,7 @@ func migrateCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		store, err := persistence.Open(cfg.DatabasePath)
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		return store.Migrate(cmd.Context())
+		return bootstrap.Migrate(cmd.Context(), cfg)
 	}}
 }
 
@@ -135,18 +56,11 @@ func backupCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		store, err := persistence.Open(cfg.DatabasePath)
+		destination, err := bootstrap.Backup(cmd.Context(), cfg, output)
 		if err != nil {
 			return err
 		}
-		defer store.Close()
-		if output == "" {
-			output = filepath.Join("backups", "fasttask-"+time.Now().Format("20060102-150405")+".db")
-		}
-		if err := store.Backup(cmd.Context(), output); err != nil {
-			return err
-		}
-		fmt.Println(output)
+		fmt.Println(destination)
 		return nil
 	}}
 	cmd.Flags().StringVarP(&output, "output", "o", "", "backup destination")
@@ -159,21 +73,11 @@ func doctorCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		store, err := persistence.Open(cfg.DatabasePath)
+		summary, err := bootstrap.Doctor(cmd.Context(), cfg)
 		if err != nil {
 			return err
 		}
-		defer store.Close()
-		if err := store.Migrate(cmd.Context()); err != nil {
-			return err
-		}
-		if err := store.Ready(cmd.Context()); err != nil {
-			return err
-		}
-		if _, err := time.LoadLocation("Asia/Shanghai"); err != nil {
-			return err
-		}
-		fmt.Printf("ok database=%s listen=%s web=%s\n", cfg.DatabasePath, cfg.Address(), cfg.WebDist)
+		fmt.Println(summary)
 		return nil
 	}}
 }
