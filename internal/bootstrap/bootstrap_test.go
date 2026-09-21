@@ -1,0 +1,217 @@
+package bootstrap
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/FastR-D/FastTask/internal/config"
+	"go.uber.org/fx"
+	"go.uber.org/fx/fxtest"
+	"go.uber.org/goleak"
+)
+
+// testConfig returns a configuration that points at a throwaway database and an
+// ephemeral loopback port, so fx apps can start and stop inside tests without
+// touching real state.
+func testConfig(t *testing.T) config.Config {
+	t.Helper()
+	port := freePort(t)
+	return config.Config{
+		Listen:                "127.0.0.1",
+		Port:                  port,
+		PublicURL:             fmt.Sprintf("http://127.0.0.1:%d", port),
+		DatabasePath:          filepath.Join(t.TempDir(), "bootstrap-test.db"),
+		JWTSecret:             "bootstrap-test-secret-value-0123456789",
+		AccessTTL:             time.Hour,
+		RefreshTTL:            24 * time.Hour,
+		AdminIdentifier:       "admin",
+		AdminPassword:         "bootstrap-test-admin-password",
+		AdminName:             "Bootstrap Test Admin",
+		WorkerInterval:        50 * time.Millisecond,
+		WebDist:               filepath.Join(t.TempDir(), "no-web"),
+		Environment:           "development",
+		AudioDir:              filepath.Join(t.TempDir(), "audio"),
+		PanelJWTSecret:        "bootstrap-test-panel-secret-0123456789",
+		ProviderEncryptionKey: "bootstrap-test-provider-key-0123456789",
+		TrustedProxies:        []string{"127.0.0.1/32"},
+		IntegrationTimeout:    time.Second,
+	}
+}
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve free port: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// TestValidateRoleGraphs asserts every role composition builds a complete
+// dependency graph. fx.ValidateApp runs in DryRun mode, so no constructor
+// executes and no port or database is touched; assembly errors surface here in
+// CI rather than at production startup (wiring.md §2 rule 5, §8).
+func TestValidateRoleGraphs(t *testing.T) {
+	cfg := testConfig(t)
+	cases := []struct {
+		name    string
+		options []fx.Option
+	}{
+		{"serve-full", append(serveOptions(cfg, ServeOptions{WithWorker: true, WithScheduler: true}), fx.NopLogger)},
+		{"serve-http-only", append(serveOptions(cfg, ServeOptions{}), fx.NopLogger)},
+		{"serve-role", []fx.Option{ServeRole, fx.Supply(cfg), fx.NopLogger}},
+		{"worker-role", []fx.Option{WorkerRole, fx.Supply(cfg), fx.NopLogger}},
+		{"scheduler-role", []fx.Option{SchedulerRole, fx.Supply(cfg), fx.NopLogger}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := fx.ValidateApp(tc.options...); err != nil {
+				t.Fatalf("graph validation failed: %v", err)
+			}
+		})
+	}
+}
+
+// TestServeRoleStartsServesAndStops is the fxtest integration test required by
+// wiring.md §8: start the full serve role, hit the health endpoint, shut down
+// gracefully, and assert no goroutines leak.
+func TestServeRoleStartsServesAndStops(t *testing.T) {
+	defer goleak.VerifyNone(t,
+		// SQLite and the net/http server wind down asynchronously; give them a
+		// moment and ignore well-known runtime background goroutines.
+		goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"),
+		goleak.IgnoreAnyFunction("os/signal.signal_recv"),
+	)
+
+	cfg := testConfig(t)
+	app := fxtest.New(t,
+		append(serveOptions(cfg, ServeOptions{WithWorker: true, WithScheduler: true}), fx.NopLogger)...,
+	)
+	app.RequireStart()
+	defer app.RequireStop()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	url := fmt.Sprintf("http://%s/health/ready", cfg.Address())
+	var ready bool
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			ready = resp.StatusCode == http.StatusOK
+			resp.Body.Close()
+			if ready {
+				break
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatalf("health/ready never returned 200 at %s", url)
+	}
+}
+
+// spyObserver records the order of component start/stop transitions.
+type spyObserver struct {
+	mu      sync.Mutex
+	stopped []string
+}
+
+func (s *spyObserver) Started(string) {}
+func (s *spyObserver) Stopped(component string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopped = append(s.stopped, component)
+}
+
+func (s *spyObserver) order() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.stopped...)
+}
+
+// TestShutdownStopsHTTPBeforeWorker asserts the ordering contract from
+// wiring.md §6: on shutdown HTTP must stop before the worker, so no new request
+// enters a runtime that is already draining. fx runs OnStop hooks in reverse
+// registration order; HTTPModule is appended last in serveOptions, so it stops
+// first.
+func TestShutdownStopsHTTPBeforeWorker(t *testing.T) {
+	defer goleak.VerifyNone(t,
+		goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"),
+		goleak.IgnoreAnyFunction("os/signal.signal_recv"),
+	)
+
+	cfg := testConfig(t)
+	spy := &spyObserver{}
+	app := fxtest.New(t,
+		append(
+			serveOptions(cfg, ServeOptions{WithWorker: true, WithScheduler: true}),
+			fx.Decorate(func() LifecycleObserver { return spy }),
+			fx.NopLogger,
+		)...,
+	)
+	app.RequireStart()
+	app.RequireStop()
+
+	order := spy.order()
+	httpIdx, workerIdx := -1, -1
+	for i, component := range order {
+		switch component {
+		case "http":
+			httpIdx = i
+		case "worker":
+			workerIdx = i
+		}
+	}
+	if httpIdx == -1 || workerIdx == -1 {
+		t.Fatalf("expected both http and worker stop events, got %v", order)
+	}
+	if httpIdx > workerIdx {
+		t.Fatalf("HTTP stopped after worker (order=%v); HTTP must stop first", order)
+	}
+}
+
+// TestServeReturnsOnContextCancel verifies the Serve entry point honours context
+// cancellation and returns cleanly, which is how the serve command shuts down on
+// SIGINT/SIGTERM.
+func TestServeReturnsOnContextCancel(t *testing.T) {
+	defer goleak.VerifyNone(t,
+		goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"),
+		goleak.IgnoreAnyFunction("os/signal.signal_recv"),
+	)
+
+	cfg := testConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, cfg, ServeOptions{WithWorker: true, WithScheduler: true})
+	}()
+
+	// Wait for the HTTP listener to accept connections, then cancel.
+	deadline := time.Now().Add(5 * time.Second)
+	addr := cfg.Address()
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned error: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Serve did not return after context cancellation")
+	}
+}
