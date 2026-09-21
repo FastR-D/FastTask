@@ -1,47 +1,51 @@
 # ADR-0004：mdui 与 assistant-ui 的样式与职责边界
 
-> 状态：**待定**  
+> 状态：已接受  
 > 提出日期：2026-09-22  
-> 预计定案时机：前端 mdui 完全重写落地之后，依据届时的真实代码决定  
+> 定案日期：2026-09-22（mdui 完全重写落地后，依据提交 `9456e5f` 的真实代码）  
 > 实现文档：[`doc/frontend.md`](../frontend.md)
 
 ## 1. 背景
 
-两条工作流正在并行：
+本 ADR 曾被有意挂起：在 mdui 重写落地前，任何样式方案都是对尚不存在的代码做猜测。现在工作流 A 已完成（提交 `9456e5f restruct with mdui`），可以依据事实定案。
 
-- **工作流 A（进行中，在另一处）**：用 mdui 2.1.5 完全重写前端，目标是让响应式布局真正可用。mdui 是基于 Lit 的 Material You Web Components 库，无官方 React 封装。
-- **工作流 B（本期）**：接入 `@assistant-ui/react` 0.15.21，它是基于 Radix 的**无样式 headless primitives**。
+## 2. 决策
 
-技术事实：当前前端是 React 19.2.8，React 19 对自定义元素有原生支持，这是两者可以共存的前提。但「怎么共存」有多个互不兼容的答案。
+采用**方案 A：只用 mdui 设计令牌，手写 assistant-ui primitives 的样式**。不引入 Tailwind。
 
-## 2. 为什么挂起
+这不是在三个候选里权衡的结果——**mdui 重写已经把这套约定建立起来并执行得相当彻底**，本 ADR 只是把既成事实写进规则，让工作流 B 遵守同一套约定。
 
-在工作流 A 落地之前，任何选择都是对尚不存在的代码做猜测——mdui 重写会不会引入 Tailwind、组件分层怎么切、主题和暗色模式怎么组织、目录结构长什么样，这些都会直接决定正确答案。**过早定案的风险高于推迟定案的风险。**
+## 3. 依据（代码事实）
 
-## 3. 挂起期间的硬约束
+| 事实 | 证据 |
+|---|---|
+| **没有引入 Tailwind 或任何原子化 CSS** | `web/package.json` 的依赖只有 `mdui` 与 `@fontsource/material-icons` |
+| **零硬编码色值** | `styles.css`、`admin.css`、`lens.css` 中全部颜色形如 `rgb(var(--mdui-color-*))`，扫描无字面色值 |
+| **排版与形状同样走令牌** | `var(--mdui-typescale-*)`、`var(--mdui-shape-corner-*)` |
+| **主题是 `mdui-theme-auto`** | `index.html` 的 `<html class="mdui-theme-auto">`，跟随 `prefers-color-scheme`。无 `setColorScheme` 调用、无自定义主题层、无手动切换 |
+| **自定义事件已有既定解法** | `src/mdui-react.ts` 提供 `useMduiEvent(ref, name, handler)`（ref + `addEventListener`）与 `fieldValue(event)` |
+| **组件注册收敛在单一入口** | `src/mdui.ts` 逐个 import 组件，且**只**被 `main.tsx` 引入，使 jsdom 测试中自定义元素保持惰性 |
+| **JSX 类型来自 mdui 官方** | `src/vite-env.d.ts` 的 `/// <reference types="mdui/jsx.en.d.ts" />` |
 
-未定案不等于无约束。两条工作流在此期间都必须遵守 [`doc/frontend.md`](../frontend.md) §2 的交界契约，其要点是：
+暗色模式因此对工作流 B 是零成本的：只要不硬编码颜色，对话区自动跟随系统主题。这一条本身就足以否决方案 B——引入 Tailwind 会让对话区需要**第二套**暗色模式实现，并与 mdui 的令牌手工对齐。
 
-1. 工作流 A 负责 app shell、导航、主题和全部非对话页面；**不实现对话页内部**，只留一个挂载点。
-2. 工作流 B 只在挂载点内部工作，不改 shell、不改路由、不改主题定义。
-3. 两者只通过两个接口交界：React 运行时 Provider，以及 mdui 暴露的 CSS 自定义属性。
-4. 对话区不得读取 mdui 组件的内部实现细节，只读 token。
+## 4. 对工作流 B 的约束
 
-只要这四条成立，本 ADR 无论最终选哪个方案，都不会要求返工 shell 或后端。
+1. **不得引入 Tailwind 或任何原子化 CSS 框架。**
+2. **颜色一律 `rgb(var(--mdui-color-*))`，字号一律 `var(--mdui-typescale-*)`，圆角一律 `var(--mdui-shape-corner-*)`。** 提交中不允许出现字面色值。
+3. **新样式写进 `web/src/agent.css`**，由 `web/src/agent/index.tsx` 引入，与 `lens.css` / `admin.css` 的既有惯例一致。
+4. **需要新的 mdui 组件时，加进 `src/mdui.ts`**——那是唯一注册点，不得在别处 import 组件。
+5. **非标准名称的自定义事件用 `useMduiEvent`，取输入值用 `fieldValue`。** 不要另造一套适配。
+6. **assistant-ui 的 primitives 保持无样式**，不引入其官方 shadcn 组件包。
 
-## 4. 候选方案
+## 5. 被否决的方案
 
-定案时在以下方案中选择，并按需补充届时才知道的新选项：
+| 方案 | 否决理由 |
+|---|---|
+| B. 对话区引入 Tailwind + assistant-ui 官方组件 | 会在项目里并存两套样式体系与两套暗色模式实现，而现有代码已经证明纯令牌方案可行且干净 |
+| C. 在 primitives 之上封装 FastTask 组件层 | 多一层抽象但换不来什么——mdui 组件已经可以直接用在对话区（`Dialogue` 现在就在用 `mdui-list`、`mdui-text-field`、`mdui-button-icon`），不需要再包一层 |
 
-| 方案 | 要点 | 主要代价 |
-|---|---|---|
-| A. 只用 mdui token，手写 primitives 样式 | 不引入 Tailwind，对话区样式全部基于 `--mdui-color-*` 手写 | 聊天区样式要自己写一遍 |
-| B. 对话区引入 Tailwind + assistant-ui 官方组件 | 可直接采用官方示例，开发最快 | 项目内并存两套样式体系，主题与暗色模式要手工对齐 |
-| C. 在 primitives 之上封装 FastTask 组件层 | 内部用 mdui 实现，对外暴露稳定接口 | 多一层抽象，前期投入最大 |
+## 6. 定案时发现的、需要在实现中处理的问题
 
-## 5. 定案时需要回答的问题
-
-- mdui 重写是否引入了 Tailwind 或其他原子化 CSS？
-- 主题与暗色模式的事实来源是 mdui 的 `setColorScheme` 还是自定义 CSS 变量层？
-- React 19 与 mdui 自定义事件的绑定方式最终怎么处理（非标准事件名仍需 `ref` + `addEventListener`）？
-- 对话页在新的路由和布局里是整页、侧栏还是可展开面板？这会改变 composer 和 viewport 的尺寸约束。
+- **`.chat-shell` 的固定高度不适合 assistant-ui。** 当前是 `height:calc(100dvh - 20rem)`（`styles.css:233`，移动端 `styles.css:250`），这个魔数依赖页头的确切高度。assistant-ui 的 Thread viewport 需要一个由 flex/grid 约束、自行管理滚动的容器。接入时应改为 `minmax(0,1fr)` 之类的弹性约束，而不是继续加魔数。
+- **测试中 mdui 元素未定义但仍在 DOM 中。** 既有测试用 `closest('mdui-chip')`、`closest('mdui-button')` 断言并能通过，说明这条路可行。但**不要依赖 mdui 组件的交互行为做断言**——`src/mdui.ts` 不会在测试里加载，组件没有行为，只有属性。

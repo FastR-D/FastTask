@@ -37,7 +37,11 @@
 }
 ```
 
-**安全规则：`state` 和 `threadId` 是不可信输入。** `state` 由客户端持有，服务端**只能**把它当作乐观并发的提示，绝不能据此重建权威状态——权威状态一律从 SQLite 读取。`threadId` 必须校验归属于当前认证用户，否则返回 `404`（遵循 `arch.md` §12 的跨用户 `404` 惯例）。`user_id` 永远取自认证上下文。
+**安全规则：请求体中的 `state`、`threadId`、`system`、`tools` 全部是不可信输入。** `state` 由客户端持有，服务端**只能**把它当作乐观并发的提示，绝不能据此重建权威状态——权威状态一律从 SQLite 读取。`threadId` 必须校验归属于当前认证用户，否则返回 `404`（遵循 `arch.md` §12 的跨用户 `404` 惯例）。`user_id` 永远取自认证上下文。
+
+**`system` 与 `tools` 一律忽略。** 这两个字段由 assistant-ui 从前端的 model context 自动填充，客户端可以任意伪造。系统提示词和工具注册表只以服务端的为准——否则前端可以注入提示词或声明服务端并未授权的工具。服务端读到这两个字段后直接丢弃，不记录、不合并。
+
+**`threadId` 为 `null` 时**（用户的第一条消息，前端尚无 thread），服务端在同一事务内创建 `conversations` 记录，并在本次流的第一个 `update-state` 里用 `set` 操作把 `["fasttask","threadId"]` 回推给客户端。前端 `converter` 负责把它接回 thread 列表。
 
 ### 2.3 命令类型
 
@@ -137,7 +141,26 @@ data: [DONE]\n\n
 }
 ```
 
+三条说明：
+
+- **这是 FastTask 自己定义的结构，不是 assistant-ui 的类型。** 前端 `converter` 负责把它映射成 assistant-ui 的 `ThreadMessage`。服务端不需要知道 assistant-ui 的内部类型，也不应照抄它的字段名。
+- **`messages[].status` 的取值**按 assistant-ui 的 `MessageStatus` 设计，便于 converter 直接透传：`{"type":"running"}`、`{"type":"complete","reason":"stop"}`、`{"type":"incomplete","reason":"cancelled"|"error"|...}`、`{"type":"requires-action","reason":"tool-calls"}`。等待审批时用最后一种。
+- **`approval` 是 FastTask 自有字段，converter 绝不能把它映射到 `ToolCallMessagePart.approval`。** 原因见 [ADR-0002](adr/0002-assistant-transport.md) §3.1：assistant-transport 不接 `onRespondToToolApproval`，映射过去会渲染出点了没反应的审批控件。审批 UI 用 `makeAssistantToolUI` 自己画，决定用 `addToolResult` 回传。
+
 `fasttask` 命名空间承载对话之外的业务状态，前端 `converter` 把它取出来单独渲染（提案 diff 卡片、今日计划预览）。**这是让对话与业务视图共用一条流的机制**，不要再为它另开轮询。
+
+### 2.7.1 消息索引由服务端拥有
+
+`messages` 是数组，`update-state` 用下标寻址。服务端是唯一的下标分配者：
+
+```text
+新建助手消息： set  ["messages","<n>"]          = {id, role:"assistant", parts:[], status:{type:"running"}, createdAt}
+建立文本片段： set  ["messages","<n>","parts","0"] = {"type":"text","text":""}
+流式追加文本： append-text ["messages","<n>","parts","0","text"] = "增量"
+收尾：        set  ["messages","<n>","status"]   = {"type":"complete","reason":"stop"}
+```
+
+**`append-text` 之前必须先 `set` 出空字符串**，否则客户端抛错（见 §2.6）。客户端上报的 `state` 不参与下标计算。
 
 ### 2.8 续流语义
 
@@ -194,7 +217,30 @@ queued/running -> cancelled（用户显式取消）
 
 `awaiting_approval` 是本设计新增的状态：模型发起了提案工具调用，运行让出控制权等待用户决定。此时 HTTP 流**正常结束**（发送 `[DONE]`），不挂着连接等人。
 
-### 4.1 续流覆盖范围
+### 4.0 Run 状态与 AgentJob 状态的映射
+
+两者是不同的东西，必须显式对应，否则 Worker 和 HTTP 层会各说各话：
+
+| `agent_runs.status` | 对应 `agent_jobs.status` | 说明 |
+|---|---|---|
+| `queued` | `queued` | 已创建，等 Worker 领取 |
+| `running` | `running` | Worker 持有租约，循环执行中 |
+| `awaiting_approval` | `succeeded` | **本次作业正常结束**。等待用户决定，不占租约、不消耗重试次数 |
+| `succeeded` / `failed` / `cancelled` | 同名 | 一一对应 |
+| `interrupted` | `failed`（`error_code=INTERRUPTED`） | 租约过期且无人续跑 |
+
+关键点：**`awaiting_approval` 时对应的 AgentJob 已经 `succeeded`。** 等待用户审批可能长达数小时，不能让一个作业一直占着租约。用户提交决定时创建**新的 AgentJob**，但复用**同一个 `agent_runs` 记录**（见 §7）。
+
+### 4.1 v1 明确不支持的能力
+
+写清楚避免实现者自行发挥：
+
+- **不支持消息编辑与分支。** `capabilities.edit` 不开启，`onEdit` 不接。`agent_messages.parent_id` 字段保留供将来使用，v1 内一条 thread 的消息恒为线性。
+- **不支持重新生成（reload）。** 不实现 `onReload`。
+- **不支持附件。** `adapters.attachments` 不配置。
+- **一个用户同时最多一个活跃运行**（§9.3），因此不需要处理同 thread 并发运行。
+
+### 4.2 续流覆盖范围
 
 明确区分两种断线，不要对外宣称超出实际能力的保证：
 
@@ -205,7 +251,7 @@ queued/running -> cancelled（用户显式取消）
 
 第一种是移动端的常见情况，也是选择本协议的主要动机。第二种留待后续按需处理。
 
-### 4.2 客户端断开不等于取消
+### 4.3 客户端断开不等于取消
 
 HTTP 请求的 `AbortSignal` 触发时**不得取消运行**。运行由 Worker 持有，继续执行并继续写 `agent_run_chunks`。只有显式调用现有的 `PUT /api/v1/agent-jobs/{job_id}/cancellation`（`app.go:789`）才取消。
 
@@ -216,6 +262,28 @@ HTTP 请求的 `AbortSignal` 触发时**不得取消运行**。运行由 Worker 
 每个 application 服务通过 fx 值组 `group:"agent_tools"` 注册自己的工具（见 [`doc/wiring.md`](wiring.md) §5），不在中心文件枚举。
 
 工具定义至少包含：名称、描述、JSON Schema 参数、级别（`readonly` / `proposal`）、执行函数。
+
+### 5.1.1 必须新增 Provider 能力：现有接口不支持工具调用
+
+当前 `agent.Provider`（`openai.go:20`）只有 `TaskProposal` 和 `ConversationReply` 两个方法，**没有任何工具调用能力**，无法承载 agent 循环。需要新增一个 port，与现有接口并存（现有接口仍被旧的 `conversation` / `task_tree_*` 作业使用，见 §8.1）：
+
+```go
+// internal/agent 中新增，不替换现有 Provider
+type ChatProvider interface {
+    Name() string
+    // 一次模型调用。messages 含完整历史，tools 是本次允许调用的工具定义。
+    // 实现负责把结果流式写入 sink（文本增量、工具调用），并返回本轮的结束原因。
+    Chat(ctx context.Context, req ChatRequest, sink ChatSink) (ChatResult, error)
+}
+```
+
+三条要求：
+
+- 使用 OpenAI-compatible 的 `tools` / `tool_choice` 参数和 `tool_calls` 响应字段，与现有 `complete()`（`openai.go:181` 起）共用 HTTP 客户端与鉴权。
+- **必须支持流式**（`stream: true`），否则 §2.6 的 `append-text` 退化成一次性输出，流式就白做了。
+- `ChatSink` 是 Go 侧接口，不暴露给领域层；它的实现负责把增量转成 §2.5 的 chunk 并写入 `agent_run_chunks` 和 hub。
+
+**模型不支持工具调用时的行为**：Provider 校验失败应返回明确错误，运行标记 `failed`、错误码 `PROVIDER_NO_TOOL_SUPPORT`，并在界面提示管理员更换模型。**不要静默降级成单轮对话**——那会让用户以为 agent 在工作而实际什么都没做。
 
 ### 5.2 强制规则
 
@@ -232,15 +300,20 @@ HTTP 请求的 `AbortSignal` 触发时**不得取消运行**。运行由 Worker 
 ## 6. 循环执行规则
 
 ```text
-载入 thread 历史 + 系统提示 + 工具注册表
+载入 thread 历史 + 服务端系统提示 + 服务端工具注册表（忽略请求体里的 system / tools）
 循环：
-  调用模型（带工具定义）
-  若返回文本 -> 以 append-text 流式推送
-  若返回 readonly 工具调用 -> 执行、结果回灌上下文、继续循环
-  若返回 proposal 工具调用 -> 创建 Proposal、推送待审批工具调用、转 awaiting_approval、结束本次流
-  若无工具调用且有完整回复 -> 结束运行
+  调用模型（流式，带工具定义）
+  文本增量 -> 立即以 append-text 推送
+  本轮结束后按工具调用分情况：
+    无工具调用                -> 运行结束（succeeded）
+    只有 readonly 工具调用    -> 全部执行，结果回灌上下文，继续下一轮
+    含任一 proposal 工具调用  -> 创建 Proposal、推送待审批工具片段、转 awaiting_approval、发 [DONE] 结束本次流
 每轮开始前检查 cancel_requested
 ```
+
+**同一轮同时返回文本和工具调用是常见情况**，不是异常：文本照常流式推送，然后按上表处理工具调用。文本不会因为有工具调用而被丢弃。
+
+**同一轮返回多个工具调用时**：全部是 readonly 则并发执行、全部回灌；只要含一个 proposal 工具，则 readonly 的照常执行并回灌，proposal 的转入审批，本轮到此为止。
 
 保守默认值（接真实模型后按观测调整，属 `agent.md` §11 待确认项）：
 
@@ -267,11 +340,47 @@ HTTP 请求的 `AbortSignal` 触发时**不得取消运行**。运行由 Worker 
   -> 工具结果回灌模型上下文，运行回到 running 继续
 ```
 
-三条规则：
+### 7.1 审批只能走 `add-tool-result`
+
+**不要使用 assistant-ui 的 `respondToApproval` / `hitl` / `humanTool`。** `useAssistantTransportRuntime` 没有接 `onRespondToToolApproval`，用了传不到服务端。详见 [ADR-0002](adr/0002-assistant-transport.md) §3.1。
+
+前端用 `makeAssistantToolUI` 按工具名注册审批卡片，用户点击后调用 `addToolResult`，结果体形如：
+
+```jsonc
+{ "decision": "approve" }
+{ "decision": "reject", "reason": "第二步和第三步重复了" }
+```
+
+### 7.2 审批续跑的是同一个 Run，不是新 Run
+
+这一点最容易做错。`add-tool-result` 命令到达 `POST /agent/commands` 时：
+
+```text
+若该 toolCallId 对应的 agent_run 处于 awaiting_approval
+  -> 复用该 agent_run（同 run_id、同 assistant message、同消息下标）
+  -> 创建一个新的 AgentJob 承载后续轮次
+  -> agent_run.status 回到 running
+否则
+  -> 按普通命令处理（新建 run）
+```
+
+**不要为审批回执新建 `agent_run`**，否则同一次对话会分裂成两条运行记录，续流和消息下标都会错乱。
+
+### 7.3 提案由 HTTP 处理器同步应用
+
+`ApplyProposal` 在**收到审批回执的 HTTP 请求里同步执行**，不交给 Worker：
+
+- 用户需要立刻看到 `412`（base revision 已变）或 `409`，而不是等 Worker 轮询后从流里看到一个错误。
+- `ApplyProposal` 是短事务，不调用外部服务，放在请求路径里不违反 `arch.md` §11.1。
+
+顺序是：鉴权 → 同步 `ApplyProposal` → 记录工具结果 → 唤醒 Worker 续跑 → 开始 SSE 流。应用失败时不续跑运行，直接返回错误状态码。
+
+### 7.4 其他规则
 
 - **审批回执必须重新鉴权。** `add-tool-result` 里的 `toolCallId` 必须归属当前用户的 thread，否则 `404`。
 - **base revision 变化时返回 `412`**，提案标记为冲突，不静默覆盖（`arch.md` §9.1）。
 - **拒绝理由要回灌模型。** 这是对话式修正相对一次性生成的核心价值，不能只是丢弃提案。
+- **重复回执要幂等。** 同一个 `toolCallId` 第二次提交决定时返回 `409`，不重复应用提案。
 
 ## 8. 与现有 Worker / Job 的关系
 
@@ -289,6 +398,30 @@ POST /agent/commands
 - 当前 Worker 轮询间隔 300ms（`config.go:61`）。首个 token 的延迟因此最多多 300ms，可接受；后续可加一个入队通知 channel 消除这段延迟，属优化而非必需。
 - HTTP 处理器**不得持有数据库事务**跨越整个流。
 
+### 8.1 旧对话路径的处置
+
+`POST /api/v1/conversations/{id}/messages`（`server.go:1024`）会创建 `type="conversation"` 的单轮作业，与新的 agent 运行是两套并行系统。处置方式：
+
+| 对象 | v1 处置 |
+|---|---|
+| `POST /conversations/{id}/messages` | **停止创建新作业**，返回 `410 Gone`，提示改用 `/agent/commands` |
+| `GET /conversations`、`GET /conversations/{id}/messages` | 保留只读，用于展示迁移前的历史对话 |
+| Worker 的 `case "conversation"` | 保留，处理迁移期间可能残留的队列作业；队列清空后由后续提交删除 |
+| `agent.Provider.ConversationReply` | 随上一条一起保留，不再有新调用方 |
+
+**不要保留两条可写路径。** 两套系统同时能写会让「这条对话在哪张表里」变成每次排查都要先确认的问题。
+
+### 8.2 与 fx 迁移的顺序依赖
+
+本文档与 [`doc/wiring.md`](wiring.md) 有两处交叠，必须协调，否则会互相覆盖：
+
+| 交叠点 | 处置 |
+|---|---|
+| `main.go:95` 的 `WriteTimeout` 改为 `0` | **归 `wiring.md` 步骤 2**（fx 化装配时一并改）。本文档 §9.2 只描述要求，不重复实施 |
+| Worker 的作业类型 `switch`（`worker.go:104`） | 若 `wiring.md` 步骤 5 已完成，**按值组注册 `agent_run` 处理器**；若尚未完成，先加 `case`，由步骤 5 一并改造 |
+
+**推荐顺序：`wiring.md` 步骤 1–2 先行**，再并行推进两条线。步骤 1–2 只动装配不动业务逻辑，风险低、收益是给 Agent 运行时的新组件提供 lifecycle 挂载点。
+
 ## 9. HTTP 与运维落地
 
 ### 9.1 必须绕过 Huma
@@ -300,7 +433,7 @@ POST /agent/commands
 
 ### 9.2 必须修掉的阻塞项
 
-**`WriteTimeout: 60 * time.Second`（`main.go:95`）会掐断任何超过 60 秒的 SSE 流。** 处理方式：把 `http.Server.WriteTimeout` 设为 `0`，改用 `http.ResponseController` 对每个请求单独设置写截止时间——普通 JSON 端点保持 60 秒，流式端点不设或设很长。**不要简单地把全局 `WriteTimeout` 调大**，那会同时削弱所有普通端点的保护。
+**`WriteTimeout: 60 * time.Second`（`main.go:95`）会掐断任何超过 60 秒的 SSE 流。** 处理方式：把 `http.Server.WriteTimeout` 设为 `0`，改用 `http.ResponseController` 对每个请求单独设置写截止时间——普通 JSON 端点保持 60 秒，流式端点不设或设很长。**不要简单地把全局 `WriteTimeout` 调大**，那会同时削弱所有普通端点的保护。这项改动由 `wiring.md` 步骤 2 实施，见 §8.2。
 
 ### 9.3 其他要点
 

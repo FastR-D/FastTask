@@ -79,7 +79,19 @@ var SchedulerRole = fx.Options(Core, SchedulerModule)
 | `MaterializeJobResult`（`app.go:884`） | 按作业类型分别落到 Goal / Conversation / Plan | 拆成值组，见 §5 |
 | `ConvertExternalImport` | Integration 读 + Goal 写 | 归 `IntegrationService`，同事务内调用 `GoalService.createTaskTx` |
 
-新增 `TxManager` port：提供 `WithTx(ctx, func(tx) error) error`，各服务暴露接受 `tx` 的内部方法供同事务组合。**不得向上层暴露 `*gorm.DB`**（`arch.md` §6.2）。
+新增 `TxManager`：由 `persistence` 提供，签名为
+
+```go
+type TxManager interface {
+    WithTx(ctx context.Context, fn func(tx *gorm.DB) error) error
+}
+```
+
+各服务额外暴露接受 `tx` 的内部方法（如 `(*GoalService) createTaskTx(tx *gorm.DB, ...)`）供同事务组合。
+
+**关于 `arch.md` §6.2「不向上暴露 `*gorm.DB`」**：该约束针对的是 `application` **之上**的层——HTTP 处理器和 `domain` 都不得接触 `*gorm.DB`，这一点在重构后必须继续成立。`application` 内部以 `*gorm.DB` 作为事务句柄是现状（`app.go:884` 的 `MaterializeJobResult` 已经如此），本次重构**不改变这一点**。
+
+把 `*gorm.DB` 换成完全不透明的 `Tx` 类型是更干净的做法，但那需要同时引入按聚合划分的 Repository 接口，改动面远超本次目标。**明确列为非目标**，需要时另立 ADR。
 
 ## 5. 值组
 
@@ -93,6 +105,16 @@ fx 的价值主要在这里。四个值组：
 | `group:"job_materializers"` | 各领域服务 | `MaterializeJobResult` 的替代实现 |
 
 `httpapi/server.go` 已有 `registerAuth`、`registerGoals`、`registerPlans`、`registerJobs` 等 13 个分组函数（`server.go:214-1386`），直接改造成值组提供者即可，不需要重写路由定义本身。
+
+值组成员的形状统一为：
+
+```go
+type RouteRegistrar interface {
+    RegisterRoutes(api huma.API)
+}
+```
+
+各领域提供一个实现该接口的类型（持有它需要的服务），由 fx 以 `group:"routes"` 收集，`httpapi` 装配时遍历调用。`agent_tools` 与 `job_handlers` 同理，各自定义一个小接口，不要用裸函数——裸函数在 fx 的错误信息里无法分辨来源。
 
 `job_handlers` 和 `job_materializers` 替换掉 `worker.go:104` 和 `app.go:884` 两处集中的 `switch`。收益是新增作业类型时不必回到中心文件——Agent 运行时正要新增 `agent_run` 类型。
 
@@ -130,6 +152,15 @@ fx 的价值主要在这里。四个值组：
 | 6 | 拆出 `GoalService`、`PlanService`、`ProgressService`，引入 `TxManager` 处理 §4.1 的三处跨聚合 | 事务边界测试全过 |
 | 7 | 路由改造成 `routes` 值组 | OpenAPI 输出逐字节不变 |
 | 8 | 补 `worker` / `scheduler` 角色命令 | 各自能独立启动并处理作业 |
+
+### 7.1 与 Agent 工作流的联锁
+
+`doc/agent-impl.md` 的实现与本文档有两处交叠，已在那份文档 §8.2 约定：
+
+- **`main.go:95` 的 `WriteTimeout` 改为 `0` 归本文档步骤 2**，Agent 工作流不重复实施。这是 SSE 能工作的前提，因此**步骤 1–2 应当先于 Agent 工作流的阶段 B 完成**。
+- **Worker 的作业类型 `switch` 归本文档步骤 5**。若 Agent 工作流先到，先加 `case "agent_run"`，步骤 5 再一并改造成值组。
+
+除这两处外，两条工作流可以完全并行。
 
 步骤 7 的验收条件值得强调：**改造前后 `GET /api/v1/openapi.json` 的输出必须完全一致**。这是证明路由重构没有意外改变对外契约的最直接手段，建议做成一个固化对比测试。
 

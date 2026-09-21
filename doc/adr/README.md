@@ -20,7 +20,7 @@
 | [0001](0001-fx-composition-root.md) | 采用 fx 作为组合根并按聚合拆分 `application.App` | 已接受 | 后端装配、生命周期、角色进程 | [`doc/wiring.md`](../wiring.md) |
 | [0002](0002-assistant-transport.md) | Agent 前后端采用 assistant-transport 协议 | 已接受 | HTTP 契约、前端运行时、数据模型 | [`doc/agent-impl.md`](../agent-impl.md) |
 | [0003](0003-in-process-agent-loop.md) | Agent 循环内建于 Go 进程，工具即受控用例 | 已接受 | Agent 运行时、权限与事务边界 | [`doc/agent.md`](../agent.md) |
-| [0004](0004-frontend-styling-boundary.md) | mdui 与 assistant-ui 的样式与职责边界 | 待定 | 前端目录、主题、两条并行工作流 | [`doc/frontend.md`](../frontend.md) |
+| [0004](0004-frontend-styling-boundary.md) | mdui 与 assistant-ui 的样式与职责边界 | 已接受 | 前端目录、主题、两条并行工作流 | [`doc/frontend.md`](../frontend.md) |
 
 ## 3. 决策依赖关系
 
@@ -29,7 +29,7 @@
   └─> 0002 传输协议（需要服务端持有权威状态 + 工具审批）
         └─> 0001 组合根（新增多个长生命周期组件，需要统一装配与启停）
 
-0004 前端样式边界（待定，不阻塞 0001/0002/0003 的后端工作）
+0004 前端样式边界（独立于 0001/0002/0003，不影响后端）
 ```
 
-0004 被有意挂起：前端的 mdui 完全重写正在另一条工作流中进行，在它落地之前任何样式方案都是猜测。**但 0004 未决不阻塞后端实现**——三条已接受的决策都不依赖前端样式选型。0004 未决期间的唯一硬约束是 [`doc/frontend.md`](../frontend.md) §2 的交界契约，两条工作流都必须遵守。
+0004 曾被有意挂起，等 mdui 完全重写落地后依据真实代码定案，现已接受。四条决策均不互相阻塞。
