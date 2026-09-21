@@ -31,9 +31,9 @@
 |---|---|---|---|
 | 1 | `static()` 只挂载了 `/assets`，根路径文件落进 `NoRoute` 返回 `index.html` | `server.go:1546` | `/sw.js`、`/manifest.webmanifest` 会返回 HTML，**Service Worker 注册必然失败** |
 | 2 | token 存在 `sessionStorage` | `api.ts:10-12`、`api.ts:35-52` | PWA 每次冷启动都要重新登录，安装后体验不可用 |
-| 3 | 录音硬编码 `audio/webm` | `App.tsx:128` | **iOS Safari 的 MediaRecorder 只产出 mp4/aac**，语音功能在 iPhone 上必坏 |
+| 3 | 录音硬编码 `audio/webm` | `App.tsx:240` | **iOS Safari 的 MediaRecorder 只产出 mp4/aac**，语音功能在 iPhone 上必坏 |
 | 4 | `http.Server.WriteTimeout: 60s` | `main.go:95` | 掐断超过 60 秒的 SSE 流；PWA 场景下长运行是常态 |
-| 5 | 无 manifest、无 Service Worker、无图标 | — | 不满足可安装条件 |
+| 5 | 无 manifest、无 Service Worker、无图标 | — | 不满足可安装条件。注意 `index.html` 已有 `viewport-fit=cover`、`mobile-web-app-capable` 和 `apple-mobile-web-app-*`，且 CSS 已用 `env(safe-area-inset-*)`，这部分基础在 mdui 重写中已铺好 |
 
 第 3 项与 PWA 无关也应当修——它现在就是个 iPhone 上的功能性缺陷。正确做法是用 `MediaRecorder.isTypeSupported` 协商容器格式，并把实际 MIME 与扩展名一起传给后端，而不是写死 `voice.webm`。
 
@@ -42,7 +42,7 @@
 ### 3.1 Manifest
 
 - `display: "standalone"`，`orientation: "portrait"`，`start_url: "/"`，`scope: "/"`。
-- `theme_color` 与 mdui 主题保持一致（当前 `index.html` 里是 `#17211c`，重写后以 mdui 主题为准）。
+- `theme_color` 与 `index.html` 现有的两条 `theme-color`（浅色 `#fef7ff` / 深色 `#141218`）保持一致。注意 manifest 只能声明单一 `theme_color`，取浅色值，深色继续由 meta 的媒体查询覆盖。
 - 图标至少提供 192 与 512 两种尺寸，外加一张 `purpose: "maskable"`。
 - `lang: "zh-CN"`。
 
@@ -98,7 +98,7 @@
 - MediaRecorder 只支持 mp4/aac 容器，见阻塞项 #3。
 - Web Push 需要 iOS 16.4+ 且必须先添加到主屏幕。本期不做推送，记录备查。
 - 安装后的 PWA 有独立的存储沙箱，Safari 里的登录态不会带过去，首次打开需要重新登录一次。
-- 需要 `apple-touch-icon` 与 `viewport-fit=cover` 配合安全区域内边距，否则刘海屏下布局会被裁切。
+- 需要补 `apple-touch-icon`。`viewport-fit=cover` 与安全区域内边距已在 mdui 重写中处理。
 
 ## 7. 服务端改动清单
 

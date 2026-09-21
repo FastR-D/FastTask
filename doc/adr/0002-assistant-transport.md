@@ -31,10 +31,18 @@ FastTask 有三条已经写死的架构约束：SQLite 是事实来源（`arch.m
 |---|---|
 | 服务端持有权威 thread state，客户端只发命令 | `arch.md` §11：SQLite 内强一致，不变量由服务端强制 |
 | `resumeStateApi` + `resumeApi` 断线续流 | §10.1：Agent 作业进程重启后可恢复；移动端 PWA 网络不稳 |
-| 原生工具审批（`hitl` / `ToolApprovalOption`） | §9.1：Agent 输出必须经用户确认才能落库 |
+| 客户端工具结果回传（`add-tool-result`） | §9.1：Agent 输出必须经用户确认才能落库。审批以工具结果的形式回传，见下方「重要限制」 |
 | `update-state` 增量推送服务端自有状态 | 今日计划、提案 diff、Job 状态可与对话共用一条流 |
 
 反过来，AI SDK data-stream 协议把状态权威放在前端，与「服务端强制不变量」的模型对抗；而且该规范由 TypeScript 生态单方面演进，Go 侧只能被动追随。
+
+### 3.1 重要限制：审批不能用 assistant-ui 的 approval API
+
+核对 `@assistant-ui/core` 0.3.20 的实现后确认：**`useAssistantTransportRuntime` 没有接 `onRespondToToolApproval`**，只接了 `onAddToolResult`。`ExternalStoreAdapter` 类型上存在该钩子，`hitl` / `humanTool` / `ToolApprovalOption` 也都导出，但在 assistant-transport 这条路径上它们**不会把用户的决定送到服务端**。
+
+因此 FastTask 的审批必须走 `add-tool-result`，把用户的决定编码在工具结果里。前端**不得**使用 `respondToApproval`、`hitl`、`humanTool`，也不得在 converter 里填充 `ToolCallMessagePart.approval` 字段——那会渲染出点了没反应的审批控件。
+
+具体做法见 [`doc/agent-impl.md`](../agent-impl.md) §7。
 
 ## 4. 代价
 
