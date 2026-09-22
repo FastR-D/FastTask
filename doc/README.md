@@ -52,7 +52,7 @@
 | 文档 | 类型 | 首次 | 更新 | 说明 |
 |---|---|---|---|---|
 | [`arch.md`](arch.md) | 🟢🟡 混合 | 2026-08-09 | 2026-09-22 | 架构总纲。§7 领域模块、§8 数据模型、§11 事务与并发、§12 安全边界已实现；§6.1 的目录树是**目标结构，代码未按此排列** |
-| [`tech.md`](tech.md) | 🟢🟡 混合 | 2026-08-09 | 2026-09-22 | 技术选型与工程约定。§2.1 选型表含尚未引入的依赖（fx、assistant-ui、mdui 已落地、vite-plugin-pwa 未落地）；§4 目录同样是目标结构 |
+| [`tech.md`](tech.md) | 🟢🟡 混合 | 2026-08-09 | 2026-09-22 | 技术选型与工程约定。§2.1 选型表的依赖均已落地（fx、assistant-ui、mdui、vite-plugin-pwa）；§4 目录同样是目标结构 |
 | [`func.md`](func.md) | 🟢 已实现 | 2026-08-09 | 2026-09-15 | 产品功能语义与业务规则 |
 | [`interface.md`](interface.md) | 🟢 已实现 | 2026-08-09 | 2026-09-22 | HTTP 契约分组与协议约定。字段级以 OpenAPI 为准 |
 
@@ -63,17 +63,17 @@
 | [`lens.md`](lens.md) | 🟢 已实现 | 2026-09-15 | 任务坐标、周复盘、目标地图的产品判断 |
 | [`lens-impl.md`](lens-impl.md) | 🟢 已实现 | 2026-09-15 | 上者的可执行实现规格 |
 
-### 2.4 规划中的能力（待实现）
+### 2.4 Agent / 组合根 / 前端 / PWA（已实现）
 
-**这四份加上 ADR 是当前主要的实现待办。**
+**这四份加上 ADR 描述的能力已全部实现并通过测试（截至 2026-09-22）。** 实现细节以代码与 OpenAPI 为准；这些文档保留为设计意图与验收依据。
 
 | 文档 | 类型 | 更新 | 行数 | 说明 |
 |---|---|---|---|---|
-| [`agent.md`](agent.md) | 🟡 待实现 | 2026-09-22 | 169 | Agent 产品判断：不变量、工具三级分类、审批边界 |
-| [`agent-impl.md`](agent-impl.md) | 🟡 待实现 | 2026-09-22 | 355 | 协议契约、数据模型、Run 状态机、循环规则、六阶段交付 |
-| [`wiring.md`](wiring.md) | 🟡 待实现 | 2026-09-22 | 149 | fx 组合根、`App` 拆分、八步迁移 |
-| [`pwa.md`](pwa.md) | 🟡 待实现 | 2026-09-22 | 120 | PWA 规格与五个阻塞项 |
-| [`frontend.md`](frontend.md) | 🟢🟡 混合 | 2026-09-22 | 132 | §1、§6 是 mdui 重写后的**实测现状**；§2–§5 是待实现的接入规格 |
+| [`agent.md`](agent.md) | 🟢 已实现 | 2026-09-22 | 169 | Agent 产品判断：不变量、工具三级分类、审批边界 |
+| [`agent-impl.md`](agent-impl.md) | 🟢 已实现 | 2026-09-22 | 355 | 协议契约、数据模型、Run 状态机、循环规则、六阶段交付（phase A–F 全部落地）|
+| [`wiring.md`](wiring.md) | 🟢 已实现 | 2026-09-22 | 149 | fx 组合根、`App` 拆分、八步迁移 + §9 + 三个独立角色命令 |
+| [`pwa.md`](pwa.md) | 🟢 已实现 | 2026-09-22 | 120 | PWA 规格与五个阻塞项（全部修复）|
+| [`frontend.md`](frontend.md) | 🟢 已实现 | 2026-09-22 | 132 | §1、§6 mdui 实测现状 + §2–§5 assistant-ui 接入（workflow A/B 均落地）|
 
 ### 2.5 外部工具对接（已实现的部分）
 
@@ -98,11 +98,11 @@
 
 截至 2026-09-22：
 
-- **Schema 版本**：4（`migrations/000004_task_coords`）。`agent-impl.md` §3 要求升到 5。
-- **后端**：Go + Gin + Huma v2 + GORM/SQLite，装配手写在 `cmd/fasttask/main.go`（fx 尚未引入）。
-- **Agent**：只有单轮无工具的 LLM 调用，**不存在 agent 循环**。现状盘点见 `agent.md` §2。
-- **前端**：mdui 2.1.5 完全重写已落地，assistant-ui 尚未接入。
-- **PWA**：无 manifest、无 Service Worker。`index.html` 已有安全区域与 `apple-mobile-web-app-*` 基础。
+- **Schema 版本**：5（`migrations/000005_agent_runtime`，新增 Agent Run / Message / MessagePart / RunChunk 运行时表）。
+- **后端**：Go + Gin + Huma v2 + GORM/SQLite，由 fx 组合根装配（`internal/bootstrap`）；`serve` / `worker` / `scheduler` 三个角色可独立运行（`wiring.md` 八步迁移 + §9 已全部落地）。
+- **Agent**：assistant-transport SSE 运行时已落地——多轮工具循环（`agentloop.go`）、只读工具注册表（`agenttool.go`）、任务树/计划提案与 HTTP 处理器内同步审批（`agentapproval.go`、`agenttools_proposal.go`、`agentdailyplan.go`）、断线续流与启动中断回收。六阶段（A–F）全部交付。
+- **前端**：mdui 2.1.5 重写 + assistant-ui 0.15.21 对话区已落地（`web/src/agent/`：`AgentChat` 挂载点、纯 converter、`makeAssistantToolUI` 审批卡片、协商录音格式的语音输入）。
+- **PWA**：可安装——manifest、injectManifest Service Worker（按用户隔离缓存键的离线只读快照）、access token 内存 + refresh token 持久化、`static()` 以正确 Content-Type 提供 `sw.js`/`manifest.webmanifest`。五个阻塞项全部修复。
 
 ## 4. 文档维护约定
 
