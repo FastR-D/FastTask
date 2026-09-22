@@ -1,7 +1,19 @@
 # FastTask 文档索引
 
-> 索引更新：2026-09-22  
+> 索引更新：2026-09-23（第五轮：Phase 0 spike 完成，拓扑定案，**文档可交付**）  
 > 用途：供人和 agent 快速定位文档，并判断哪些描述**已经是代码事实**、哪些是**尚未实现的目标状态**
+
+## 0.0 术语消歧（最高优先级，先读这条）
+
+本仓库中「fx」有**两个互不相关**的含义，混淆会导致严重的实现错误：
+
+| 写法 | 指代 | 出现位置 |
+|---|---|---|
+| **uber-fx** | `go.uber.org/fx`，依赖注入与生命周期容器 | `go.mod:13`、`internal/bootstrap/`、[ADR-0001](adr/0001-fx-composition-root.md)、[`wiring.md`](wiring.md) |
+| **libfx** | `vercel-labs/fx` 的 JS 嵌入 SDK，npm 包 `libfx` | [ADR-0005](adr/0005-libfx-agent-harness.md)、[`harness.md`](harness.md)、`web/src/harness/`、`sidecar/` |
+
+**libfx 不进 Go 依赖图，uber-fx 不进前端。** 新写的文档一律使用 `uber-fx` / `libfx` 全称，不使用裸「fx」。
+ADR-0001 与 `wiring.md` 的标题沿用历史写法，其中的「fx」指 uber-fx。
 
 ## 0. 给 agent 的阅读须知
 
@@ -23,7 +35,10 @@
 
 | 你要做的事 | 先读 | 再读 |
 |---|---|---|
-| 实现 Agent 运行时 | [`agent.md`](agent.md) → [`agent-impl.md`](agent-impl.md) | [ADR-0002](adr/0002-assistant-transport.md)、[ADR-0003](adr/0003-in-process-agent-loop.md) |
+| 实现 Agent 运行时 | [`agent.md`](agent.md) → [`agent-impl.md`](agent-impl.md) | [ADR-0002](adr/0002-assistant-transport.md)、[ADR-0005](adr/0005-libfx-agent-harness.md) |
+| 迁移到 libfx harness / 做 sidecar | [ADR-0005](adr/0005-libfx-agent-harness.md) → [`harness.md`](harness.md) | [`agent.md`](agent.md) §4（不变量未变）、[`wiring.md`](wiring.md) §6 |
+| 写模型网关 / AI Gateway 适配层 | [`harness.md`](harness.md) §4 | [ADR-0005](adr/0005-libfx-agent-harness.md) §5.1。**不要手搓翻译，复用 `@ai-sdk/openai-compatible`** |
+| 做多会话 / 思考过程 / 图片附件 | [`chat-features.md`](chat-features.md) | [`frontend.md`](frontend.md) §4、[`agent-impl.md`](agent-impl.md) §2.7 |
 | 引入 fx / 拆 `application.App` | [`wiring.md`](wiring.md) | [ADR-0001](adr/0001-fx-composition-root.md)、`arch.md` §6 |
 | 接 assistant-ui 前端 | [`frontend.md`](frontend.md) | [ADR-0004](adr/0004-frontend-styling-boundary.md)、`agent-impl.md` §2 |
 | 做 PWA | [`pwa.md`](pwa.md) | `frontend.md` |
@@ -44,8 +59,9 @@
 | [`adr/README.md`](adr/README.md) | 索引 | 2026-09-22 | ADR 约定与依赖关系 |
 | [`adr/0001-fx-composition-root.md`](adr/0001-fx-composition-root.md) | 已接受 | 2026-09-22 | fx 组合根 + 按聚合拆 `App` |
 | [`adr/0002-assistant-transport.md`](adr/0002-assistant-transport.md) | 已接受 | 2026-09-22 | Agent 前后端传输协议 |
-| [`adr/0003-in-process-agent-loop.md`](adr/0003-in-process-agent-loop.md) | 已接受 | 2026-09-22 | Agent 循环内建，工具即受控用例 |
+| [`adr/0003-in-process-agent-loop.md`](adr/0003-in-process-agent-loop.md) | **已取代**（→0005） | 2026-09-22 | Agent 循环内建，工具即受控用例。**工具三级分类与不变量论证仍有效** |
 | [`adr/0004-frontend-styling-boundary.md`](adr/0004-frontend-styling-boundary.md) | 已接受 | 2026-09-22 | mdui 令牌，不引入 Tailwind |
+| [`adr/0005-libfx-agent-harness.md`](adr/0005-libfx-agent-harness.md) | 已接受 | 2026-09-22 | libfx 作为 harness，WASM 默认 / Node sidecar 兼容 |
 
 ### 2.2 核心设计（长期有效）
 
@@ -65,7 +81,9 @@
 
 ### 2.4 Agent / 组合根 / 前端 / PWA（已实现）
 
-**这四份加上 ADR 描述的能力已全部实现并通过测试（截至 2026-09-22）。** 实现细节以代码与 OpenAPI 为准；这些文档保留为设计意图与验收依据。
+**前五份加上 ADR-0001/0002/0004 描述的能力已全部实现并通过测试（截至 2026-09-22）。** 实现细节以代码与 OpenAPI 为准；这些文档保留为设计意图与验收依据。
+
+**`harness.md` 与 `chat-features.md` 是新增的 🟡 待实现文档**，描述 [ADR-0005](adr/0005-libfx-agent-harness.md) 的落地。它与 `agent.md` / `agent-impl.md` 的关系是：那两份定不变量与协议（**未变**），它定循环驱动与宿主拓扑（**变了**）。
 
 | 文档 | 类型 | 更新 | 行数 | 说明 |
 |---|---|---|---|---|
@@ -74,6 +92,8 @@
 | [`wiring.md`](wiring.md) | 🟢 已实现 | 2026-09-22 | 149 | fx 组合根、`App` 拆分、八步迁移 + §9 + 三个独立角色命令 |
 | [`pwa.md`](pwa.md) | 🟢 已实现 | 2026-09-22 | 120 | PWA 规格与五个阻塞项（全部修复）|
 | [`frontend.md`](frontend.md) | 🟢 已实现 | 2026-09-22 | 132 | §1、§6 mdui 实测现状 + §2–§5 assistant-ui 接入（workflow A/B 均落地）|
+| [`harness.md`](harness.md) | 🟡 **待实现** | 2026-09-23 | 861 | libfx 双宿主 harness：模式探测、AI Gateway 适配层、工具导出、审批长轮询、sidecar、八阶段交付 |
+| [`chat-features.md`](chat-features.md) | 🟡 **待实现** | 2026-09-23 | 336 | 多会话持久化、思考过程、图片附件。三项 assistant-ui 均原生支持，文档定的是**哪一项真接在 assistant-transport 上**与服务端配合 |
 
 ### 2.5 外部工具对接（已实现的部分）
 
@@ -103,6 +123,68 @@
 - **Agent**：assistant-transport SSE 运行时已落地——多轮工具循环（`agentloop.go`）、只读工具注册表（`agenttool.go`）、任务树/计划提案与 HTTP 处理器内同步审批（`agentapproval.go`、`agenttools_proposal.go`、`agentdailyplan.go`）、断线续流与启动中断回收。六阶段（A–F）全部交付。
 - **前端**：mdui 2.1.5 重写 + assistant-ui 0.15.21 对话区已落地（`web/src/agent/`：`AgentChat` 挂载点、纯 converter、`makeAssistantToolUI` 审批卡片、协商录音格式的语音输入）。
 - **PWA**：可安装——manifest、injectManifest Service Worker（按用户隔离缓存键的离线只读快照）、access token 内存 + refresh token 持久化、`static()` 以正确 Content-Type 提供 `sw.js`/`manifest.webmanifest`。五个阻塞项全部修复。
+
+### 3.1 进行中：libfx harness 迁移（🟡 未开始）
+
+[ADR-0005](adr/0005-libfx-agent-harness.md) 已接受，[`harness.md`](harness.md) 与
+[`chat-features.md`](chat-features.md) 已就绪，**代码尚未开始**。
+
+#### ✅ 没有阻塞项了
+
+Phase 0 spike 已于 2026-09-23 完成（[`harness.md`](harness.md) §16）。**拓扑定案：**
+
+- **gateway shim 跑在宿主进程内**（浏览器或 sidecar），用现成的 `@ai-sdk/openai-compatible`，约 80 行
+- **Go 侧是一个普通的 OpenAI 兼容代理**，不实现 LanguageModelV4
+- **sidecar 降为可选**，仅用于支持缺 JSPI 的浏览器；部署形态仍是单 Go 二进制
+
+实测数据：生产产物打包通过，主 bundle +166.66 kB（**gzip +47.33 kB**），
+浏览器内流式正常，`reasoning_content` 与 `tool_calls` 映射齐全，控制台无错误。
+
+spike 带出三条写进规格的实现约束：`baseURL` 必须绝对、分片交错不嵌套、`tool-call` 携带 `toolCallId`。
+
+#### 已经定死、可直接实现的决策
+
+| 决策 | 位置 |
+|---|---|
+| WASM 模式**不创建 `AgentJob`**；sidecar 模式创建但 Worker 转调 sidecar | [`harness.md`](harness.md) §1.2 |
+| 一个用户消息 = 一个 run = 一次 `prompt()` = 一个 turn | [`harness.md`](harness.md) §5.1 |
+| 取消经 `POST /agent/runs/{id}/cancellation`，三条传播通道 | [`harness.md`](harness.md) §5.2 |
+| 工具调用：代理写"调用"、工具面写"结果"，按 `tool_call_id` 去重；请求体历史永不写库 | [`harness.md`](harness.md) §4.5.1 |
+| 心跳 10 秒 / 失联 45 秒；审批等待期间必须继续心跳 | [`harness.md`](harness.md) §10.4 |
+| 令牌叫 **`harness_token`**，与 `interface.md` §13 既有的 `run_token` 是两回事 | [`harness.md`](harness.md) §10.1 |
+| **gateway shim 在宿主侧，Go 只做 OpenAI 兼容代理**；sidecar 可选 | [`harness.md`](harness.md) §4、§8、§16 |
+| `tools_etag` 防止工具清单在运行中途变更，陈旧则 `409 TOOLS_ETAG_STALE` | [`harness.md`](harness.md) §10.3 |
+| Go 覆盖 `system`/`tools`，sidecar 的 `sanitize()` 只拒绝不修正 | [`harness.md`](harness.md) §4.4 |
+| 同一时刻只为活动线程持有一个 libfx agent 实例 | [`harness.md`](harness.md) §3.7 |
+| shim 的 `baseURL` 必须是绝对 URL；chunk 翻译器不得假设分片严格嵌套 | [`harness.md`](harness.md) §16.3 |
+| `thread_id` 回填按现有 Conversation 分组，迁移可重入 | [`chat-features.md`](chat-features.md) §2.3 |
+
+#### 实现前必读的三条
+
+- **不要以为 `agentloop.go` 要整个删掉。** 被替换的只有循环驱动约 150 行；
+  `sessionStream`、`beginRun`、`recordProposal`、`resumeRun`、`rebuildModelContext` 全部保留并改变职责。
+  逐项处置见 [`harness.md`](harness.md) §12——**注意其中对 `ChatProvider` 的两次更正**：
+  它要**拆**（SSE 解析保留复用，请求构造删除），不是整个留或整个删。
+- **`agent-impl.md` §8 已被取代**（[`harness.md`](harness.md) §1.2）。照它实现会让 Worker 把同一个 run 跑两遍。
+- **`agent.md` 的五条不变量一条未改。** 任何为迁就 harness 放宽不变量的实现都是错的。
+
+#### 还剩一个要用代码验证的点
+
+| 何时 | 验证什么 | 失败影响 |
+|---|---|---|
+| ~~Phase 0~~ | ~~`@ai-sdk/openai-compatible` 的浏览器可行性~~ | ✅ 已验证通过 |
+| **Phase C 开头** | `HostTool.execute` 第二参数是否带调用 id | [`harness.md`](harness.md) §4.4.1 走主方案还是退化方案。**不阻塞开工**，退化方案已写好 |
+
+### 3.2 已知的代码/文档不一致（待修）
+
+| 位置 | 问题 | 处置 |
+|---|---|---|
+| `internal/application/agenttool.go:82` | 注释称工具来自 uber-fx 值组 `agent_tools`，**该值组从未存在**；实际在 `agent.go:89` 内联构造 | 删除该注释，见 [`harness.md`](harness.md) §3.4 |
+| `internal/application/jobdispatch.go:207`、`:287` | `BuiltinJobHandlers()` / `BuiltinJobMaterializers()` 与 `internal/bootstrap` 的 uber-fx 值组是**两份独立清单，无一致性测试** | 补一个断言两侧 `JobTypes()` 集合相等的测试 |
+| `internal/application/agentapproval.go:217` | 审批续跑会再建一个 `agent_run` job | 随 [`harness.md`](harness.md) §7「同一 turn 内审批」一并移除 |
+| `web/vite.config.ts:40` | `globPatterns` 不含 `wasm` | 迁移 phase G 一并修，见 [`harness.md`](harness.md) §9.3 |
+| `web/src/agent/runtime.ts` | agent 端点非线程作用域，接多会话前必须改 | 见 [`chat-features.md`](chat-features.md) §2.1 |
+| CI | 未跑 `npm run build`。`src/mdui.ts` 只被 `main.tsx` 引入，**测试全绿也可能构建失败** | 加进 CI |
 
 ## 4. 文档维护约定
 

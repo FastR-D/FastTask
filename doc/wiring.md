@@ -36,7 +36,12 @@ internal/bootstrap/
   agentruntime.go  // Run Manager、Hub、工具注册表
   worker.go        // Worker 的 Lifecycle
   scheduler.go     // gocron 的 Lifecycle
+  sidecar.go       // Node sidecar 进程的 Lifecycle（ADR-0005，见 harness.md §8.3）
 ```
+
+> **术语：本文的「fx」一律指 `go.uber.org/fx`（DI 容器），即 uber-fx。**
+> [ADR-0005](adr/0005-libfx-agent-harness.md) 引入的 `libfx` 是完全无关的 JS 包，
+> 它只出现在 `web/src/harness/` 与 `sidecar/`，**不进 Go 依赖图**。
 
 角色组合：
 
@@ -129,11 +134,15 @@ type RouteRegistrar interface {
 | Agent Hub | 启动扇出 goroutine | 关闭所有订阅者 |
 | `Worker` | 启动轮询 goroutine | 取消 context 并等待当前作业收尾 |
 | `Scheduler` | `Start()` | `Shutdown()` |
+| `Sidecar`（ADR-0005） | 启动 Node 进程，等 `/healthz` 就绪 | SIGTERM，宽限期后 SIGKILL |
 | `http.Server` | `ListenAndServe` | `Shutdown(ctx)` |
 
 要求：
 
 - **停机时 HTTP 必须先于 Worker 停止**，避免新请求进入正在关闭的运行时。fx 的逆序语义天然满足，前提是 HTTP 最后启动。
+- **`Sidecar` 同理必须注册在 `HTTPModule` 之前**，使其晚于 HTTP 停止——HTTP 先停，才不会有新请求打到正在退出的 sidecar。
+- **`Sidecar` 的 `OnStart` 就绪超时后应失败启动，不带病运行。** 配置 `sidecar.enabled=auto` 时检测不到 Node 则跳过该模块（不报错），
+  此时 harness 只有 WASM 模式可用，需在 `/health/ready` 与 `doctor` 中如实反映。
 - `OnStart` 必须快速返回，长循环放进 goroutine（fx 的标准做法）。
 - 保留现有的 15 秒优雅关闭预算（`main.go:100`）。
 - **`http.Server.WriteTimeout` 改为 `0`**，配合 `http.ResponseController` 按请求设置写截止时间。理由见 [`agent-impl.md`](agent-impl.md) §9.2；这是 SSE 能工作的前提。

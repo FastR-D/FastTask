@@ -2,8 +2,12 @@
 
 > 文档状态：初版设计  
 > 依据文档：`doc/arch.md`、`doc/func.md`、`doc/req/this.md`、`doc/lens.md`  
-> 决策记录：[ADR-0002](adr/0002-assistant-transport.md)、[ADR-0003](adr/0003-in-process-agent-loop.md)  
-> 实现规格：[`doc/agent-impl.md`](agent-impl.md)（本文档定判断，那份定落地细节）
+> 决策记录：[ADR-0002](adr/0002-assistant-transport.md)、[ADR-0003](adr/0003-in-process-agent-loop.md)（**已取代**）、[ADR-0005](adr/0005-libfx-agent-harness.md)  
+> 实现规格：[`doc/agent-impl.md`](agent-impl.md)、[`doc/harness.md`](harness.md)（本文档定判断，那两份定落地细节）
+>
+> **本文档全文继续有效。** [ADR-0005](adr/0005-libfx-agent-harness.md) 把 agent 循环的**驱动**换成了 libfx，
+> 但 §4 的五条不变量、§5 的工具三级分类、§6 的每日计划分工、§7 的审批模型、§9 的「不做什么」**一条未改**。
+> 不变量不依赖循环跑在哪里，只依赖「写操作必须经提案与服务端重校验」——理由见 ADR-0005 §3.1。
 
 ## 1. 文档定位
 
@@ -160,6 +164,7 @@ Run 复用 AgentJob 的租约与 fencing 机制，不新建一套并发控制。
 | `lens.md` | 坐标提案工具复用其 §4 语义，`pinned` 规则不变 |
 | `interface.md` | 新增流式端点，且是「Huma 为字段级事实来源」的一处显式例外 |
 | `integration/` | 外部工具边界不变，agent 不直接调用 FastRead / FastWrite |
+| `harness.md` | 循环驱动与宿主拓扑的落地规格。**本文的不变量是它的上位约束**，不得为迁就 harness 放宽 |
 
 ## 11. 待确认
 
@@ -172,4 +177,4 @@ Run 复用 AgentJob 的租约与 fencing 机制，不新建一套并发控制。
 | 提案被拒后是否自动重试 | **不自动重试**，等用户下一句话 | 若用户普遍需要手动追问「那你再想一个」 |
 | 语音转写后是否可直接发送 | **保留现有行为**：填进输入框由用户确认（`App.tsx:240`） | 用户反馈多一步确认很烦时 |
 
-已在本轮定案、不再列为待确认的事项：传输协议（[ADR-0002](adr/0002-assistant-transport.md)）、审批路径（`agent-impl.md` §7.1）、Run 与 Job 的状态映射（§4.0）、旧对话端点的处置（§8.1）、v1 不支持编辑与分支（§4.1）。
+已在本轮定案、不再列为待确认的事项：harness 形态与宿主拓扑（[ADR-0005](adr/0005-libfx-agent-harness.md)）、传输协议（[ADR-0002](adr/0002-assistant-transport.md)）、审批路径（`agent-impl.md` §7.1）、Run 与 Job 的状态映射（§4.0）、旧对话端点的处置（§8.1）、v1 不支持编辑与分支（§4.1）。
