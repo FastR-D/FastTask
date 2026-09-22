@@ -35,6 +35,22 @@ type Config struct {
 	FastReadURL           string
 	FastWriteURL          string
 	IntegrationTimeout    time.Duration
+
+	// AgentReasoning is the default reasoning level handed to a harness host
+	// (doc/chat-features.md §3.2). The proxy validates it against the enum and never
+	// overrides what a host asks for.
+	AgentReasoning string
+	// AgentReasoningPersist is the operator's switch for storing chains of thought
+	// (doc/chat-features.md §3.4). Off means the proxy drops reasoning deltas instead of
+	// persisting or streaming them.
+	AgentReasoningPersist bool
+
+	// Sidecar configures the optional Node host (doc/harness.md §8.4). It is off by
+	// default: the sidecar is a fallback for browsers without JSPI, not a dependency.
+	SidecarEnabled      bool
+	SidecarNodePath     string
+	SidecarSocket       string
+	SidecarStartTimeout time.Duration
 }
 
 func Load() (Config, error) {
@@ -72,6 +88,14 @@ func Load() (Config, error) {
 		FastReadURL:           strings.TrimRight(env("FASTTASK_FASTREAD_URL", ""), "/"),
 		FastWriteURL:          strings.TrimRight(env("FASTTASK_FASTWRITE_URL", ""), "/"),
 		IntegrationTimeout:    time.Duration(integrationTimeoutMS) * time.Millisecond,
+
+		AgentReasoning:        env("FASTTASK_AGENT_REASONING", "provider-default"),
+		AgentReasoningPersist: envBool("FASTTASK_AGENT_REASONING_PERSIST", true),
+
+		SidecarEnabled:      envBool("FASTTASK_SIDECAR_ENABLED", false),
+		SidecarNodePath:     env("FASTTASK_SIDECAR_NODE_PATH", "node"),
+		SidecarSocket:       env("FASTTASK_SIDECAR_SOCKET", ""),
+		SidecarStartTimeout: envDuration("FASTTASK_SIDECAR_START_TIMEOUT", 15*time.Second),
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return Config{}, errors.New("FASTTASK_PORT must be between 1 and 65535")
@@ -81,6 +105,9 @@ func Load() (Config, error) {
 	}
 	if c.IntegrationTimeout < 100*time.Millisecond || c.IntegrationTimeout > 10*time.Second {
 		return Config{}, errors.New("FASTTASK_INTEGRATION_TIMEOUT_MS must be between 100 and 10000")
+	}
+	if c.SidecarEnabled && c.SidecarStartTimeout < time.Second {
+		return Config{}, errors.New("FASTTASK_SIDECAR_START_TIMEOUT must be at least 1s")
 	}
 	if c.Environment == "production" && (strings.Contains(c.JWTSecret, "development") || c.AdminPassword == "fasttask-admin") {
 		return Config{}, errors.New("production requires non-default FASTTASK_JWT_SECRET and FASTTASK_ADMIN_PASSWORD")
@@ -117,6 +144,36 @@ func envInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("%s must be an integer: %w", key, err)
 	}
 	return parsed, nil
+}
+
+// envBool reads a boolean flag. Anything that is not a recognised true value is false, so a
+// typo disables an optional component rather than enabling it.
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+// envDuration reads a Go duration string such as "15s" or "2m".
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
 
 func envList(key, fallback string) []string {

@@ -78,9 +78,13 @@ var identityArgNames = map[string]bool{
 	"tenant_id": true, "owner_id": true, "on_behalf_of": true,
 }
 
-// ToolRegistry holds the tools the loop may advertise and execute. It is built
-// from tools contributed by application services (fx value group agent_tools,
-// wiring.md §5), never enumerated in a central switch.
+// ToolRegistry holds the tools the agent may advertise and execute. It is assembled
+// in NewAgentService from the tools the application services contribute
+// (NewReadonlyTools, NewProposalTools) — there is no fx value group behind it, and no
+// second list anywhere else that could drift from this one. The same registry backs
+// the model loop, the HTTP projection a harness host reads (doc/harness.md §3.4) and
+// the tool execution surface (§5), so a tool cannot be advertised without also being
+// executable.
 type ToolRegistry struct {
 	tools map[string]Tool
 	order []string

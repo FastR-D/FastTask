@@ -305,20 +305,51 @@ type OutboxEvent struct {
 // approval receipt starts a new job against the same run (§4.0, §7.2).
 // StateJSON is the retained snapshot used to resume a stream (§2.8).
 type AgentRun struct {
-	ID              string     `json:"id"`
-	UserID          string     `json:"-"`
-	ThreadID        string     `json:"thread_id"`
-	JobID           string     `json:"job_id,omitempty"`
-	Status          string     `json:"status"`
-	StateJSON       string     `json:"-"`
-	CheckpointSeq   int        `json:"checkpoint_seq"`
-	ParentMessageID *string    `json:"parent_message_id,omitempty"`
-	ErrorCode       string     `json:"error_code,omitempty"`
-	ErrorMessage    string     `json:"error_message,omitempty"`
-	Revision        int        `json:"revision"`
+	ID              string  `json:"id"`
+	UserID          string  `json:"-"`
+	ThreadID        string  `json:"thread_id"`
+	JobID           string  `json:"job_id,omitempty"`
+	Status          string  `json:"status"`
+	StateJSON       string  `json:"-"`
+	CheckpointSeq   int     `json:"checkpoint_seq"`
+	ParentMessageID *string `json:"parent_message_id,omitempty"`
+	// HarnessMode records who drives the run: "" is the in-process loop,
+	// "wasm" the browser host, "sidecar" the Node host (doc/harness.md §1.2).
+	HarnessMode string `json:"harness_mode,omitempty"`
+	// CancelRequested is the durable half of a cancellation; the other two
+	// channels are the heartbeat response and the open streams (§5.2).
+	CancelRequested bool `json:"cancel_requested,omitempty"`
+	// ApprovalWaitMs accumulates time spent awaiting approval, which §7 excludes from the
+	// run wall clock.
+	ApprovalWaitMs int64 `json:"approval_wait_ms,omitempty"`
+	// ModelCalls counts the proxied model calls of a run. The host drives the loop, but the
+	// turn budget stays a server-side limit (doc/harness.md §1.1).
+	ModelCalls   int        `json:"model_calls,omitempty"`
+	ErrorCode    string     `json:"error_code,omitempty"`
+	ErrorMessage string     `json:"error_message,omitempty"`
+	Revision     int        `json:"revision"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+}
+
+// AgentHarnessToken is one issued run capability (doc/harness.md §10). Only
+// TokenHash is stored: the plaintext is handed to the host once, at issuance, and
+// can never be read back. A token dies when it expires, when the run reaches a
+// terminal state, or when a newer token for the same run replaces it.
+type AgentHarnessToken struct {
+	ID        string `json:"id"`
+	TokenHash string `json:"-"`
+	UserID    string `json:"-"`
+	ThreadID  string `json:"thread_id"`
+	RunID     string `json:"run_id"`
+	Mode      string `json:"mode"`
+	// The column is tools_etag; GORM would otherwise split the initialism into tools_e_tag.
+	ToolsETag       string     `gorm:"column:tools_etag" json:"tools_etag,omitempty"`
+	ExpiresAt       time.Time  `json:"expires_at"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
 }
 
 // AgentMessage is one message in a thread. Seq is thread-scoped and monotonic,
@@ -366,14 +397,14 @@ type AgentMessagePart struct {
 // in authorization or an invariant may be read from it. Checkpoint is opaque
 // versioned bytes whose format belongs to libfx_version (doc/harness.md §6).
 type AgentThread struct {
-	ID           string     `json:"id"`
-	UserID       string     `json:"-"`
-	GoalID       *string    `json:"goal_id,omitempty"`
-	Title        string     `json:"title"`
-	Status       string     `json:"status"`
-	Custom       string     `json:"custom,omitempty"`
-	Checkpoint   []byte     `json:"-"`
-	LibfxVersion string     `json:"libfx_version,omitempty"`
+	ID           string  `json:"id"`
+	UserID       string  `json:"-"`
+	GoalID       *string `json:"goal_id,omitempty"`
+	Title        string  `json:"title"`
+	Status       string  `json:"status"`
+	Custom       string  `json:"custom,omitempty"`
+	Checkpoint   []byte  `json:"-"`
+	LibfxVersion string  `json:"libfx_version,omitempty"`
 	// SourceConversationID is set only by migration 000006, which backfilled one
 	// thread per pre-existing conversation. It is never written afterwards.
 	SourceConversationID *string    `json:"-"`

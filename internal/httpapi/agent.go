@@ -111,6 +111,24 @@ func (s *Server) handleAgentCommands(c *gin.Context) {
 		agentSubmitError(c, err)
 		return
 	}
+	if result.HarnessMode == application.HarnessModeWASM {
+		// The client must know which run a host has to drive, and the stream is not the place
+		// to say it: the preamble chunk carries the same id for a browser that cannot read
+		// response headers because assistant-ui owns the fetch (doc/harness.md §1.2).
+		c.Header("X-Harness-Run", result.RunID)
+		c.Header("X-Harness-Mode", result.HarnessMode)
+	}
+	if result.NoStream {
+		// An approval receipt during a harness run does not open a second stream: the host is
+		// waiting on its long poll and the transcript continues on the stream already open
+		// (§7). The client still gets a well-formed, immediately terminated response.
+		writer := protocol.NewStreamWriter(c.Writer, c.Writer.Flush)
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.WriteHeader(http.StatusOK)
+		_ = writer.WriteDone()
+		return
+	}
 	s.streamRun(c, principal.UserID, result.RunID, result.FromSeq)
 }
 
@@ -184,12 +202,17 @@ func (s *Server) handleAgentResume(c *gin.Context) {
 	s.streamRun(c, principal.UserID, run.ID, run.CheckpointSeq)
 }
 
-// streamRun writes the SSE response for a run, replaying persisted chunks from
-// fromSeq and then following the run until it reaches a stream-terminal state.
+// streamRun writes the SSE response for a run, replaying persisted chunks from fromSeq and then
+// following the run until it reaches a stream-terminal state.
 //
-// The run is owned by the Worker, not this request: a client disconnect stops
-// the stream but never cancels the run (§4.3). Cancellation is only via
-// PUT /agent-jobs/{id}/cancellation.
+// The run is not owned by this request: a client disconnect stops the stream but never cancels
+// the run (§4.3). Cancellation is POST /agent/runs/{id}/cancellation, or
+// PUT /agent-jobs/{id}/cancellation for a job-driven run.
+//
+// A harness run that is waiting for an approval keeps its stream open (§7): the same turn
+// continues after the decision, so ending the stream here would leave the client watching a
+// finished conversation while the server is still writing to it. The stream deadline is pushed
+// forward while the wait lasts, exactly as the wait is excluded from the run wall clock.
 func (s *Server) streamRun(c *gin.Context, userID, runID string, fromSeq int) {
 	repo := s.agent.Repository()
 	ctx := c.Request.Context()
@@ -226,8 +249,12 @@ func (s *Server) streamRun(c *gin.Context, userID, runID string, fromSeq int) {
 		if !s.drainChunks(ctx, writer, userID, runID, &cursor) {
 			return // client went away mid-write
 		}
-		if agentStreamTerminal(run.Status) {
+		if agentStreamTerminal(run.Status, run.HarnessMode != "") {
 			break
+		}
+		if run.Status == persistence.RunAwaitingApproval {
+			// Waiting for a human is not the stream's business either (§7).
+			deadline = time.Now().Add(agentStreamMaxAge)
 		}
 		if time.Now().After(deadline) {
 			_ = writer.WriteChunk(protocol.ErrorChunk())
@@ -266,13 +293,16 @@ func (s *Server) drainChunks(ctx context.Context, writer *protocol.StreamWriter,
 }
 
 // agentStreamTerminal reports whether a run status ends the current HTTP stream.
-// awaiting_approval ends the stream (§4: the run yields control and the flow
-// sends [DONE]) even though the run itself is not finished.
-func agentStreamTerminal(status string) bool {
+//
+// For a job-driven run, awaiting_approval ends the stream: the flow sends [DONE] and a new
+// stream follows the continuation (agent-impl.md §4). For a harness-driven run it does not —
+// the host is still inside the same turn and the transcript keeps arriving (§7).
+func agentStreamTerminal(status string, harnessDriven bool) bool {
 	switch status {
-	case persistence.RunSucceeded, persistence.RunFailed, persistence.RunCancelled,
-		persistence.RunInterrupted, persistence.RunAwaitingApproval:
+	case persistence.RunSucceeded, persistence.RunFailed, persistence.RunCancelled, persistence.RunInterrupted:
 		return true
+	case persistence.RunAwaitingApproval:
+		return !harnessDriven
 	default:
 		return false
 	}
@@ -297,6 +327,8 @@ func agentSubmitError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, application.ErrEmptyCommand), errors.Is(err, application.ErrValidation):
 		agentAbort(c, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, application.ErrHarnessUnavailable):
+		agentAbort(c, http.StatusServiceUnavailable, "HARNESS_UNAVAILABLE")
 	case errors.Is(err, application.ErrApprovalDuplicate), errors.Is(err, application.ErrApprovalNotAwaiting), errors.Is(err, application.ErrConflict):
 		agentAbort(c, http.StatusConflict, err.Error())
 	case errors.Is(err, application.ErrRevision):

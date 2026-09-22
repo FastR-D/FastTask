@@ -458,30 +458,40 @@ func TestUpgradeFromVersionFiveBackfillsAgentThreads(t *testing.T) {
 		}
 	}
 
-	newRun := func(threadID, status string) AgentRun {
-		return AgentRun{ID: NewID("run"), UserID: user.ID, ThreadID: threadID, Status: status, StateJSON: "{}", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	// The fixtures are written as raw SQL on purpose: the v5 schema has no
+	// harness_mode column, so the current GORM models cannot insert into it.
+	insertRun := func(threadID, status string) string {
+		id := NewID("run")
+		err := store.DB.Exec(`INSERT INTO agent_runs
+			(id, user_id, thread_id, job_id, status, state_json, checkpoint_seq, error_code, error_message, revision, created_at, updated_at)
+			VALUES (?, ?, ?, '', ?, '{}', 0, '', '', 1, ?, ?)`,
+			id, user.ID, threadID, status, now, now).Error
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
 	}
-	titledRun, untitledRun := newRun(titled.ID, "succeeded"), newRun(untitled.ID, "succeeded")
-	if err := store.DB.Create(&titledRun).Error; err != nil {
+	insertMessage := func(threadID, runID, role string, seq int) string {
+		id := NewID("amsg")
+		err := store.DB.Exec(`INSERT INTO agent_messages (id, user_id, thread_id, run_id, role, seq, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`, id, user.ID, threadID, runID, role, seq, now).Error
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	titledRunID := insertRun(titled.ID, "succeeded")
+	untitledRunID := insertRun(untitled.ID, "succeeded")
+	insertMessage(titled.ID, titledRunID, "user", 1)
+	untitledMessageID := insertMessage(untitled.ID, untitledRunID, "user", 1)
+	if err := store.DB.Exec(`INSERT INTO agent_message_parts (id, user_id, message_id, idx, type, text, args_json, result_json, artifact_json, approval_status, is_error, created_at, updated_at)
+		VALUES (?, ?, ?, 0, 'text', ?, '{}', '', '', '', 0, ?, ?)`,
+		NewID("apart"), user.ID, untitledMessageID,
+		"帮我把这周的实验排一下顺序，顺便看看有没有卡住的任务，再给一个今天就能开始的最小行动", now, now).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB.Create(&untitledRun).Error; err != nil {
-		t.Fatal(err)
-	}
-	titledMessage := AgentMessage{ID: NewID("amsg"), UserID: user.ID, ThreadID: titled.ID, RunID: titledRun.ID, Role: "user", Seq: 1, CreatedAt: now}
-	untitledMessage := AgentMessage{ID: NewID("amsg"), UserID: user.ID, ThreadID: untitled.ID, RunID: untitledRun.ID, Role: "user", Seq: 1, CreatedAt: now}
-	if err := store.DB.Create(&titledMessage).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := store.DB.Create(&untitledMessage).Error; err != nil {
-		t.Fatal(err)
-	}
-	untitledPart := AgentMessagePart{ID: NewID("apart"), UserID: user.ID, MessageID: untitledMessage.ID, Idx: 0, Type: "text", Text: "帮我把这周的实验排一下顺序，顺便看看有没有卡住的任务，再给一个今天就能开始的最小行动", ArgsJSON: "{}", CreatedAt: now, UpdatedAt: now}
-	if err := store.DB.Create(&untitledPart).Error; err != nil {
-		t.Fatal(err)
-	}
-	chunk := AgentRunChunk{RunID: titledRun.ID, Seq: 0, UserID: user.ID, ChunkJSON: `{"type":"step-start"}`, CreatedAt: now}
-	if err := store.DB.Create(&chunk).Error; err != nil {
+	if err := store.DB.Exec(`INSERT INTO agent_run_chunks (run_id, seq, user_id, chunk_json, created_at)
+		VALUES (?, 0, ?, ?, ?)`, titledRunID, user.ID, `{"type":"step-start"}`, now).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -540,14 +550,14 @@ func TestUpgradeFromVersionFiveBackfillsAgentThreads(t *testing.T) {
 
 	// Runs, messages, parts and chunks survive with repointed thread ids.
 	var migratedRun AgentRun
-	if err := reopened.DB.First(&migratedRun, "id = ?", titledRun.ID).Error; err != nil {
+	if err := reopened.DB.First(&migratedRun, "id = ?", titledRunID).Error; err != nil {
 		t.Fatal(err)
 	}
 	if migratedRun.ThreadID != backfilled.ID {
 		t.Fatalf("run thread_id=%q, want the backfilled thread %q", migratedRun.ThreadID, backfilled.ID)
 	}
 	var migratedMessage AgentMessage
-	if err := reopened.DB.First(&migratedMessage, "id = ?", untitledMessage.ID).Error; err != nil {
+	if err := reopened.DB.First(&migratedMessage, "id = ?", untitledMessageID).Error; err != nil {
 		t.Fatal(err)
 	}
 	if migratedMessage.ThreadID != fallback.ID {
@@ -594,7 +604,7 @@ func TestUpgradeFromVersionFiveBackfillsAgentThreads(t *testing.T) {
 		t.Fatalf("threads=%d after a second migrate, want 2", after)
 	}
 	// A new run may only reference a thread, never a bare conversation id.
-	orphan := newRun(unused.ID, "queued")
+	orphan := AgentRun{ID: NewID("run"), UserID: user.ID, ThreadID: unused.ID, Status: "queued", StateJSON: "{}", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	if err := reopened.DB.Create(&orphan).Error; err == nil {
 		t.Fatal("a run pointing at a non-thread id was accepted")
 	}
