@@ -7,6 +7,7 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import { request } from '../api'
 import { useAgentRuntime } from './runtime'
+import { MarkdownText } from './Markdown'
 import type { ServerAgentState } from './state'
 import { DailyPlanProposalUI, TaskTreeProposalUI } from './tools/ProposalApproval'
 import { VoiceButton } from './VoiceButton'
@@ -110,8 +111,8 @@ function UserMessage() {
 function AssistantMessage() {
   return (
     <MessagePrimitive.Root className="agent-msg agent-msg-assistant">
-      <div className="agent-bubble">
-        <MessagePrimitive.Parts />
+      <div className="agent-bubble agent-bubble-markdown">
+        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
     </MessagePrimitive.Root>
   )

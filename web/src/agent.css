@@ -8,6 +8,11 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  /* .page-dialogue is a single-column grid, so its `auto` track is sized by this
+     item's min-content contribution. A wide markdown table would otherwise
+     stretch the whole page past the viewport; 0 lets the column stay at the
+     container width and the table's own scroll box absorbs the overflow. */
+  min-width: 0;
   gap: .5rem;
 }
 
@@ -16,6 +21,7 @@
 .agent-viewport {
   flex: 1 1 auto;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -39,11 +45,17 @@
   line-height: 1.7;
 }
 
-.agent-msg { display: flex; width: 100%; }
+.agent-msg { display: flex; width: 100%; min-width: 0; }
 .agent-msg-user { justify-content: flex-end; }
 .agent-msg-assistant { justify-content: flex-start; }
 .agent-bubble {
   max-width: min(46rem, 88%);
+  /* Flex items default to `min-width: auto`, i.e. they refuse to shrink below
+     their min-content width. Once markdown tables keep their natural width that
+     min-content can exceed the viewport on a 400px screen, and min-width beats
+     max-width — so the bubble would overflow. Zeroing it lets max-width win and
+     the inner scroll containers absorb the overflow instead. */
+  min-width: 0;
   padding: .6rem .9rem;
   border-radius: var(--mdui-shape-corner-large);
   font-size: var(--mdui-typescale-body-medium-size);
@@ -61,6 +73,102 @@
   color: rgb(var(--mdui-color-on-surface));
   border-bottom-left-radius: var(--mdui-shape-corner-extra-small);
 }
+
+/* Markdown rendering of model replies (agent/Markdown.tsx). ADR-0004: every
+   color/size/radius comes from an mdui token, so the block follows
+   mdui-theme-auto into dark mode with no extra rules. The bubble's
+   `white-space: pre-wrap` exists for the composer's plain text; markdown owns
+   its own line breaks, so it must be reset or every paragraph doubles. */
+.agent-bubble-markdown { white-space: normal; }
+.agent-md { min-width: 0; }
+.agent-md > :first-child { margin-block-start: 0; }
+.agent-md > :last-child { margin-block-end: 0; }
+
+.agent-md p,
+.agent-md ul,
+.agent-md ol,
+.agent-md blockquote,
+.agent-md .agent-md-table,
+.agent-md pre { margin: 0 0 .6rem; }
+.agent-md ul, .agent-md ol { padding-inline-start: 1.4rem; }
+.agent-md li { margin: .15rem 0; }
+.agent-md li > ul, .agent-md li > ol { margin: .15rem 0; }
+/* remark-gfm renders `- [x]` as li.task-list-item holding a disabled checkbox;
+   the bullet would otherwise sit behind the box. The class is used rather than
+   :has() so the rule does not depend on selector support. */
+.agent-md li.task-list-item { list-style: none; margin-inline-start: -1.1rem; }
+.agent-md li.task-list-item > input[type='checkbox'] { margin-inline-end: .35rem; accent-color: rgb(var(--mdui-color-primary)); }
+
+.agent-md h1, .agent-md h2, .agent-md h3,
+.agent-md h4, .agent-md h5, .agent-md h6 {
+  margin: .9rem 0 .4rem;
+  font-weight: var(--mdui-typescale-title-medium-weight, 500);
+  line-height: 1.35;
+  overflow-wrap: break-word;
+}
+.agent-md h1 { font-size: var(--mdui-typescale-headline-small-size); }
+.agent-md h2 { font-size: var(--mdui-typescale-title-large-size); }
+.agent-md h3 { font-size: var(--mdui-typescale-title-medium-size); }
+.agent-md h4, .agent-md h5, .agent-md h6 { font-size: var(--mdui-typescale-title-small-size); }
+.agent-md h2 { padding-block-end: .25rem; border-block-end: 1px solid rgb(var(--mdui-color-outline-variant)); }
+
+.agent-md a { color: rgb(var(--mdui-color-primary)); text-decoration: underline; overflow-wrap: anywhere; }
+.agent-md strong { font-weight: var(--mdui-typescale-label-large-weight, 600); }
+.agent-md del { color: rgb(var(--mdui-color-on-surface-variant)); }
+.agent-md hr { margin: .8rem 0; border: none; border-block-start: 1px solid rgb(var(--mdui-color-outline-variant)); }
+.agent-md img { max-width: 100%; height: auto; border-radius: var(--mdui-shape-corner-small); }
+
+.agent-md blockquote {
+  padding-inline-start: .7rem;
+  border-inline-start: 3px solid rgb(var(--mdui-color-outline-variant));
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+.agent-md :not(pre) > code {
+  padding: .1em .35em;
+  border-radius: var(--mdui-shape-corner-extra-small);
+  background: rgb(var(--mdui-color-surface-container-high));
+  font-size: .9em;
+  overflow-wrap: anywhere;
+}
+.agent-md pre {
+  padding: .7rem .8rem;
+  border-radius: var(--mdui-shape-corner-medium);
+  background: rgb(var(--mdui-color-surface-container-highest));
+  color: rgb(var(--mdui-color-on-surface));
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.agent-md pre code {
+  display: block;
+  padding: 0;
+  background: transparent;
+  font-size: var(--mdui-typescale-body-small-size);
+  line-height: 1.6;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+/* GFM tables cannot shrink to 400px (frontend.md §7), so the block scrolls
+   sideways inside the bubble instead of pushing the layout wider. */
+.agent-md-table { display: block; min-width: 0; max-width: 100%; overflow-x: auto; }
+.agent-md table { border-collapse: collapse; width: 100%; font-size: var(--mdui-typescale-body-small-size); }
+.agent-md th, .agent-md td {
+  padding: .35rem .6rem;
+  border: 1px solid rgb(var(--mdui-color-outline-variant));
+  text-align: start;
+  /* The bubble's `word-break: break-word` would otherwise let a cell collapse
+     around its longest token, so the table always "fits" and the scroll
+     container above never engages. Cells keep their natural width (CJK still
+     wraps between characters) and the wrapper scrolls instead. */
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.agent-md th {
+  background: rgb(var(--mdui-color-surface-container-high));
+  font-weight: var(--mdui-typescale-label-large-weight, 600);
+}
+.agent-md tbody tr:nth-child(even) { background: rgb(var(--mdui-color-surface-container-low)); }
 
 /* Proposal approval card (agent-impl.md §7.1). */
 .agent-proposal {
