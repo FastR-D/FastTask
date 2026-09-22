@@ -1,8 +1,12 @@
 # FastTask 前端架构
 
 > 文档状态：初版设计  
-> 决策记录：[ADR-0002](adr/0002-assistant-transport.md)、[ADR-0004](adr/0004-frontend-styling-boundary.md)  
-> 相关：[`doc/agent-impl.md`](agent-impl.md)、[`doc/pwa.md`](pwa.md)
+> 决策记录：[ADR-0002](adr/0002-assistant-transport.md)、[ADR-0004](adr/0004-frontend-styling-boundary.md)、[ADR-0005](adr/0005-libfx-agent-harness.md)  
+> 相关：[`doc/agent-impl.md`](agent-impl.md)、[`doc/harness.md`](harness.md)、[`doc/chat-features.md`](chat-features.md)、[`doc/pwa.md`](pwa.md)
+>
+> **[ADR-0005](adr/0005-libfx-agent-harness.md) 新增了第三条工作流（harness 宿主），但不改动本文任何既有内容。**
+> 宿主不渲染、不持有状态，UI 仍然只从服务端状态渲染，§4 的运行时接线与 §4.1 的 converter 职责**一行不改**。
+> 新增的目录边界见下方 §3 与 [`doc/harness.md`](harness.md) §3.1。
 
 ## 1. 现状
 
@@ -59,14 +63,34 @@ web/src/
     converter.ts      # 服务端状态 -> assistant-ui 消息
     state.ts          # 服务端状态的类型定义
     tools/            # 提案审批卡片等工具 UI
+    attachments.ts    # 图片附件 adapter（chat-features.md §4.2）
+    threadlist.ts     # RemoteThreadListAdapter（chat-features.md §2.2）
+  harness/            # 工作流 C 独占（ADR-0005），libfx 宿主
+    backend.ts        # 模式探测（WASM / sidecar）
+    agent.ts          # createFxAgent 构造与一次 turn
+    tools.ts          # GET /agent/tools -> HostTool 描述符
+    proxy.ts          # fetch 覆盖，全部出口改写到 Go 代理
+    approval.ts       # 审批长轮询
   ...                 # 其余由工作流 A 组织
 ```
+
+**`agent/` 与 `harness/` 之间是单向的：`agent/` 不得 import `harness/` 的任何类型。**
+libfx 的类型一律不出 `harness/`（[`harness.md`](harness.md) §3.1 硬规则 1）。
+`harness/` 的编译产物同时被浏览器入口和 `sidecar/` 引用，因此**不得引用任何 DOM 专有 API**
+——需要 DOM 的部分（如页面卸载检测）放在浏览器入口里注入。
 
 样式写进 `web/src/agent.css`（与 `lens.css` / `admin.css` 的既有惯例一致），由 `agent/index.tsx` 引入。按 [ADR-0004](adr/0004-frontend-styling-boundary.md) §4：不引入 Tailwind，颜色一律 `rgb(var(--mdui-color-*))`，字号一律 `var(--mdui-typescale-*)`，圆角一律 `var(--mdui-shape-corner-*)`，**提交中不得出现字面色值**。
 
 `web/src/agent/state.ts` 里的类型必须与 [`agent-impl.md`](agent-impl.md) §2.7 的服务端状态结构一一对应。**该结构是前后端契约，改动需要同时改两边并更新那份文档。**
 
 ## 4. 运行时接线
+
+> 🟡 **接入多会话后本节的接法要包一层。** `AssistantTransportOptions` 里**没有 threadList**，
+> 多会话须用 `useRemoteThreadListRuntime({ runtimeHook: () => useAssistantTransportRuntime(...) })`，
+> 且 `runtimeHook` 按线程实例化——下方的 `api` / `resumeApi` / `resumeStateApi`
+> **必须改成线程作用域**。见 [`chat-features.md`](chat-features.md) §2.1。
+>
+> `adapters.attachments` 则确实在 `AssistantTransportOptions` 里，直接加即可（§4.2 那份文档）。
 
 ```ts
 const runtime = useAssistantTransportRuntime({

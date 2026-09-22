@@ -709,13 +709,19 @@ Internet
   -> 阿里云反向代理（TLS、限流、访问日志）
   -> 加密隧道或专用网络
   -> 实验室 Mini 主机
-       -> FastTask systemd service
+       -> FastTask systemd service          (Go，单二进制)
+       -> 🟡 fasttask-sidecar service       (Node，可选，ADR-0005)
        -> SQLite + WAL
-       -> Agent CLI/SDK
        -> 数据、日志和备份目录
 ```
 
 部署约束：
+
+- 🟡 **[ADR-0005](adr/0005-libfx-agent-harness.md) 的 sidecar 是可选组件，部署形态仍是单 Go 二进制。**
+  2026-09-23 的 spike（[`harness.md`](harness.md) §16）确认 agent 的模型适配层可在浏览器运行，
+  sidecar 只用于支持缺 JSPI 的旧浏览器。是否部署按用户构成决定，约束见 [`tech.md`](tech.md) §21.4。
+  「不使用应用自制 PID Daemon」这条**不变**——sidecar 由 systemd 或容器 init 管理，
+  Go 只做就绪探测与重启判定。
 
 - FastTask 默认监听 `127.0.0.1` 或专用隧道地址。
 - 同一 SQLite 主库只允许一个 Active FastTask 实例写入。

@@ -57,6 +57,14 @@
 | `GET /api/v1/daily-plans/current`、`/goals`、`/goals/{id}/task-tree` | StaleWhileRevalidate，**且必须按用户隔离缓存键** |
 | 其余 `/api/**` | NetworkOnly |
 | `/api/v1/agent/**` | **NetworkOnly，且必须显式排除**。SSE 流绝不能进 Workbox 缓存 |
+| `fx-core.wasm`（[ADR-0005](adr/0005-libfx-agent-harness.md)） | 预缓存。2.01 MB / brotli 0.53 MB |
+
+**`fx-core.wasm` 的预缓存需要改一处配置**：`web/vite.config.ts:40` 的 `globPatterns` 当前不含 `wasm`，
+必须加进去；`maximumFileSizeToCacheInBytes` 已是 4 MB（`:41`），2.01 MB 可容纳，无需改。
+详见 [`harness.md`](harness.md) §9.3。
+
+**离线时能加载宿主，但不能跑对话**——模型调用仍需网络。离线态下对话入口必须明确置灰，
+不能让用户发出去之后才失败。
 
 三条强制要求：
 

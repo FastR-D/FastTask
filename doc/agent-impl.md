@@ -129,6 +129,9 @@ data: [DONE]\n\n
 
 ### 2.7 服务端状态结构
 
+> 🟡 **[`chat-features.md`](chat-features.md) 会给 part 增加 `reasoning`（§3.3）与 `image`（§4.4）两种类型，并给消息加上 `thread_id` 归属（§2.3）。** 下方结构是当前已实现的版本。
+
+
 ```jsonc
 {
   "messages": [
@@ -269,9 +272,17 @@ HTTP 请求的 `AbortSignal` 触发时**不得取消运行**。运行由 Worker 
 
 ### 5.1 注册方式
 
-每个 application 服务通过 fx 值组 `group:"agent_tools"` 注册自己的工具（见 [`doc/wiring.md`](wiring.md) §5），不在中心文件枚举。
+> **更正（2026-09-22）：本节原先描述为「通过 uber-fx 值组 `group:"agent_tools"` 注册」。该值组从未存在**，
+> `agenttool.go:82` 的同名注释是过时描述，需一并删除。实际构造在 `agent.go:89`：
+> `builtIn := append(NewReadonlyTools(app), NewProposalTools(app)...)`，再交给 `NewToolRegistry`。
+
+工具在 `internal/application` 内由 `NewReadonlyTools` / `NewProposalTools` 构造，经 `NewToolRegistry`
+汇总；注册表拒绝重名，并拒绝任何参数 schema 泄漏身份字段的工具（`identityArgNames`）。
 
 工具定义至少包含：名称、描述、JSON Schema 参数、级别（`readonly` / `proposal`）、执行函数。
+
+**自 [ADR-0005](adr/0005-libfx-agent-harness.md) 起，注册表还须经 `GET /api/v1/agent/tools` 投影给 harness 宿主**，
+且该端点是宿主侧工具描述符的**唯一**来源——不得在 TypeScript 里重复声明。见 [`doc/harness.md`](harness.md) §3.4。
 
 ### 5.1.1 必须新增 Provider 能力：现有接口不支持工具调用
 
@@ -309,6 +320,17 @@ type ChatProvider interface {
 
 ## 6. 循环执行规则
 
+> 🟡 **本节的「谁驱动循环」部分已由 [ADR-0005](adr/0005-libfx-agent-harness.md) 取代。**
+> 循环驱动改由 libfx 承担，宿主在浏览器 WASM 或 Node sidecar 中运行，见 [`doc/harness.md`](harness.md)。
+>
+> **仍然有效、不因换 harness 而改变的部分：**
+> - 「忽略请求体里的 system / tools，一律用服务端的值」——宿主在客户端，其声明属不可信输入，
+>   该规则的重要性反而**上升**（`harness.md` §4.3）。
+> - 下方的限制表（轮数、墙钟、工具超时）与错误分类，由 Go 代理层继续强制。
+> - 唯一的数值变更：**审批等待不计入墙钟超时**（`harness.md` §7）。
+>
+> 下方流程图描述的是被取代的自建循环，保留作为语义参照。
+
 ```text
 载入 thread 历史 + 服务端系统提示 + 服务端工具注册表（忽略请求体里的 system / tools）
 循环：
@@ -337,6 +359,11 @@ type ChatProvider interface {
 错误分类复用现有 `worker.go:214` 的约定：可重试错误进 `TEMPORARY` 并回到 `queued`，不可重试进 `PROVIDER_ERROR`，revision 冲突进 `REVISION_MISMATCH`。
 
 ## 7. 审批流
+
+> 🟡 **[ADR-0005](adr/0005-libfx-agent-harness.md) 改变了「审批后如何继续」，但不改变审批的语义与协议。**
+> 决定仍然只走 `add-tool-result`（§7.1 不变），提案仍然不写业务表，`ApplyProposal` 仍在事务内重校验。
+> 变化是：审批不再「结束流 → `resumeRun` 起新流」，而是**在同一个 turn 内等待**——
+> 提案工具的 `execute` 长轮询到决定后才返回。见 [`doc/harness.md`](harness.md) §7。
 
 ```text
 模型调用 propose_task_tree_patch
@@ -393,6 +420,16 @@ type ChatProvider interface {
 - **重复回执要幂等。** 同一个 `toolCallId` 第二次提交决定时返回 `409`，不重复应用提案。
 
 ## 8. 与现有 Worker / Job 的关系
+
+> ❌ **本节已被 [ADR-0005](adr/0005-libfx-agent-harness.md) 取代，见 [`harness.md`](harness.md) §1.2。**
+>
+> 下方描述的是**当前已实现**的行为，作为迁移起点仍然准确，但迁移后：
+>
+> - **WASM 模式不创建 `AgentJob`**，循环由浏览器宿主驱动。照旧创建会导致 Worker 用旧的
+>   `toolLoop` 把同一个 run **再跑一遍**。
+> - **sidecar 模式仍创建 job**，但 Worker 转调 sidecar 的 `POST /run`，不再调 `toolLoop`。
+> - 因此下面那句「这一点决定了『关掉浏览器任务还在跑』能否成立」**只在 sidecar 模式成立**。
+> - §8.2 的 fx 迁移顺序依赖已完成（`wiring.md` 全部落地），该小节仅留作历史记录。
 
 **运行由 Worker 执行，HTTP 处理器只做订阅和转发。** 这一点决定了「关掉浏览器任务还在跑」能否成立。
 

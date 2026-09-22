@@ -21,6 +21,10 @@
 - 错误响应 `Content-Type: application/problem+json`。
 - API 输入、输出、校验、Security Scheme 和 OpenAPI 文档由 Huma Operation 定义。
 - **例外**：`/api/v1/agent/*` 由裸 Gin Handler 实现，不经 Huma——三个流式端点（`commands` / `resume-state` / `resume`）加上一个恢复读 `GET /agent/thread-state`。绕过 Huma 的原因是 `sse` 包强制写 `event:` 行，而 assistant-transport 解码器要求使用默认事件名。这些端点的 OpenAPI 描述需手工维护，契约细节见 [`doc/agent-impl.md`](agent-impl.md) §2。除此之外，Huma 仍是全部接口的字段级事实来源。
+- 🟡 [ADR-0005](adr/0005-libfx-agent-harness.md) 新增的端点见 **§20**。其中只有
+  `POST /agent/runs/{run_id}/openai/chat/completions`（OpenAI 兼容流）与
+  `GET /agent/runs/{run_id}/approvals/{proposal_id}`（长轮询）**同样绕过 Huma**，
+  例外范围从四个扩大到六个；其余新增端点一律走 Huma 定义。
 
 ### 1.2 OpenAPI 和文档
 
@@ -273,6 +277,14 @@ Provider 响应不返回明文 API Key；激活操作使被激活记录成为唯
 | `CORE_ITEMS_NOT_SATISFIED` | 409 | 核心项尚未全部满足，不能生成辅助项 |
 | `DEVICE_TOKEN_REVOKED` | 401 | 设备 Token 已撤销 |
 | `RATE_LIMITED` | 429 | 请求过多 |
+| `HARNESS_UNAVAILABLE` | 503 | 🟡 harness 不可用（sidecar 不健康且浏览器无 JSPI），见 [`harness.md`](harness.md) §3.2 |
+| `TOOLS_ETAG_STALE` | 409 | 🟡 工具清单在运行中途变更，需重拉 `/agent/tools`，见 [`harness.md`](harness.md) §10.3 |
+| `HARNESS_TOKEN_INVALID` | 401 | 🟡 harness token 失效、过期或与 run 不匹配 |
+| `APPROVAL_TIMEOUT` | 409 | 🟡 审批等待超时，见 [`harness.md`](harness.md) §7 |
+| `PROVIDER_NO_TOOL_SUPPORT` | 422 | 模型不支持工具调用，见 [`agent-impl.md`](agent-impl.md) §5.1.1 |
+| `CHECKPOINT_VERSION_SKEW` | — | 🟡 非 HTTP 错误，仅作为运行诊断与日志字段，见 [`harness.md`](harness.md) §6.3 |
+| `ATTACHMENT_TOO_LARGE` | 400 | 🟡 附件超出限制，见 [`chat-features.md`](chat-features.md) §4.5 |
+| `ATTACHMENT_TYPE_UNSUPPORTED` | 400 | 🟡 附件 MIME 不在白名单（按魔数判定，非扩展名） |
 
 ## 4. 核心资源摘要
 
@@ -1242,3 +1254,84 @@ CI 必须：
 - 墨水屏设备 Token 默认有效期和轮询频率。
 - Work Session 是否允许离线补录及其审计要求。
 - P1 外部导入由用户 Token 还是服务 Token 代表最终所有者。
+
+## 20. Agent Harness、对话线程与附件（🟡 待实现）
+
+> 上位文档：[ADR-0005](adr/0005-libfx-agent-harness.md)、[`harness.md`](harness.md)、[`chat-features.md`](chat-features.md)
+> 本节只定**接口契约**；行为语义以上述文档为准。字段级仍以 Huma 生成的 OpenAPI 为事实来源（§20.5 的两个例外除外）。
+>
+> **模型端点是 OpenAI 兼容格式，不是 LanguageModelV4。** LanguageModelV4 ↔ OpenAI 的翻译
+> 由宿主进程内的 shim 完成（[`harness.md`](harness.md) §4），不跨进程。
+
+### 20.1 认证分层
+
+本组端点有**三种**认证主体，混用即为实现错误：
+
+| 主体 | 用于 | 说明 |
+|---|---|---|
+| 用户主 JWT | 线程 CRUD、附件、**取消** | 常规用户操作 |
+| **harness token** | 模型代理、工具执行、checkpoint、审批长轮询、心跳 | 见 [`harness.md`](harness.md) §10 |
+| 服务 Token | 无 | 本组不开放服务间调用 |
+
+> ⚠️ **`harness_token` 与 §13 的 `run_token` 是两个不同的东西。**
+> §13 的 `run_token` 是独立 Worker 的 Job 租约令牌；本组的 `harness_token` 是 agent 运行能力令牌。
+> **不得复用同一套签发与校验代码。**
+
+### 20.2 Harness 运行
+
+| 方法 | 路径 | 认证 | 说明 |
+|---|---|---|---|
+| GET | `/agent/tools` | 用户 | 工具清单投影，响应带 `ETag`（[`harness.md`](harness.md) §3.4、§10.3） |
+| POST | `/agent/runs` | 用户 | 签发 harness token，下发 `model` / `instructions` / `tools_etag` / `heartbeat_interval_s` |
+| POST | `/agent/runs/{run_id}/openai/chat/completions` | **harness token** | **OpenAI 兼容**代理，SSE。Go 注入凭据、覆盖 system/tools、展开附件。**绕过 Huma**（§20.5） |
+| POST | `/agent/runs/{run_id}/tools/{name}` | **harness token** | 工具执行，body 带 `tool_call_id` |
+| GET | `/agent/runs/{run_id}/approvals/{proposal_id}` | **harness token** | 审批长轮询，分段 30 秒。**绕过 Huma**（§20.5） |
+| POST | `/agent/runs/{run_id}/heartbeat` | **harness token** | 10 秒一次；45 秒未收到则 run 置 `interrupted` |
+| POST | `/agent/runs/{run_id}/cancellation` | **用户 JWT** | 取消运行。**故意不接受 harness token**：取消是用户的权力 |
+
+`POST /agent/commands`（§13 之外的既有流式端点）请求体新增 `harness_mode: "wasm" \| "sidecar"`，
+响应头新增 `X-Harness-Run: <run_id>`。见 [`harness.md`](harness.md) §1.2。
+
+### 20.3 对话线程
+
+| 方法 | 路径 | 认证 | 说明 |
+|---|---|---|---|
+| GET | `/agent/threads` | 用户 | 游标分页（§1.4），`?status=regular\|archived` |
+| POST | `/agent/threads` | 用户，幂等 | 返回 `{ remote_id }` |
+| GET | `/agent/threads/{thread_id}` | 用户 | 跨用户返回 **404** |
+| PATCH | `/agent/threads/{thread_id}` | 用户 | `{ title?, custom? }`，PATCH 语义见 §1.5 |
+| POST | `/agent/threads/{thread_id}/archive` | 用户 | |
+| POST | `/agent/threads/{thread_id}/unarchive` | 用户 | |
+| DELETE | `/agent/threads/{thread_id}` | 用户 | **级联删除** run / message / part / chunk / checkpoint / 附件 |
+| POST | `/agent/threads/{thread_id}/title` | 用户 | 确定性生成，不调模型（[`chat-features.md`](chat-features.md) §2.4） |
+| GET | `/agent/threads/{thread_id}/checkpoint` | **harness token** | |
+| PUT | `/agent/threads/{thread_id}/checkpoint` | **harness token** | |
+
+线程资源字段与 assistant-ui 的 `RemoteThreadMetadata` 一一对应，
+命名仍按 §1.1 用 `snake_case`，由前端适配器做一层转换。
+
+### 20.4 附件
+
+| 方法 | 路径 | 认证 | 说明 |
+|---|---|---|---|
+| POST | `/agent/attachments` | 用户 | `multipart/form-data`，返回 `{ attachment_id, mime, width, height, bytes }` |
+| GET | `/agent/attachments/{attachment_id}` | 用户 | 仅所有者可读，跨用户 **404** |
+| DELETE | `/agent/attachments/{attachment_id}` | 用户 | |
+
+限制与校验全部在服务端强制，见 [`chat-features.md`](chat-features.md) §4.5：
+单张 8 MB、单条消息 4 张、单线程 100 张 / 500 MB、MIME 白名单按**魔数**判定、**必须剥除 EXIF**。
+
+### 20.5 Huma 例外的扩大
+
+§1.1 记录了四个绕过 Huma 的既有端点。本组新增两个，共六个：
+
+| 端点 | 绕过原因 |
+|---|---|
+| `POST /agent/commands` | 既有 |
+| `POST /agent/resume` | 既有 |
+| `POST /agent/resume-state` | 既有 |
+| `GET /agent/thread-state` | 既有（恢复读） |
+| **`POST /agent/runs/{run_id}/openai/chat/completions`** | OpenAI 兼容 SSE，格式由外部规范定义，非我方 DTO |
+| **`GET /agent/runs/{run_id}/approvals/{proposal_id}`** | 长轮询分段响应，Huma 无对应语义 |
+
+这五个端点的 OpenAPI 描述手工维护。**其余新增端点一律走 Huma**，不得借这条例外绕开契约。

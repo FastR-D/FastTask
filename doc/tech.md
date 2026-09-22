@@ -40,8 +40,17 @@ FastTask 初期部署在实验室 Mini 主机，并通过阿里云反向代理�
 | assistant-transport 协议 | Agent 前后端传输 | 服务端持有权威状态；Go 侧自实现编码器，见 [`doc/agent-impl.md`](agent-impl.md) §2 |
 | mdui | Material You 组件与响应式布局 | 基于 Lit 的 Web Components，无官方 React 封装，依赖 React 19 的自定义元素支持 |
 | `vite-plugin-pwa` | PWA manifest 与 Service Worker | 见 [`doc/pwa.md`](pwa.md) |
+| 🟡 `libfx` | Agent 循环内核（harness） | [ADR-0005](adr/0005-libfx-agent-harness.md)。**与 `go.uber.org/fx` 无关**，见 [`doc/README.md`](README.md) §0.0。浏览器 WASM + JSPI，或 Node N-API。**不发布类型声明，需自写 ambient**（[`harness.md`](harness.md) §3.8） |
+| 🟡 `@ai-sdk/openai-compatible` | LanguageModelV4 ↔ OpenAI 兼容转换 | Apache-2.0。**不手搓协议翻译**（[ADR-0005](adr/0005-libfx-agent-harness.md) §5.1）。含 `reasoning_content` 与 `image_url` 支持 |
+| 🟡 `@ai-sdk/provider` / `@ai-sdk/provider-utils` | 上者的依赖，V4 类型与传输工具 | Apache-2.0。**浏览器可行性已于 2026-09-23 实测确认**（[`harness.md`](harness.md) §16）：产物内有 `isNode()` 守卫，浏览器走 `globalThis.fetch` |
+| 🟡 `@ai-sdk/gateway` | **仅开发期**，读协议源码与做契约客户端 | Apache-2.0，随包发布完整 `src/`。不进生产依赖 |
+| 🟡 Node.js 20+ | **仅 sidecar（兜底）** | **不是必需部署单元**。仅当需要支持缺 JSPI 的浏览器时才装，见 §21.4 |
 
-依赖版本由 `go.mod` 和 `go.sum` 固定，不在构建脚本中使用 `@latest`。Huma、Gin、Go 和 SQLite Driver 作为联动升级组验证。
+前端体积影响（实测）：引入 `@ai-sdk/openai-compatible` 后主 bundle 843.04 → 1009.70 kB，
+**gzip 236.79 → 284.12 kB（+47.33 kB）**。
+
+依赖版本由 `go.mod` 和 `go.sum` 固定，不在构建脚本中使用 `@latest`。
+🟡 标记的前端依赖同样**锁死精确版本，不用 `^`**（[`harness.md`](harness.md) §4.6）。Huma、Gin、Go 和 SQLite Driver 作为联动升级组验证。
 
 ### 2.2 Huma 能力使用
 
@@ -808,9 +817,9 @@ Internet
        - 基础限流
   -> WireGuard / frp / 受控反向隧道
   -> 实验室 Mini 主机
-       - FastTask systemd
+       - FastTask systemd          (Go，单二进制)
+       - 🟡 fasttask-sidecar       (Node，可选，见 §21.4)
        - SQLite
-       - Agent CLI/SDK
        - 数据、Artifact、日志、备份
 ```
 
@@ -831,6 +840,33 @@ ReadWritePaths=/var/lib/fasttask
 ```
 
 Agent 对 Workspace 的访问需要单独测试，优先让 Agent 使用受限运行用户或沙箱，而不是扩大整个 FastTask 服务权限。
+
+### 21.4 🟡 Node sidecar（可选，ADR-0005）
+
+**部署形态仍是单 Go 二进制。** 2026-09-23 的 spike（[`harness.md`](harness.md) §16）确认
+gateway shim 可在浏览器运行，因此 sidecar **不是必需组件**。
+
+| 是否部署 sidecar | 效果 |
+|---|---|
+| 不部署（默认） | 具备 JSPI 的浏览器 agent 全功能可用；缺 JSPI 的浏览器 agent 不可用（有明确提示） |
+| 部署 | 缺 JSPI 的浏览器也可用，且运行不随标签页关闭而中断 |
+
+按用户构成决定。面向 Chrome 137+ / Safari 27+ 的部署可以完全不装 Node。
+
+选择部署时的约束：
+
+- **进程管理**：独立 systemd unit `fasttask-sidecar.service`，`PartOf=fasttask.service`，
+  由 uber-fx 的 `SidecarModule` 负责**就绪探测与重启判定**（[`harness.md`](harness.md) §8.4），
+  **不由 Go 进程 fork 管理生命周期**——与 §14「不使用应用自制 PID Daemon」一致。
+- **监听**：unix socket 优先（`/run/fasttask/sidecar.sock`），TCP 时必须 `127.0.0.1`。
+  **绝不监听 `0.0.0.0`，绝不经反向代理暴露。**
+- **鉴权**：Go 启动时生成共享密钥，经环境变量传给 sidecar。
+- **权限**：与 Go 同一个 `fasttask` 用户，`ReadWritePaths` **不含数据库目录**——它不碰 SQLite。
+- **凭据**：sidecar **完全不接触模型凭据**。它打的是 Go 的 `/openai` 端点，
+  真实 key 只在 Go 进程内注入（[`harness.md`](harness.md) §4.5）。
+- **容器部署**：单镜像双进程需用 `tini` 之类的 init 转发信号并回收僵尸进程，
+  **不要用 shell `&` 后台起 Node**——那会丢失退出码与信号。
+- **配置默认值**：`sidecar.enabled` 默认 `off`。
 
 ### 21.3 反向代理头
 

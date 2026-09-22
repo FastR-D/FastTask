@@ -19,17 +19,27 @@
 |---|---|---|---|---|
 | [0001](0001-fx-composition-root.md) | 采用 fx 作为组合根并按聚合拆分 `application.App` | 已接受 | 后端装配、生命周期、角色进程 | [`doc/wiring.md`](../wiring.md) |
 | [0002](0002-assistant-transport.md) | Agent 前后端采用 assistant-transport 协议 | 已接受 | HTTP 契约、前端运行时、数据模型 | [`doc/agent-impl.md`](../agent-impl.md) |
-| [0003](0003-in-process-agent-loop.md) | Agent 循环内建于 Go 进程，工具即受控用例 | 已接受 | Agent 运行时、权限与事务边界 | [`doc/agent.md`](../agent.md) |
+| [0003](0003-in-process-agent-loop.md) | Agent 循环内建于 Go 进程，工具即受控用例 | **已取代**（→0005） | Agent 运行时、权限与事务边界 | [`doc/agent.md`](../agent.md) |
 | [0004](0004-frontend-styling-boundary.md) | mdui 与 assistant-ui 的样式与职责边界 | 已接受 | 前端目录、主题、两条并行工作流 | [`doc/frontend.md`](../frontend.md) |
+| [0005](0005-libfx-agent-harness.md) | 采用 libfx 作为 Agent Harness，双宿主（WASM 默认 / Node sidecar 兼容） | 已接受 | Agent 运行时、模型代理、前端宿主、部署形态 | [`doc/harness.md`](../harness.md) |
 
 ## 3. 决策依赖关系
 
 ```text
-0003 Agent 形态（工具即受控用例）
+0003 Agent 形态（工具即受控用例）          [已取代]
+  │     └─ 工具三级分类与不变量论证被 0005 完整继承
   └─> 0002 传输协议（需要服务端持有权威状态 + 工具审批）
+        │     └─ 0005 不改动本条：宿主不参与渲染，UI 仍从服务端状态渲染
         └─> 0001 组合根（新增多个长生命周期组件，需要统一装配与启停）
+              └─ 0005 新增 SidecarModule，沿用同一套 Lifecycle 规则
 
-0004 前端样式边界（独立于 0001/0002/0003，不影响后端）
+0005 Agent Harness（libfx，双宿主）
+  └─> 取代 0003 的「循环在 Go 进程内」，保留其余全部结论
+
+0004 前端样式边界（独立于其余各条，不影响后端）
 ```
 
-0004 曾被有意挂起，等 mdui 完全重写落地后依据真实代码定案，现已接受。四条决策均不互相阻塞。
+0004 曾被有意挂起，等 mdui 完全重写落地后依据真实代码定案，现已接受。
+
+**术语警告：** 0001 标题中的「fx」指 `go.uber.org/fx`（DI 容器），0005 中的「libfx」指 `vercel-labs/fx` 的嵌入 SDK。
+两者毫无关系。新文档中一律写 **uber-fx** 与 **libfx**，不使用裸「fx」。见 [ADR-0005](0005-libfx-agent-harness.md) §0。
