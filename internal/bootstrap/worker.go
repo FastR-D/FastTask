@@ -48,18 +48,26 @@ func ProviderResolver(app *application.App, cfg config.Config) func(context.Cont
 	}
 }
 
-func registerWorkerLifecycle(lc fx.Lifecycle, worker *application.Worker, obs LifecycleObserver) {
+func registerWorkerLifecycle(lc fx.Lifecycle, worker *application.Worker, agent *application.AgentService, obs LifecycleObserver) {
 	var cancel context.CancelFunc
 	var done chan struct{}
 	lc.Append(fx.Hook{
-		OnStart: func(context.Context) error {
-			var ctx context.Context
-			ctx, cancel = context.WithCancel(context.Background())
+		OnStart: func(ctx context.Context) error {
+			// §4.2: v1 does not resume a run across a process restart. Runs left
+			// queued/running by a crashed predecessor are marked interrupted BEFORE
+			// the worker claims any job, so ExecuteRun short-circuits on them
+			// (terminal status) instead of re-executing a stale run. Their partial
+			// messages are preserved for the user to review and retry.
+			if _, err := agent.Repository().MarkInterruptedRuns(ctx, "INTERRUPTED"); err != nil {
+				return err
+			}
+			var runCtx context.Context
+			runCtx, cancel = context.WithCancel(context.Background())
 			done = make(chan struct{})
 			obs.Started("worker")
 			go func() {
 				defer close(done)
-				worker.Run(ctx)
+				worker.Run(runCtx)
 			}()
 			return nil
 		},
