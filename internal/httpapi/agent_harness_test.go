@@ -119,14 +119,13 @@ func TestHarnessTokenBoundaries(t *testing.T) {
 		}
 	}
 
-	// A run capability is not a user credential: it cannot mint tokens, list tools, submit commands
-	// or cancel — cancelling is the user's power, not the host's (§10.2).
+	// A run capability is not a user credential: it cannot mint tokens, submit commands or cancel —
+	// cancelling is the user's power, not the host's (§10.2).
 	for _, call := range []struct {
 		method, path string
 		body         any
 	}{
 		{http.MethodPost, "/api/v1/agent/runs", map[string]any{"run_id": runID}},
-		{http.MethodGet, "/api/v1/agent/tools", nil},
 		{http.MethodPost, "/api/v1/agent/commands", harnessCommandsBody("第二个问题")},
 		{http.MethodPost, "/api/v1/agent/runs/" + runID + "/cancellation", map[string]any{}},
 	} {
@@ -134,6 +133,21 @@ func TestHarnessTokenBoundaries(t *testing.T) {
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("%s %s with a harness token=%d, want 401 (%s)", call.method, call.path, response.Code, response.Body.String())
 		}
+	}
+
+	// The tool manifest is the one user-scoped read a capability may make (§3.4, §8.1): the Node sidecar
+	// holds nothing but the token the server just handed it, so refusing it would leave the fallback host
+	// unable to learn which tools exist. The manifest is a list of names and schemas — no credential, no
+	// user data — and each call it describes is authorized again when it is executed (§5.3).
+	manifest := api.do(t, http.MethodGet, "/api/v1/agent/tools", nil, harnessAuth)
+	if manifest.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/agent/tools with a harness token=%d, want 200 (%s)", manifest.Code, manifest.Body.String())
+	}
+	// Without either credential the manifest is still closed. The helper always carries the test user's
+	// token, so "no credential" means overwriting it with something that is not one.
+	anonymous := api.do(t, http.MethodGet, "/api/v1/agent/tools", nil, map[string]string{"Authorization": "Bearer fth_not-a-real-token"})
+	if anonymous.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /api/v1/agent/tools with a forged credential=%d, want 401", anonymous.Code)
 	}
 
 	// A token is bound to its run: the same token on another run's path is refused.

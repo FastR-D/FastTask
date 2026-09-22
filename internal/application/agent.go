@@ -84,14 +84,25 @@ type SidecarDriver interface {
 	Healthy(ctx context.Context) bool
 }
 
-// SidecarRun is one drive request. The token is a normal harness token, so the sidecar has
-// exactly the capability a browser host has and no more (§8.1).
+// SidecarRun is one drive request. The token is a normal harness token, so the sidecar has exactly the
+// capability a browser host has and no more (§8.1).
+//
+// Model, instructions and thread id travel with it because a sidecar cannot ask for them: POST /agent/runs
+// takes the user's JWT and would revoke the token it already holds (§10.2). The Worker has just received
+// the grant, so it forwards the parts a host needs to construct an agent (§3.3).
+// SidecarRun is one run handed to the Node host (§8.3). The grant's model and instructions travel with it
+// because the sidecar holds no credentials and no system prompt of its own: what the browser host learns
+// from POST /agent/runs, the sidecar learns from this request. Nothing here is trusted by the proxy — it
+// still enforces its own model and system on every call (§4.2).
 type SidecarRun struct {
 	RunID        string
 	HarnessToken string
 	Prompt       string
 	Checkpoint   []byte
 	LibfxVersion string
+	Model        string
+	Instructions string
+	ThreadID     string
 }
 
 // SidecarResult is what the host reported at the end of its turn (§5.1).
@@ -692,6 +703,7 @@ func (s *AgentService) driveViaSidecar(ctx context.Context, job persistence.Agen
 	result, err := s.sidecar.Drive(ctx, SidecarRun{
 		RunID: run.ID, HarnessToken: grant.HarnessToken, Prompt: prompt,
 		Checkpoint: thread.Checkpoint, LibfxVersion: thread.LibfxVersion,
+		Model: grant.Model, Instructions: grant.Instructions, ThreadID: run.ThreadID,
 	})
 	if err != nil {
 		return nil, s.failHarnessRun(ctx, run, "PROVIDER_ERROR", err.Error())

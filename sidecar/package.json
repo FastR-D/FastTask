@@ -1,0 +1,10 @@
+{
+  "name": "fasttask-sidecar",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Optional Node host for FastTask's agent, for browsers without JSPI (doc/harness.md §8). Built by `npm run build:sidecar` in web/; it resolves libfx out of web/node_modules at runtime.",
+  "engines": {
+    "node": ">=20"
+  }
+}
