@@ -40,17 +40,18 @@ FastTask 初期部署在实验室 Mini 主机，并通过阿里云反向代理�
 | assistant-transport 协议 | Agent 前后端传输 | 服务端持有权威状态；Go 侧自实现编码器，见 [`doc/agent-impl.md`](agent-impl.md) §2 |
 | mdui | Material You 组件与响应式布局 | 基于 Lit 的 Web Components，无官方 React 封装，依赖 React 19 的自定义元素支持 |
 | `vite-plugin-pwa` | PWA manifest 与 Service Worker | 见 [`doc/pwa.md`](pwa.md) |
-| 🟡 `libfx` | Agent 循环内核（harness） | [ADR-0005](adr/0005-libfx-agent-harness.md)。**与 `go.uber.org/fx` 无关**，见 [`doc/README.md`](README.md) §0.0。浏览器 WASM + JSPI，或 Node N-API。**不发布类型声明，需自写 ambient**（[`harness.md`](harness.md) §3.8） |
-| 🟡 `@ai-sdk/openai-compatible` | LanguageModelV4 ↔ OpenAI 兼容转换 | Apache-2.0。**不手搓协议翻译**（[ADR-0005](adr/0005-libfx-agent-harness.md) §5.1）。含 `reasoning_content` 与 `image_url` 支持 |
-| 🟡 `@ai-sdk/provider` / `@ai-sdk/provider-utils` | 上者的依赖，V4 类型与传输工具 | Apache-2.0。**浏览器可行性已于 2026-09-23 实测确认**（[`harness.md`](harness.md) §16）：产物内有 `isNode()` 守卫，浏览器走 `globalThis.fetch` |
-| 🟡 `@ai-sdk/gateway` | **仅开发期**，读协议源码与做契约客户端 | Apache-2.0，随包发布完整 `src/`。不进生产依赖 |
-| 🟡 Node.js 20+ | **仅 sidecar（兜底）** | **不是必需部署单元**。仅当需要支持缺 JSPI 的浏览器时才装，见 §21.4 |
+| 🟢 `libfx` | Agent 循环内核（harness） | [ADR-0005](adr/0005-libfx-agent-harness.md)。**与 `go.uber.org/fx` 无关**，见 [`doc/README.md`](README.md) §0.0。浏览器 WASM + JSPI，或 Node N-API。**不发布类型声明，需自写 ambient**（[`harness.md`](harness.md) §3.8） |
+| 🟢 `@ai-sdk/openai-compatible` | LanguageModelV4 ↔ OpenAI 兼容转换 | Apache-2.0。**不手搓协议翻译**（[ADR-0005](adr/0005-libfx-agent-harness.md) §5.1）。含 `reasoning_content` 与 `image_url` 支持 |
+| 🟢 `@ai-sdk/provider` | V4 类型（`LanguageModelV4CallOptions` / `StreamPart`），shim 只 import type | Apache-2.0。**浏览器可行性已于 2026-09-23 实测确认**（[`harness.md`](harness.md) §16）：产物内有 `isNode()` 守卫，浏览器走 `globalThis.fetch`。`@ai-sdk/provider-utils` 作为传递依赖引入，不直接依赖 |
+| ⚪ `@ai-sdk/gateway` | **未安装**：spike 期用它读协议源码，结束后已回滚（[`harness.md`](harness.md) §16.5） | 契约事实来源改为真机集成测试 `web/src/harness/integration.test.ts`（加载真实 `libfx/node`）+ §16.6 的记录代理 |
+| 🟢 Node.js 20+ | **仅 sidecar（兜底）** | **不是必需部署单元**。仅当需要支持缺 JSPI 的浏览器时才装，见 §21.4 |
 
 前端体积影响（实测）：引入 `@ai-sdk/openai-compatible` 后主 bundle 843.04 → 1009.70 kB，
 **gzip 236.79 → 284.12 kB（+47.33 kB）**。
 
 依赖版本由 `go.mod` 和 `go.sum` 固定，不在构建脚本中使用 `@latest`。
-🟡 标记的前端依赖同样**锁死精确版本，不用 `^`**（[`harness.md`](harness.md) §4.6）。Huma、Gin、Go 和 SQLite Driver 作为联动升级组验证。
+harness 相关的前端依赖**锁死精确版本，不用 `^`**（[`harness.md`](harness.md) §4.6）：实测 `libfx` 0.0.10、
+`@ai-sdk/openai-compatible` 3.0.53、`@ai-sdk/provider` 4.0.17。Huma、Gin、Go 和 SQLite Driver 作为联动升级组验证。
 
 ### 2.2 Huma 能力使用
 
@@ -818,7 +819,7 @@ Internet
   -> WireGuard / frp / 受控反向隧道
   -> 实验室 Mini 主机
        - FastTask systemd          (Go，单二进制)
-       - 🟡 fasttask-sidecar       (Node，可选，见 §21.4)
+       - 🟢 fasttask-sidecar       (Node，可选，见 §21.4)
        - SQLite
        - 数据、Artifact、日志、备份
 ```

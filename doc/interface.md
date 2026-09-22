@@ -21,7 +21,7 @@
 - 错误响应 `Content-Type: application/problem+json`。
 - API 输入、输出、校验、Security Scheme 和 OpenAPI 文档由 Huma Operation 定义。
 - **例外**：`/api/v1/agent/*` 由裸 Gin Handler 实现，不经 Huma——三个流式端点（`commands` / `resume-state` / `resume`）加上一个恢复读 `GET /agent/thread-state`。绕过 Huma 的原因是 `sse` 包强制写 `event:` 行，而 assistant-transport 解码器要求使用默认事件名。这些端点的 OpenAPI 描述需手工维护，契约细节见 [`doc/agent-impl.md`](agent-impl.md) §2。除此之外，Huma 仍是全部接口的字段级事实来源。
-- 🟡 [ADR-0005](adr/0005-libfx-agent-harness.md) 新增的端点见 **§20**。其中只有
+- 🟢 [ADR-0005](adr/0005-libfx-agent-harness.md) 新增的端点见 **§20**（已实现）。其中只有
   `POST /agent/runs/{run_id}/openai/chat/completions`（OpenAI 兼容流）与
   `GET /agent/runs/{run_id}/approvals/{proposal_id}`（长轮询）**同样绕过 Huma**，
   例外范围从四个扩大到六个；其余新增端点一律走 Huma 定义。
@@ -277,14 +277,14 @@ Provider 响应不返回明文 API Key；激活操作使被激活记录成为唯
 | `CORE_ITEMS_NOT_SATISFIED` | 409 | 核心项尚未全部满足，不能生成辅助项 |
 | `DEVICE_TOKEN_REVOKED` | 401 | 设备 Token 已撤销 |
 | `RATE_LIMITED` | 429 | 请求过多 |
-| `HARNESS_UNAVAILABLE` | 503 | 🟡 harness 不可用（sidecar 不健康且浏览器无 JSPI），见 [`harness.md`](harness.md) §3.2 |
-| `TOOLS_ETAG_STALE` | 409 | 🟡 工具清单在运行中途变更，需重拉 `/agent/tools`，见 [`harness.md`](harness.md) §10.3 |
-| `HARNESS_TOKEN_INVALID` | 401 | 🟡 harness token 失效、过期或与 run 不匹配 |
-| `APPROVAL_TIMEOUT` | 409 | 🟡 审批等待超时，见 [`harness.md`](harness.md) §7 |
+| `HARNESS_UNAVAILABLE` | 503 | 🟢 harness 不可用（sidecar 不健康且浏览器无 JSPI），见 [`harness.md`](harness.md) §3.2 |
+| `TOOLS_ETAG_STALE` | 409 | 🟢 工具清单在运行中途变更，需重拉 `/agent/tools`，见 [`harness.md`](harness.md) §10.3 |
+| `HARNESS_TOKEN_INVALID` | 401 | 🟢 harness token 失效、过期或与 run 不匹配 |
+| `APPROVAL_TIMEOUT` | 409 | 🟢 审批等待超时，见 [`harness.md`](harness.md) §7 |
 | `PROVIDER_NO_TOOL_SUPPORT` | 422 | 模型不支持工具调用，见 [`agent-impl.md`](agent-impl.md) §5.1.1 |
-| `CHECKPOINT_VERSION_SKEW` | — | 🟡 非 HTTP 错误，仅作为运行诊断与日志字段，见 [`harness.md`](harness.md) §6.3 |
-| `ATTACHMENT_TOO_LARGE` | 400 | 🟡 附件超出限制，见 [`chat-features.md`](chat-features.md) §4.5 |
-| `ATTACHMENT_TYPE_UNSUPPORTED` | 400 | 🟡 附件 MIME 不在白名单（按魔数判定，非扩展名） |
+| `CHECKPOINT_VERSION_SKEW` | — | 🟢 非 HTTP 错误，仅作为运行诊断与日志字段，见 [`harness.md`](harness.md) §6.3 |
+| `ATTACHMENT_TOO_LARGE` | 400 | 🟢 附件超出限制，见 [`chat-features.md`](chat-features.md) §4.5 |
+| `ATTACHMENT_TYPE_UNSUPPORTED` | 400 | 🟢 附件 MIME 不在白名单（按魔数判定，非扩展名） |
 
 ## 4. 核心资源摘要
 
@@ -1255,7 +1255,7 @@ CI 必须：
 - Work Session 是否允许离线补录及其审计要求。
 - P1 外部导入由用户 Token 还是服务 Token 代表最终所有者。
 
-## 20. Agent Harness、对话线程与附件（🟡 待实现）
+## 20. Agent Harness、对话线程与附件（🟢 已实现）
 
 > 上位文档：[ADR-0005](adr/0005-libfx-agent-harness.md)、[`harness.md`](harness.md)、[`chat-features.md`](chat-features.md)
 > 本节只定**接口契约**；行为语义以上述文档为准。字段级仍以 Huma 生成的 OpenAPI 为事实来源（§20.5 的两个例外除外）。

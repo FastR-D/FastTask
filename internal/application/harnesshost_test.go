@@ -48,8 +48,23 @@ type fakeUpstream struct {
 	mu       sync.Mutex
 	turns    []scriptedTurn
 	calls    int
+	chunks   int
 	requests []map[string]any
 	headers  []http.Header
+
+	// chunkDelay slows the response down, one chunk at a time. It is the only way to observe a
+	// cancellation while the model is still producing text (§5.2's second channel): a fixture that writes
+	// a whole turn at once has no "mid-stream", and the proxy only re-reads the run row every
+	// cancelCheckInterval, so the stream has to outlive that interval to be interruptible at all.
+	chunkDelay time.Duration
+}
+
+// chunksWritten is how many SSE chunks the upstream has flushed, for a test waiting on a stream to be
+// genuinely in flight before it cancels.
+func (f *fakeUpstream) chunksWritten() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.chunks
 }
 
 func newFakeUpstream(t *testing.T, turns ...scriptedTurn) *fakeUpstream {
@@ -136,6 +151,17 @@ func (f *fakeUpstream) serve(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "data: %s\n\n", encoded)
 		if flusher != nil {
 			flusher.Flush()
+		}
+		f.mu.Lock()
+		f.chunks++
+		f.mu.Unlock()
+		if f.chunkDelay > 0 {
+			select {
+			case <-time.After(f.chunkDelay):
+			case <-r.Context().Done():
+				// The proxy cut us off, which is exactly what a cancellation looks like from upstream.
+				return
+			}
 		}
 	}
 	if turn.reasoning != "" {
