@@ -63,10 +63,21 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 		c.Header("X-Frame-Options", "DENY")
 		c.Header("Referrer-Policy", "no-referrer")
 		c.Header("Permissions-Policy", "camera=(), microphone=(self), geolocation=()")
-		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
-		if strings.HasPrefix(c.Request.URL.Path, "/assets/") {
+		// wasm-unsafe-eval is what lets the browser host compile fx-core.wasm; without it a
+		// script-src of 'self' blocks WebAssembly instantiation and the agent silently degrades
+		// (doc/harness.md §9). It is narrower than unsafe-eval: no JS eval is permitted.
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+		switch {
+		case strings.HasPrefix(c.Request.URL.Path, "/assets/"):
 			c.Header("Cache-Control", "public, max-age=31536000, immutable")
-		} else if !strings.HasPrefix(c.Request.URL.Path, "/api/") {
+		case strings.HasPrefix(c.Request.URL.Path, "/api/"):
+			// API responses carry their own caching rules.
+		case strings.HasSuffix(c.Request.URL.Path, ".wasm"):
+			// The self-hosted libfx core is 2 MB and its name is not content-hashed, so it is
+			// cacheable but revalidated: a libfx upgrade must reach clients within the hour
+			// (doc/harness.md §9.1).
+			c.Header("Cache-Control", "public, max-age=3600")
+		default:
 			c.Header("Cache-Control", "no-store")
 		}
 		if cfg.Environment == "production" || strings.HasPrefix(cfg.PublicURL, "https://") {
@@ -1583,19 +1594,95 @@ func (s *Server) static() {
 		if rel != "" {
 			candidate := filepath.Join(dist, rel)
 			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-				switch filepath.Ext(candidate) {
-				case ".webmanifest":
-					c.Header("Content-Type", "application/manifest+json")
-				case ".js", ".mjs":
-					c.Header("Content-Type", "text/javascript; charset=utf-8")
-				}
-				c.File(candidate)
+				serveStaticFile(c, candidate, info)
 				return
 			}
 		}
 		// SPA fallback: unknown non-API paths render the client-side router.
 		c.File(index)
 	})
+}
+
+// staticContentTypes pins the types whose correctness the specs call out. Anything else is detected
+// from the extension by http.ServeContent, which preserves a header set here.
+var staticContentTypes = map[string]string{
+	".webmanifest": "application/manifest+json",
+	".js":          "text/javascript; charset=utf-8",
+	".mjs":         "text/javascript; charset=utf-8",
+	// A wasm module served as application/octet-stream is refused by WebAssembly.instantiateStreaming,
+	// which is how the browser host loads fx-core (doc/harness.md §9.2).
+	".wasm": "application/wasm",
+}
+
+// serveStaticFile serves one file from the web dist, preferring a precompressed sibling when the
+// client accepts it (doc/harness.md §9.2).
+//
+// The build emits fx-core.wasm.br and .gz next to the 2 MB original; serving the variant is what makes
+// the host affordable to load on a research-group connection. Content-Type stays the ORIGINAL type —
+// the encoding is a transport detail, and a browser that asked for br must still be told it is getting
+// a wasm module. Vary is required, or a shared cache hands a br body to a client that cannot decode it.
+func serveStaticFile(c *gin.Context, candidate string, info os.FileInfo) {
+	contentType := staticContentTypes[strings.ToLower(filepath.Ext(candidate))]
+	if contentType != "" {
+		c.Header("Content-Type", contentType)
+	}
+	for _, encoding := range acceptedEncodings(c.GetHeader("Accept-Encoding")) {
+		variant := candidate + compressedSuffix[encoding]
+		variantInfo, err := os.Stat(variant)
+		if err != nil || variantInfo.IsDir() {
+			continue
+		}
+		file, err := os.Open(variant)
+		if err != nil {
+			continue
+		}
+		defer file.Close()
+		c.Header("Content-Encoding", encoding)
+		c.Header("Vary", "Accept-Encoding")
+		http.ServeContent(c.Writer, c.Request, candidate, variantInfo.ModTime(), file)
+		return
+	}
+	c.File(candidate)
+	_ = info
+}
+
+// compressedSuffix maps a Content-Encoding to the file suffix the build produces.
+var compressedSuffix = map[string]string{"br": ".br", "gzip": ".gz"}
+
+// acceptedEncodings returns the encodings we can serve, best first. Brotli wins on the wasm (560 KB
+// against 729 KB gzipped), and identity is the fallback http.ServeContent already provides.
+func acceptedEncodings(header string) []string {
+	if strings.TrimSpace(header) == "" {
+		return nil
+	}
+	var out []string
+	for _, candidate := range strings.Split(header, ",") {
+		parts := strings.Split(candidate, ";")
+		name := strings.ToLower(strings.TrimSpace(parts[0]))
+		if _, served := compressedSuffix[name]; !served {
+			continue
+		}
+		rejected := false
+		for _, parameter := range parts[1:] {
+			key, value, found := strings.Cut(strings.TrimSpace(parameter), "=")
+			if !found || !strings.EqualFold(strings.TrimSpace(key), "q") {
+				continue
+			}
+			if quality, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil && quality <= 0 {
+				rejected = true
+			}
+		}
+		if !rejected {
+			out = append(out, name)
+		}
+	}
+	// A client that lists gzip before br still gets br: the choice is ours among what it accepts,
+	// and q-values other than 0 are not ranked here because no client we serve sends them.
+	sort.SliceStable(out, func(i, j int) bool {
+		rank := map[string]int{"br": 0, "gzip": 1}
+		return rank[out[i]] < rank[out[j]]
+	})
+	return out
 }
 
 func requestID() gin.HandlerFunc {

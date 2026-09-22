@@ -662,7 +662,7 @@ func TestHarnessRunReportsItsModeAndRunID(t *testing.T) {
 		var run persistence.AgentRun
 		if err := api.store.DB.
 			Where("user_id = ? AND harness_mode = ? AND status = ?", api.user.ID, application.HarnessModeWASM, persistence.RunQueued).
-			Order("created_at DESC").First(&run).Error; err == nil {
+			Order("created_at DESC").First(&run).Error; err == nil && hasAssistantMessage(api, run.ID) {
 			runID = run.ID
 		}
 		time.Sleep(5 * time.Millisecond)

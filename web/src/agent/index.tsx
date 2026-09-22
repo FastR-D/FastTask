@@ -7,6 +7,7 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import { request } from '../api'
 import { useAgentRuntime } from './runtime'
+import { HarnessStatusLine, useOnline } from './HarnessStatus'
 import { MarkdownText, UserMarkdownText } from './Markdown'
 import type { ServerAgentState } from './state'
 import { DailyPlanProposalUI, TaskTreeProposalUI } from './tools/ProposalApproval'
@@ -83,6 +84,7 @@ function AgentConversation({ initialState, onNotice }: { initialState: ServerAge
       <TaskTreeProposalUI />
       <DailyPlanProposalUI />
       <ThreadPrimitive.Root className="agent-chat">
+        <HarnessStatusLine />
         <ThreadPrimitive.Viewport className="agent-viewport">
           <ThreadPrimitive.Empty>
             <div className="agent-empty">
@@ -119,19 +121,24 @@ function AssistantMessage() {
 }
 
 function Composer({ onNotice }: { onNotice: (message: string) => void }) {
+  // An offline PWA can still render the cached conversation, but it cannot start a run: the model call
+  // needs a network. The entry is greyed out and says why, rather than accepting a message that will
+  // fail (doc/harness.md §9.3).
+  const online = useOnline()
   return (
-    <ComposerPrimitive.Root className="agent-composer">
+    <ComposerPrimitive.Root className={`agent-composer${online ? '' : ' offline'}`}>
       <ComposerPrimitive.Input
         className="agent-input"
-        placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"
+        placeholder={online ? '说点什么…（Enter 发送，Shift+Enter 换行）' : '离线中，联网后才能继续对话'}
         rows={1}
         autoFocus
+        disabled={!online}
       />
       <VoiceButton onNotice={onNotice} />
       <ComposerPrimitive.Cancel className="agent-composer-btn agent-cancel" aria-label="停止生成">
         <mdui-icon name="stop" />
       </ComposerPrimitive.Cancel>
-      <ComposerPrimitive.Send className="agent-composer-btn agent-send" aria-label="发送">
+      <ComposerPrimitive.Send className="agent-composer-btn agent-send" aria-label="发送" disabled={!online}>
         <mdui-icon name="arrow_upward" />
       </ComposerPrimitive.Send>
     </ComposerPrimitive.Root>

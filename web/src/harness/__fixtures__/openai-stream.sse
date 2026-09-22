@@ -1,0 +1,20 @@
+data: {"id":"chatcmpl-spike","object":"chat.completion.chunk","created":1774300000,"model":"qwen3.8-max","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-spike","object":"chat.completion.chunk","created":1774300000,"model":"qwen3.8-max","choices":[{"index":0,"delta":{"reasoning_content":"先看看"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-spike","object":"chat.completion.chunk","created":1774300000,"model":"qwen3.8-max","choices":[{"index":0,"delta":{"reasoning_content":"有没有活跃目标"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-spike","object":"chat.completion.chunk","created":1774300000,"model":"qwen3.8-max","choices":[{"index":0,"delta":{"content":"我来"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-spike","object":"chat.completion.chunk","created":1774300000,"model":"qwen3.8-max","choices":[{"index":0,"delta":{"content":"查一下"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-spike","object":"chat.completion.chunk","created":1774300000,"model":"qwen3.8-max","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"list_goals","arguments":"{\"status\":"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-spike","object":"chat.completion.chunk","created":1774300000,"model":"qwen3.8-max","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"active\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-spike","object":"chat.completion.chunk","created":1774300000,"model":"qwen3.8-max","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-spike","object":"chat.completion.chunk","created":1774300000,"model":"qwen3.8-max","choices":[],"usage":{"prompt_tokens":41,"completion_tokens":17,"total_tokens":58}}
+
+data: [DONE]
+

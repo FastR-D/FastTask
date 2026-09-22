@@ -114,7 +114,12 @@ type HarnessPrincipal struct {
 // RunGrant is the response of POST /agent/runs (§10.2). Model and instructions come
 // from the server; a host must not carry defaults of its own (§3.3).
 type RunGrant struct {
-	HarnessToken       string    `json:"harness_token"`
+	HarnessToken string `json:"harness_token"`
+	// RunID and ThreadID name what the capability is bound to. A host needs the thread to read and
+	// write its checkpoint (§6.1), and taking it from here rather than from the UI's own state keeps
+	// one source of truth: the token, not the client, decides the scope.
+	RunID              string    `json:"run_id"`
+	ThreadID           string    `json:"thread_id"`
 	Model              string    `json:"model"`
 	Instructions       string    `json:"instructions"`
 	ToolsETag          string    `json:"tools_etag"`
@@ -312,7 +317,8 @@ func (s *harnessTokens) IssueRunGrant(ctx context.Context, userID, runID, toolsE
 		return RunGrant{}, err
 	}
 	return RunGrant{
-		HarnessToken: plaintext, Model: creds.Model, Instructions: instructions,
+		HarnessToken: plaintext, RunID: run.ID, ThreadID: run.ThreadID,
+		Model: creds.Model, Instructions: instructions,
 		ToolsETag: current, ExpiresAt: expires,
 		HeartbeatIntervalS: int(harnessHeartbeatInterval / time.Second),
 		LibfxVersion:       LibfxVersion,

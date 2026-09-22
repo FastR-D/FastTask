@@ -1,0 +1,22 @@
+{
+  "model": "qwen3.8-max",
+  "prompt": [
+    { "role": "system", "content": [{ "type": "text", "text": "你是 FastTask 的科研推进助手。" }] },
+    { "role": "user", "content": [{ "type": "text", "text": "我有哪些活跃目标？" }] }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "list_goals",
+      "description": "列出目标",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "status": { "type": "string", "enum": ["active", "done"] } }
+      }
+    }
+  ],
+  "toolChoice": { "type": "auto" },
+  "maxOutputTokens": 1024,
+  "temperature": 0.4
+}

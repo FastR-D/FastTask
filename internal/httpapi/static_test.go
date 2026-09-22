@@ -95,3 +95,86 @@ func mustMkdirStatic(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+// TestStaticServesWasmPrecompressed covers doc/harness.md §9.2: the self-hosted libfx core must
+// arrive as application/wasm — WebAssembly.instantiateStreaming refuses anything else — and a client
+// that accepts brotli or gzip must be handed the precompressed sibling the build emits, because 2 MB
+// is the difference between the agent starting and the user giving up.
+func TestStaticServesWasmPrecompressed(t *testing.T) {
+	dist := t.TempDir()
+	mustWriteStatic(t, filepath.Join(dist, "index.html"), "<!doctype html><title>FastTask</title>")
+	mustMkdirStatic(t, filepath.Join(dist, "assets"))
+	mustWriteStatic(t, filepath.Join(dist, "fx-core.wasm"), "\x00asm-raw-bytes")
+	mustWriteStatic(t, filepath.Join(dist, "fx-core.wasm.br"), "brotli-bytes")
+	mustWriteStatic(t, filepath.Join(dist, "fx-core.wasm.gz"), "gzip-bytes")
+
+	cfg := defaultTestConfig(t)
+	cfg.WebDist = dist
+	api := newTestApiWithConfig(t, cfg)
+
+	cases := []struct {
+		accept       string
+		wantEncoding string
+		wantBody     string
+	}{
+		{"br, gzip", "br", "brotli-bytes"},
+		{"gzip, br", "br", "brotli-bytes"}, // our choice among what the client accepts: br is smaller
+		{"gzip", "gzip", "gzip-bytes"},
+		{"br;q=0, gzip", "gzip", "gzip-bytes"},
+		{"identity", "", "\x00asm-raw-bytes"},
+		{"", "", "\x00asm-raw-bytes"},
+	}
+	for _, tc := range cases {
+		headers := map[string]string{}
+		if tc.accept != "" {
+			headers["Accept-Encoding"] = tc.accept
+		}
+		resp := api.do(t, http.MethodGet, "/fx-core.wasm", nil, headers)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("Accept-Encoding=%q status=%d body=%s", tc.accept, resp.Code, resp.Body.String())
+		}
+		// The type is the ORIGINAL one: an encoding is a transport detail, and a browser that asked
+		// for brotli still has to be told it received a wasm module.
+		if got := resp.Header().Get("Content-Type"); got != "application/wasm" {
+			t.Errorf("Accept-Encoding=%q Content-Type=%q, want application/wasm", tc.accept, got)
+		}
+		if got := resp.Header().Get("Content-Encoding"); got != tc.wantEncoding {
+			t.Errorf("Accept-Encoding=%q Content-Encoding=%q, want %q", tc.accept, got, tc.wantEncoding)
+		}
+		if tc.wantEncoding != "" && resp.Header().Get("Vary") != "Accept-Encoding" {
+			// Without Vary a shared cache hands a brotli body to a client that cannot decode it.
+			t.Errorf("Accept-Encoding=%q is missing Vary: Accept-Encoding", tc.accept)
+		}
+		if resp.Body.String() != tc.wantBody {
+			t.Errorf("Accept-Encoding=%q body=%q, want %q", tc.accept, resp.Body.String(), tc.wantBody)
+		}
+		if got := resp.Header().Get("Cache-Control"); got != "public, max-age=3600" {
+			t.Errorf("Cache-Control=%q, want a revalidated hour (the name is not content-hashed)", got)
+		}
+	}
+
+	// A file with no precompressed sibling is served as itself, whatever the client accepts.
+	mustWriteStatic(t, filepath.Join(dist, "plain.txt"), "plain")
+	plain := api.do(t, http.MethodGet, "/plain.txt", nil, map[string]string{"Accept-Encoding": "br, gzip"})
+	if plain.Code != http.StatusOK || plain.Body.String() != "plain" {
+		t.Fatalf("plain file=%d %q", plain.Code, plain.Body.String())
+	}
+	if got := plain.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("plain file Content-Encoding=%q, want none", got)
+	}
+}
+
+// TestSecurityPolicyAllowsWasm covers the CSP half of §9: with script-src 'self' alone a browser
+// refuses to instantiate WebAssembly, and the agent degrades to the sidecar for a reason nobody can
+// see in the server logs.
+func TestSecurityPolicyAllowsWasm(t *testing.T) {
+	api := newTestAPI(t)
+	resp := api.do(t, http.MethodGet, "/health/live", nil, nil)
+	policy := resp.Header().Get("Content-Security-Policy")
+	if !strings.Contains(policy, "'wasm-unsafe-eval'") {
+		t.Fatalf("CSP does not permit wasm compilation: %q", policy)
+	}
+	if strings.Contains(policy, "script-src 'self' 'unsafe-eval'") {
+		t.Fatalf("CSP widened to unsafe-eval, which permits arbitrary JS eval: %q", policy)
+	}
+}
