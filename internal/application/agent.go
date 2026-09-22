@@ -40,10 +40,16 @@ type AgentService struct {
 	// same reason: s.toProtocolMessage, s.LatestThreadState and
 	// s.ResumeCurrentState all resolve by promotion.
 	*threadStateService
-	// harness carries the host-facing runtime (doc/harness.md): capability tokens,
-	// the tool manifest, the model proxy, the tool execution surface and the run
-	// lifecycle. It is embedded so the HTTP layer keeps one service to call.
+	// harness carries the host-facing runtime (doc/harness.md): capability tokens, the tool manifest,
+	// the model proxy, the tool execution surface and the run lifecycle. It is embedded so the HTTP
+	// layer keeps one service to call.
 	*harnessService
+	// threads is the user-facing catalogue: list, rename, archive, delete
+	// (doc/chat-features.md §2).
+	*threadCatalogue
+	// attachments owns uploaded images and the bytes behind them (doc/chat-features.md §4). An empty
+	// directory means uploads are not configured, which is a 400 rather than a panic.
+	attachments *AttachmentStore
 	// creds resolves the upstream model the proxy injects. Unlike chat, which drove
 	// the in-process loop, it yields raw coordinates that must never leave the
 	// process (§4.5).
@@ -162,6 +168,19 @@ func WithClock(now func() time.Time) AgentOption {
 	return func(s *AgentService) { s.nowFn = now }
 }
 
+// WithAttachmentDir configures where uploaded images are stored (doc/chat-features.md §4.3). An empty
+// directory leaves uploads disabled.
+func WithAttachmentDir(dir string) AgentOption {
+	return func(s *AgentService) {
+		if strings.TrimSpace(dir) != "" {
+			s.attachments.dir = dir
+		}
+	}
+}
+
+// Attachments exposes the attachment store for the HTTP layer's upload, read and delete endpoints.
+func (s *AgentService) Attachments() *AttachmentStore { return s.attachments }
+
 // WithApprovalWait overrides the approval long poll's segment and total limit
 // (doc/harness.md §7, §15).
 func WithApprovalWait(segment, limit time.Duration) AgentOption {
@@ -229,6 +248,8 @@ func NewAgentService(app *App, opts ...AgentOption) *AgentService {
 	// resolver the harness reads at request time.
 	s.harnessService = newHarnessService(s)
 	s.approvalService.svc = s
+	s.threadCatalogue = &threadCatalogue{svc: s}
+	s.attachments = NewAttachmentStore("", repo)
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -293,11 +314,19 @@ type CommandMessage struct {
 	Parts []CommandPart `json:"parts"`
 }
 
-// CommandPart is one part of an inbound message; phase B understands text.
+// CommandPart is one part of an inbound message: text, or an image reference.
+//
+// An image part carries a URL on our own attachment endpoint and never image bytes
+// (doc/chat-features.md §4.2). Inline data is dropped, because every image that reaches a model has to
+// pass an ownership check first, and bytes in a command body cannot.
 type CommandPart struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type  string `json:"type"`
+	Text  string `json:"text,omitempty"`
+	Image string `json:"image,omitempty"`
 }
+
+// ErrTooManyAttachments is the §4.5 per-message cap. It maps to 400 with a message the user can act on.
+var ErrTooManyAttachments = errors.New("a message may carry at most 4 images")
 
 // SubmitResult is returned by SubmitCommands so the HTTP layer can stream the run it just
 // created or resumed.
@@ -344,9 +373,12 @@ func (s *AgentService) SubmitCommands(ctx context.Context, userID string, req Co
 	if cmd, ok := firstToolResult(req.Commands); ok {
 		return s.ResolveApproval(ctx, userID, cmd)
 	}
-	text, err := extractUserText(req.Commands)
+	text, images, err := extractUserMessage(req.Commands)
 	if err != nil {
 		return SubmitResult{}, err
+	}
+	if len(images) > AttachmentMaxPerMessage {
+		return SubmitResult{}, ErrTooManyAttachments
 	}
 	mode, err := s.resolveHarnessMode(ctx, req.HarnessMode)
 	if err != nil {
@@ -426,6 +458,31 @@ func (s *AgentService) SubmitCommands(ctx context.Context, userID string, req Co
 		}); err != nil {
 			return err
 		}
+		// Attachments are stored as references and bound to this message, so a thread deletion takes
+		// them with it and the orphan sweep leaves them alone (doc/chat-features.md §4.5).
+		for i, reference := range images {
+			attachmentID, ok := AttachmentIDFromRef(reference)
+			if !ok {
+				// A reference that is not ours is not an attachment; it is dropped rather than stored,
+				// because the alternative is persisting a URL the server cannot vouch for.
+				continue
+			}
+			if _, err := repo.GetAttachment(ctx, userID, attachmentID); err != nil {
+				continue
+			}
+			if err := repo.CreatePart(ctx, &persistence.AgentMessagePart{
+				UserID: userID, MessageID: userMessage.ID, Idx: i + 1, Type: "image", Text: reference,
+				ArgsJSON: "{}",
+			}); err != nil {
+				return err
+			}
+			// Through the transaction-bound repository: binding through the store's own handle would
+			// open a second writer while this transaction holds the lock, and SQLite would sit on it
+			// until the busy timeout expired.
+			if err := repo.AttachAttachment(ctx, userID, attachmentID, threadID, userMessage.ID); err != nil {
+				return err
+			}
+		}
 		if err := repo.UpdateRun(ctx, userID, run.ID, map[string]any{"parent_message_id": userMessage.ID}); err != nil {
 			return err
 		}
@@ -477,10 +534,13 @@ func (s *AgentService) resolveHarnessMode(ctx context.Context, requested string)
 	return mode, nil
 }
 
-// extractUserText concatenates the text parts of the first user add-message
-// command. Tool results are not accepted in phase B (§7 lands in phase D).
-func extractUserText(commands []Command) (string, error) {
+// extractUserMessage reads the text and the attachment references out of the first user add-message
+// command. A tool result is not a message and is refused here; the approval flow owns those.
+//
+// A message of only images is accepted: "look at this plot" with no words is a complete request.
+func extractUserMessage(commands []Command) (string, []string, error) {
 	var builder strings.Builder
+	var images []string
 	sawMessage := false
 	for _, command := range commands {
 		switch command.Type {
@@ -489,20 +549,26 @@ func extractUserText(commands []Command) (string, error) {
 				continue
 			}
 			for _, part := range command.Message.Parts {
-				if part.Type == "text" || part.Type == "" {
+				switch {
+				case part.Type == "text" || part.Type == "":
 					builder.WriteString(part.Text)
 					sawMessage = true
+				case part.Type == "image":
+					if reference := strings.TrimSpace(part.Image); reference != "" {
+						images = append(images, reference)
+						sawMessage = true
+					}
 				}
 			}
 		case "add-tool-result":
-			return "", fmt.Errorf("%w: tool results are handled by the approval flow", ErrEmptyCommand)
+			return "", nil, fmt.Errorf("%w: tool results are handled by the approval flow", ErrEmptyCommand)
 		}
 	}
 	text := strings.TrimSpace(builder.String())
-	if !sawMessage || text == "" {
-		return "", ErrEmptyCommand
+	if !sawMessage || (text == "" && len(images) == 0) {
+		return "", nil, ErrEmptyCommand
 	}
-	return text, nil
+	return text, images, nil
 }
 
 // --- Run execution (Worker-driven; doc/agent-impl.md §6, §8) ---

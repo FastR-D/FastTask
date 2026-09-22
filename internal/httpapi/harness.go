@@ -3,8 +3,12 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/FastR-D/FastTask/internal/application"
 	"github.com/FastR-D/FastTask/internal/persistence"
@@ -70,6 +74,8 @@ type checkpointBody struct {
 
 func (s harnessRoutes) RegisterRoutes(api huma.API) {
 	type emptyInput struct{}
+	s.registerThreadRoutes(api)
+	s.registerAttachmentRoutes(api)
 
 	// The manifest is the single source of truth a host builds its tools from
 	// (doc/harness.md §3.4). The etag is what makes a mid-run manifest change detectable
@@ -210,5 +216,240 @@ func mapHarnessError(err error) error {
 		return huma.Error404NotFound("resource not found")
 	default:
 		return huma.NewError(http.StatusInternalServerError, "the harness request could not be served")
+	}
+}
+
+// --- conversation threads (doc/interface.md §20.3, doc/chat-features.md §2) ---
+
+// threadBody is one thread on the wire. The field names are snake_case per §1.1; the frontend adapter
+// maps them onto assistant-ui's RemoteThreadMetadata (doc/chat-features.md §2.2).
+type threadBody struct {
+	ID            string     `json:"id"`
+	Title         string     `json:"title"`
+	Status        string     `json:"status"`
+	GoalID        *string    `json:"goal_id,omitempty"`
+	Custom        string     `json:"custom,omitempty"`
+	LastMessageAt *time.Time `json:"last_message_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+func threadBodyOf(view application.ThreadView) threadBody {
+	return threadBody{
+		ID: view.ID, Title: view.Title, Status: view.Status, GoalID: view.GoalID,
+		Custom: view.Custom, LastMessageAt: view.LastMessageAt,
+		CreatedAt: view.CreatedAt, UpdatedAt: view.UpdatedAt,
+	}
+}
+
+// registerThreadRoutes mounts the thread catalogue. Every route takes the user's JWT: a thread is the
+// user's property, not a run capability (§20.1).
+func (s harnessRoutes) registerThreadRoutes(api huma.API) {
+	type listInput struct {
+		Status string `query:"status" enum:"regular,archived"`
+		Cursor string `query:"cursor"`
+		Limit  int    `query:"limit" minimum:"1" maximum:"100" default:"20"`
+	}
+	register(api, "list-agent-threads", http.MethodGet, "/agent/threads", "List conversation threads", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[threadBody], error) {
+		page, err := s.agent.ListAgentThreads(ctx, principal(ctx).UserID, input.Status, input.Cursor, input.Limit)
+		if err != nil {
+			return nil, mapHarnessError(err)
+		}
+		out := &listResponse[threadBody]{}
+		out.Body.HasMore = page.HasMore
+		if page.NextCursor != "" {
+			cursor := page.NextCursor
+			out.Body.NextCursor = &cursor
+		}
+		out.Body.Items = make([]threadBody, 0, len(page.Items))
+		for _, item := range page.Items {
+			out.Body.Items = append(out.Body.Items, threadBodyOf(item))
+		}
+		return out, nil
+	})
+
+	type createInput struct {
+		IdempotencyKey string `header:"Idempotency-Key"`
+		Body           struct {
+			GoalID *string `json:"goal_id,omitempty"`
+			Title  string  `json:"title,omitempty"`
+		}
+	}
+	register(api, "create-agent-thread", http.MethodPost, "/agent/threads", "Create a conversation thread", userSecurity(), func(ctx context.Context, input *createInput) (*itemResponse[map[string]string], error) {
+		view, err := s.agent.CreateAgentThread(ctx, principal(ctx).UserID, input.Body.GoalID, input.Body.Title)
+		if err != nil {
+			return nil, mapHarnessError(err)
+		}
+		// remote_id is the name assistant-ui's thread list adapter expects (§2.2).
+		return &itemResponse[map[string]string]{Body: map[string]string{"remote_id": view.ID}}, nil
+	})
+
+	type threadInput struct {
+		ThreadID string `path:"thread_id"`
+	}
+	register(api, "get-agent-thread", http.MethodGet, "/agent/threads/{thread_id}", "Get a conversation thread", userSecurity(), func(ctx context.Context, input *threadInput) (*itemResponse[threadBody], error) {
+		view, err := s.agent.GetAgentThread(ctx, principal(ctx).UserID, input.ThreadID)
+		if err != nil {
+			return nil, mapHarnessError(err)
+		}
+		return &itemResponse[threadBody]{Body: threadBodyOf(view)}, nil
+	})
+
+	type patchInput struct {
+		ThreadID string `path:"thread_id"`
+		IfMatch  string `header:"If-Match"`
+		Body     struct {
+			// A missing field means "leave it alone"; an explicit empty string clears it (§1.5).
+			Title  *string `json:"title,omitempty"`
+			Custom *string `json:"custom,omitempty"`
+		}
+	}
+	register(api, "update-agent-thread", http.MethodPatch, "/agent/threads/{thread_id}", "Rename a thread or update its display data", userSecurity(), func(ctx context.Context, input *patchInput) (*itemResponse[threadBody], error) {
+		_ = input.IfMatch
+		view, err := s.agent.UpdateAgentThread(ctx, principal(ctx).UserID, input.ThreadID, input.Body.Title, input.Body.Custom)
+		if err != nil {
+			return nil, mapHarnessError(err)
+		}
+		return &itemResponse[threadBody]{Body: threadBodyOf(view)}, nil
+	})
+
+	register(api, "archive-agent-thread", http.MethodPost, "/agent/threads/{thread_id}/archive", "Archive a conversation thread", userSecurity(), func(ctx context.Context, input *threadInput) (*itemResponse[threadBody], error) {
+		view, err := s.agent.SetAgentThreadStatus(ctx, principal(ctx).UserID, input.ThreadID, persistence.ThreadArchived)
+		if err != nil {
+			return nil, mapHarnessError(err)
+		}
+		return &itemResponse[threadBody]{Body: threadBodyOf(view)}, nil
+	})
+
+	register(api, "unarchive-agent-thread", http.MethodPost, "/agent/threads/{thread_id}/unarchive", "Restore an archived conversation thread", userSecurity(), func(ctx context.Context, input *threadInput) (*itemResponse[threadBody], error) {
+		view, err := s.agent.SetAgentThreadStatus(ctx, principal(ctx).UserID, input.ThreadID, persistence.ThreadRegular)
+		if err != nil {
+			return nil, mapHarnessError(err)
+		}
+		return &itemResponse[threadBody]{Body: threadBodyOf(view)}, nil
+	})
+
+	register(api, "delete-agent-thread", http.MethodDelete, "/agent/threads/{thread_id}", "Delete a conversation thread and everything under it", userSecurity(), func(ctx context.Context, input *threadInput) (*deleteResponse, error) {
+		if err := s.agent.DeleteAgentThread(ctx, principal(ctx).UserID, input.ThreadID); err != nil {
+			return nil, mapHarnessError(err)
+		}
+		return &deleteResponse{}, nil
+	})
+
+	// A generated title is deterministic (§2.4): the first user message, folded and truncated. It costs no
+	// model call, which is the point — a title is not worth a round trip or a quota.
+	register(api, "generate-agent-thread-title", http.MethodPost, "/agent/threads/{thread_id}/title", "Generate a thread title", userSecurity(), func(ctx context.Context, input *threadInput) (*itemResponse[map[string]string], error) {
+		title, err := s.agent.GenerateThreadTitle(ctx, principal(ctx).UserID, input.ThreadID)
+		if err != nil {
+			return nil, mapHarnessError(err)
+		}
+		return &itemResponse[map[string]string]{Body: map[string]string{"title": title}}, nil
+	})
+}
+
+// deleteResponse is a 204 with no body.
+type deleteResponse struct{}
+
+// --- attachments (doc/interface.md §20.4, doc/chat-features.md §4) ---
+
+// attachmentBody is what an upload returns (§4.3). The stored path is never part of it.
+type attachmentBody struct {
+	AttachmentID string `json:"attachment_id"`
+	Mime         string `json:"mime"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	Bytes        int64  `json:"bytes"`
+}
+
+// attachmentStream writes an image through Huma's raw-body escape hatch. The bytes are not a DTO, but the
+// route stays registered so the contract still describes it (§20.5: the bypass list does not grow).
+type attachmentStream struct {
+	Body func(huma.Context)
+}
+
+func (s harnessRoutes) registerAttachmentRoutes(api huma.API) {
+	type uploadInput struct {
+		IdempotencyKey string `header:"Idempotency-Key"`
+		RawBody        multipart.Form
+	}
+	register(api, "create-agent-attachment", http.MethodPost, "/agent/attachments", "Upload an image attachment", userSecurity(), func(ctx context.Context, input *uploadInput) (*itemResponse[attachmentBody], error) {
+		files := input.RawBody.File["file"]
+		if len(files) == 0 {
+			return nil, huma.Error400BadRequest("a file part named \"file\" is required")
+		}
+		if len(files) > 1 {
+			return nil, huma.Error400BadRequest("one image per upload")
+		}
+		handle, err := files[0].Open()
+		if err != nil {
+			return nil, huma.Error400BadRequest("the upload could not be read")
+		}
+		defer handle.Close()
+		// The declared type and the file name are read for nothing: the server sniffs the bytes (§4.5).
+		// The limit is one byte over the cap, so an oversized upload is rejected rather than buffered.
+		data, err := io.ReadAll(io.LimitReader(handle, application.AttachmentMaxBytes+1))
+		if err != nil {
+			return nil, huma.Error400BadRequest("the upload could not be read")
+		}
+		var threadID *string
+		if values := input.RawBody.Value["thread_id"]; len(values) > 0 && strings.TrimSpace(values[0]) != "" {
+			scope := strings.TrimSpace(values[0])
+			threadID = &scope
+		}
+		view, err := s.agent.Attachments().Upload(ctx, principal(ctx).UserID, threadID, data)
+		if err != nil {
+			return nil, mapAttachmentError(err)
+		}
+		return &itemResponse[attachmentBody]{Body: attachmentBody{
+			AttachmentID: view.AttachmentID, Mime: view.Mime, Width: view.Width, Height: view.Height, Bytes: view.Bytes,
+		}}, nil
+	})
+
+	type attachmentInput struct {
+		AttachmentID string `path:"attachment_id"`
+	}
+	register(api, "get-agent-attachment", http.MethodGet, "/agent/attachments/{attachment_id}", "Read an image attachment", userSecurity(), func(ctx context.Context, input *attachmentInput) (*attachmentStream, error) {
+		view, path, err := s.agent.Attachments().Get(ctx, principal(ctx).UserID, input.AttachmentID)
+		if err != nil {
+			return nil, mapAttachmentError(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, mapAttachmentError(err)
+		}
+		return &attachmentStream{Body: func(hctx huma.Context) {
+			hctx.SetHeader("Content-Type", view.Mime)
+			hctx.SetHeader("Content-Disposition", `inline; filename="attachment"`)
+			// Private: the bytes belong to one user, so a shared cache must not keep them.
+			hctx.SetHeader("Cache-Control", "private, max-age=3600")
+			hctx.SetStatus(http.StatusOK)
+			_, _ = hctx.BodyWriter().Write(data)
+		}}, nil
+	})
+
+	register(api, "delete-agent-attachment", http.MethodDelete, "/agent/attachments/{attachment_id}", "Delete an image attachment", userSecurity(), func(ctx context.Context, input *attachmentInput) (*deleteResponse, error) {
+		if err := s.agent.Attachments().Delete(ctx, principal(ctx).UserID, input.AttachmentID); err != nil {
+			return nil, mapAttachmentError(err)
+		}
+		return &deleteResponse{}, nil
+	})
+}
+
+// mapAttachmentError turns an upload failure into a 400 with a message the user can act on (§4.5: every
+// limit answers with a clear error, not a silent truncation).
+func mapAttachmentError(err error) error {
+	switch {
+	case errors.Is(err, application.ErrAttachmentTooLarge):
+		return huma.Error400BadRequest("ATTACHMENT_TOO_LARGE: " + err.Error())
+	case errors.Is(err, application.ErrAttachmentQuota):
+		return huma.Error400BadRequest("ATTACHMENT_QUOTA: " + err.Error())
+	case errors.Is(err, application.ErrAttachmentEmpty):
+		return huma.Error400BadRequest("ATTACHMENT_EMPTY: " + err.Error())
+	case errors.Is(err, application.ErrUnsupportedImage):
+		return huma.Error400BadRequest("ATTACHMENT_UNSUPPORTED: only png, jpeg, webp and gif images are accepted")
+	case persistence.IsNotFound(err), errors.Is(err, application.ErrNotFound), errors.Is(err, os.ErrNotExist):
+		return huma.Error404NotFound("resource not found")
+	default:
+		return mapHarnessError(err)
 	}
 }

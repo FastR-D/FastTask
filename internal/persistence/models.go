@@ -420,6 +420,24 @@ const (
 	ThreadArchived = "archived"
 )
 
+// AgentAttachment is one uploaded image (doc/chat-features.md §4.3). The mime type is the sniffed one:
+// a client's Content-Type and a file's extension are both claims, and §4.5 accepts neither.
+//
+// ThreadID is nil until the attachment is sent with a message; an attachment that is never sent is an
+// orphan and is reclaimed by TTL (§4.5).
+type AgentAttachment struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"-"`
+	ThreadID  *string   `json:"thread_id,omitempty"`
+	MessageID *string   `json:"message_id,omitempty"`
+	Mime      string    `json:"mime"`
+	Bytes     int64     `json:"bytes"`
+	Width     int       `json:"width"`
+	Height    int       `json:"height"`
+	Path      string    `json:"-"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // AgentRunChunk is one emitted protocol chunk in a run's persistent log. Chunks
 // are replayed on reconnect (§2.8, §8). The primary key is (RunID, Seq).
 type AgentRunChunk struct {

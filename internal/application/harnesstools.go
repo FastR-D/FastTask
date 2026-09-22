@@ -235,6 +235,8 @@ func partFromRow(part *persistence.AgentMessagePart) protocol.Part {
 		return wire
 	case "reasoning":
 		return protocol.ReasoningPart(part.ID, part.Text)
+	case "image":
+		return protocol.ImagePart(part.Text)
 	default:
 		return protocol.TextPart(part.Text)
 	}

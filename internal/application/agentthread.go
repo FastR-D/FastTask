@@ -32,6 +32,12 @@ func (s *threadStateService) toProtocolMessage(ctx context.Context, userID strin
 	}
 	for _, p := range parts {
 		switch p.Type {
+		case "reasoning":
+			wire.Parts = append(wire.Parts, protocol.ReasoningPart(p.ID, p.Text))
+		case "image":
+			// A reference, never bytes: the client renders it through the owner-scoped attachment
+			// endpoint (doc/chat-features.md §4.4).
+			wire.Parts = append(wire.Parts, protocol.ImagePart(p.Text))
 		case "tool-call":
 			tp := protocol.ToolCallPart(derefString(p.ToolCallID), p.ToolName, decodeArgsMap(p.ArgsJSON))
 			if p.ResultJSON != "" {

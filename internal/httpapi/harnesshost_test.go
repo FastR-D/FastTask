@@ -197,6 +197,34 @@ func startHarnessRun(t *testing.T, api testAPI, text string) (string, <-chan *ht
 	return startHarnessRunInThread(t, api, text, "")
 }
 
+// startHarnessRunWithBody posts an arbitrary command body in the background and waits for the run it
+// created, for tests whose message carries more than text.
+func startHarnessRunWithBody(t *testing.T, api testAPI, body map[string]any) (string, <-chan *httptest.ResponseRecorder) {
+	t.Helper()
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- api.do(t, http.MethodPost, "/api/v1/agent/commands", body, nil)
+	}()
+	runID := ""
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var run persistence.AgentRun
+		err := api.store.DB.
+			Where("user_id = ? AND harness_mode = ? AND status IN ?", api.user.ID, application.HarnessModeWASM,
+				[]string{persistence.RunQueued, persistence.RunRunning, persistence.RunAwaitingApproval, persistence.RunCancelling}).
+			Order("created_at DESC").First(&run).Error
+		if err == nil && hasAssistantMessage(api, run.ID) {
+			runID = run.ID
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if runID == "" {
+		t.Fatal("no harness run was created")
+	}
+	return runID, responses
+}
+
 // startHarnessRunInThread posts a command against an existing thread, so a test can build up the
 // history a checkpoint or a degraded summary is made of.
 func startHarnessRunInThread(t *testing.T, api testAPI, text, threadID string) (string, <-chan *httptest.ResponseRecorder) {

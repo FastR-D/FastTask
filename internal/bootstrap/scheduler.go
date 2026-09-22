@@ -28,6 +28,11 @@ func NewScheduler(store *persistence.Store, agent *application.AgentService) (*s
 		func(ctx context.Context) error { _, err := agent.ReapHarnessRuns(ctx); return err },
 		// Drop capability tokens that can no longer be used.
 		func(ctx context.Context) error { _, err := agent.PruneHarnessTokens(ctx); return err },
+		// Reclaim uploads that were never sent with a message (doc/chat-features.md §4.5).
+		func(ctx context.Context) error {
+			_, err := agent.Attachments().ReapOrphans(ctx, persistence.Now())
+			return err
+		},
 	)
 }
 

@@ -26,7 +26,7 @@ var embeddedMigrations embed.FS
 
 type Store struct{ DB *gorm.DB }
 
-const ExpectedSchemaVersion = 7
+const ExpectedSchemaVersion = 8
 
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
