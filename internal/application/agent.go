@@ -31,6 +31,10 @@ type AgentService struct {
 	chat         ChatResolver
 	limits       LoopLimits
 	systemPrompt string
+	// approvalService carries the §7 approval-receipt flow, embedded so
+	// s.ResolveApproval resolves by promotion (wiring.md §9: AgentService declares
+	// ≤15 methods). Its own app/repo/store fields shadow nothing at depth 0.
+	*approvalService
 }
 
 // ChatResolver resolves the tool-calling model for a run, mirroring the Worker's
@@ -89,13 +93,17 @@ func NewAgentService(app *App, opts ...AgentOption) *AgentService {
 		// Degrade to "no tools" rather than crash boot.
 		registry, _ = NewToolRegistry()
 	}
+	repo := persistence.NewAgentRepository(app.Store)
 	s := &AgentService{
 		store:        app.Store,
 		app:          app,
-		repo:         persistence.NewAgentRepository(app.Store),
+		repo:         repo,
 		tools:        registry,
 		limits:       DefaultLoopLimits(),
 		systemPrompt: defaultSystemPrompt,
+		// The approval flow shares the same repo/store/app so a receipt resolves
+		// against identical state (§7).
+		approvalService: &approvalService{app: app, repo: repo, store: app.Store},
 	}
 	for _, opt := range opts {
 		opt(s)

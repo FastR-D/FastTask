@@ -33,22 +33,31 @@ const defaultSystemPrompt = `你是 FastTask 的科研推进助手，服务于�
 
 当前阶段：只读工具可用；提案工具尚未开放，若需要结构变更，先用文字说明你建议的拆法。`
 
-// runSession carries the mutable streaming state for one run execution. It owns
-// the assistant message index and part cursor so the server remains the sole
-// allocator of message/part indices (agent-impl.md §2.7.1), and keeps the
-// in-memory protocol.State that is saved as the resume snapshot.
-type runSession struct {
+// sessionStream carries the streaming + persistence state for one run execution:
+// the chunk sink, the in-memory protocol.State (saved as the resume snapshot), and
+// the assistant message/part cursor — the server is the sole allocator of
+// message/part indices (agent-impl.md §2.7.1). Its methods emit chunks and persist
+// parts. runSession embeds it and adds the run-lifecycle transitions, keeping each
+// type cohesive and within the wiring.md §9 method budget.
+type sessionStream struct {
 	svc          *AgentService
 	ctx          context.Context
 	userID       string
 	run          *persistence.AgentRun
-	jobID        string
 	sink         *dbSink
 	state        protocol.State
 	assistantID  string
 	assistantIdx int
-	userText     string
-	turns        int
+}
+
+// runSession is one run execution: the embedded sessionStream (emit/state/persist)
+// plus the run-lifecycle fields (job id, turn count, resume context) and the
+// terminal transitions (succeed/fail/cancel/awaiting-approval).
+type runSession struct {
+	*sessionStream
+	jobID    string
+	userText string
+	turns    int
 	// resumed marks a run continuing after an approval receipt (§7.2); it reuses
 	// the existing assistant message instead of creating one. resumeContext is the
 	// model conversation reconstructed from the persisted parts of that message.
@@ -62,8 +71,8 @@ type runSession struct {
 func (s *AgentService) beginRun(ctx context.Context, job persistence.AgentJob, run *persistence.AgentRun) (*runSession, error) {
 	sink := &dbSink{repo: s.repo, userID: run.UserID, run: run.ID}
 	sess := &runSession{
-		svc: s, ctx: ctx, userID: run.UserID, run: run, jobID: job.ID, sink: sink,
-		state: protocol.NewState(),
+		sessionStream: &sessionStream{svc: s, ctx: ctx, userID: run.UserID, run: run, sink: sink, state: protocol.NewState()},
+		jobID:         job.ID,
 	}
 	sess.state.IsRunning = true
 	sess.state.FastTask.ThreadID = run.ThreadID
@@ -111,7 +120,7 @@ func (s *AgentService) beginRun(ctx context.Context, job persistence.AgentJob, r
 
 // --- session emit + state helpers ---
 
-func (s *runSession) emitSet(path []string, value any) error {
+func (s *sessionStream) emitSet(path []string, value any) error {
 	op, err := protocol.Set(path, value)
 	if err != nil {
 		return err
@@ -119,13 +128,13 @@ func (s *runSession) emitSet(path []string, value any) error {
 	return s.sink.Emit(s.ctx, protocol.UpdateState(op))
 }
 
-func (s *runSession) assistantParts() []protocol.Part {
+func (s *sessionStream) assistantParts() []protocol.Part {
 	return s.state.Messages[s.assistantIdx].Parts
 }
 
 // addTextPart appends an empty text part to the assistant message, emitting the
 // establishing set required before any append-text (§2.6, §2.7.1).
-func (s *runSession) addTextPart() (int, error) {
+func (s *sessionStream) addTextPart() (int, error) {
 	idx := len(s.assistantParts())
 	empty := protocol.TextPart("")
 	s.state.Messages[s.assistantIdx].Parts = append(s.assistantParts(), empty)
@@ -137,7 +146,7 @@ func (s *runSession) addTextPart() (int, error) {
 
 // appendTextToPart streams a delta into a text part via append-text and mirrors
 // it into the in-memory state.
-func (s *runSession) appendTextToPart(idx int, delta string) error {
+func (s *sessionStream) appendTextToPart(idx int, delta string) error {
 	s.state.Messages[s.assistantIdx].Parts[idx].Text += delta
 	op, err := protocol.AppendText(protocol.PartTextPath(s.assistantIdx, idx), delta)
 	if err != nil {
@@ -147,7 +156,7 @@ func (s *runSession) appendTextToPart(idx int, delta string) error {
 }
 
 // addToolCallPart appends a tool-call part with the model's arguments.
-func (s *runSession) addToolCallPart(call agent.ToolCall, args map[string]any) (int, error) {
+func (s *sessionStream) addToolCallPart(call agent.ToolCall, args map[string]any) (int, error) {
 	idx := len(s.assistantParts())
 	part := protocol.ToolCallPart(call.ID, call.Name, args)
 	s.state.Messages[s.assistantIdx].Parts = append(s.assistantParts(), part)
@@ -158,7 +167,7 @@ func (s *runSession) addToolCallPart(call agent.ToolCall, args map[string]any) (
 }
 
 // setToolCallResult records a tool result on an existing tool-call part.
-func (s *runSession) setToolCallResult(idx int, result ToolResult) error {
+func (s *sessionStream) setToolCallResult(idx int, result ToolResult) error {
 	part := &s.state.Messages[s.assistantIdx].Parts[idx]
 	part.IsError = result.IsError
 	if result.IsError {
@@ -170,14 +179,14 @@ func (s *runSession) setToolCallResult(idx int, result ToolResult) error {
 }
 
 // persistTextPart writes a finalized text part to the durable message log.
-func (s *runSession) persistTextPart(idx int, text string) error {
+func (s *sessionStream) persistTextPart(idx int, text string) error {
 	return s.svc.repo.CreatePart(s.ctx, &persistence.AgentMessagePart{
 		UserID: s.userID, MessageID: s.assistantID, Idx: idx, Type: "text", Text: text, ArgsJSON: "{}",
 	})
 }
 
 // persistToolCallPart writes a finalized tool-call part with its result.
-func (s *runSession) persistToolCallPart(idx int, call agent.ToolCall, result ToolResult) error {
+func (s *sessionStream) persistToolCallPart(idx int, call agent.ToolCall, result ToolResult) error {
 	resultJSON, isError := resultPayload(result)
 	part := &persistence.AgentMessagePart{
 		UserID: s.userID, MessageID: s.assistantID, Idx: idx, Type: "tool-call",
@@ -187,7 +196,7 @@ func (s *runSession) persistToolCallPart(idx int, call agent.ToolCall, result To
 	return s.svc.repo.CreatePart(s.ctx, part)
 }
 
-func (s *runSession) saveState() error {
+func (s *sessionStream) saveState() error {
 	encoded, err := json.Marshal(s.state)
 	if err != nil {
 		return err
@@ -532,8 +541,9 @@ func (s *runSession) saveAwaitingApproval() (map[string]any, error) {
 func (s *AgentService) resumeRun(ctx context.Context, job persistence.AgentJob, run *persistence.AgentRun, assistant persistence.AgentMessage) (*runSession, error) {
 	sink := &dbSink{repo: s.repo, userID: run.UserID, run: run.ID}
 	sess := &runSession{
-		svc: s, ctx: ctx, userID: run.UserID, run: run, jobID: job.ID, sink: sink,
-		state: protocol.NewState(), resumed: true,
+		sessionStream: &sessionStream{svc: s, ctx: ctx, userID: run.UserID, run: run, sink: sink, state: protocol.NewState()},
+		jobID:         job.ID,
+		resumed:       true,
 	}
 	sess.state.IsRunning = true
 	sess.state.FastTask.ThreadID = run.ThreadID
