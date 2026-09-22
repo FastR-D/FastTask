@@ -3,6 +3,9 @@
 /backups/
 /web/node_modules/
 /web/dist/
+# The Node sidecar's bundle. It is built by `npm run build:sidecar` in web/ and shipped
+# to the server the same way web/dist is, so it is an artifact, not a source.
+/sidecar/dist/
 # Staging output for a deploy: the running server reads /web/dist/ straight off
 # disk, so a new bundle is built here first and renamed into place.
 /web/dist.new/

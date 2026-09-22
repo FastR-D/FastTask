@@ -22,6 +22,10 @@
   // without vite/client and the mdui JSX augmentation every CSS import and every <mdui-*> element
   // would fail to typecheck. The app project stays test-free, which is what keeps node globals out of
   // the browser bundle.
-  "include": ["src"],
+  // The sidecar's entry point is included because its HTTP surface is tested from here: it shares the
+  // driver, the shim and the tool projection with the browser host, and a contract that only one side
+  // checks is a contract nobody checks. It is Node-only, which is why it belongs to the test project
+  // (types: node) and not to the app project that produces the browser bundle.
+  "include": ["src", "../sidecar/src"],
   "exclude": ["src/sw.ts"]
 }

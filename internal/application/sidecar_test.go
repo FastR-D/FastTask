@@ -3,6 +3,12 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -367,5 +373,124 @@ func TestToolCallIDCollisionIsRefused(t *testing.T) {
 	after := assistantParts(t, svc, f.user.ID, firstRun)
 	if len(after) != len(before) {
 		t.Fatalf("the first run gained parts: %d -> %d", len(before), len(after))
+	}
+}
+
+// TestSidecarRunPayloadMatchesHostContract pins the wire contract between the Go client and the Node host.
+//
+// The two sides live in different languages and different directories, so a renamed field fails only at
+// runtime, in a process no Go test can see: the sidecar answers 400 and the run fails with a message about
+// a missing field. Reading the host's own type declaration out of the source is what turns that into a
+// test failure at the rename (doc/harness.md §8.3).
+func TestSidecarRunPayloadMatchesHostContract(t *testing.T) {
+	var received map[string]json.RawMessage
+	var authorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/run" {
+			http.NotFound(w, r)
+			return
+		}
+		authorization = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &received); err != nil {
+			t.Errorf("the payload is not JSON: %v (%s)", err, body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"stop_reason":"end_turn"}`))
+	}))
+	defer server.Close()
+
+	client, err := NewSidecarClient(server.URL, "supervisor-secret", 5*time.Second)
+	if err != nil {
+		t.Fatalf("NewSidecarClient: %v", err)
+	}
+	result, err := client.Drive(context.Background(), SidecarRun{
+		RunID: "run_1", HarnessToken: "fth_token", Prompt: "hello",
+		Checkpoint: []byte("checkpoint"), LibfxVersion: LibfxVersion,
+		Model: "qwen3.8-max", Instructions: "be terse", ThreadID: "thr_1",
+	})
+	if err != nil {
+		t.Fatalf("Drive: %v", err)
+	}
+	if result.StopReason != "end_turn" {
+		t.Fatalf("stop reason=%q, want the host's own vocabulary (end_turn)", result.StopReason)
+	}
+	if authorization != "Bearer supervisor-secret" {
+		t.Fatalf("authorization=%q, want the startup secret as a bearer token", authorization)
+	}
+
+	sent := make(map[string]bool, len(received))
+	for key := range received {
+		sent[key] = true
+	}
+	declared := declaredSidecarRunFields(t)
+	for _, field := range declared {
+		if !sent[field] {
+			t.Errorf("the host declares %q but Drive did not send it", field)
+		}
+	}
+	for key := range sent {
+		if !slices.Contains(declared, key) {
+			t.Errorf("Drive sent %q, which the host's SidecarRunRequest does not declare", key)
+		}
+	}
+	// The three fields a sidecar cannot fetch for itself are the reason this payload grew past the
+	// browser's grant: no credentials, no system prompt and no thread identity live in that process.
+	for _, required := range []string{"model", "instructions", "thread_id", "harness_token", "run_id", "prompt"} {
+		if !sent[required] {
+			t.Errorf("%s is missing from the payload", required)
+		}
+	}
+}
+
+// declaredSidecarRunFields reads the field names of the host's request type out of its TypeScript source.
+func declaredSidecarRunFields(t *testing.T) []string {
+	t.Helper()
+	source, err := os.ReadFile(filepath.Join("..", "..", "web", "src", "harness", "sidecar-driver.ts"))
+	if err != nil {
+		t.Fatalf("read the host source: %v", err)
+	}
+	const marker = "export type SidecarRunRequest = {"
+	start := strings.Index(string(source), marker)
+	if start < 0 {
+		t.Fatal("SidecarRunRequest is not declared in web/src/harness/sidecar-driver.ts")
+	}
+	body := string(source)[start+len(marker):]
+	if end := strings.Index(body, "}"); end >= 0 {
+		body = body[:end]
+	}
+	var fields []string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "/") || strings.HasPrefix(line, "*") {
+			continue
+		}
+		name, _, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSuffix(strings.TrimSpace(name), "?")
+		if name != "" {
+			fields = append(fields, name)
+		}
+	}
+	if len(fields) == 0 {
+		t.Fatal("no fields were read out of SidecarRunRequest")
+	}
+	return fields
+}
+
+// TestSidecarClientRefusesARoutableEndpoint is the §8.2 rule: a process that can drive a run holds a
+// capability token, so it must not be reachable from anywhere but this machine.
+func TestSidecarClientRefusesARoutableEndpoint(t *testing.T) {
+	for _, endpoint := range []string{"http://10.0.0.5:9000", "https://sidecar.example.com", "ftp://127.0.0.1:9000", ""} {
+		if _, err := NewSidecarClient(endpoint, "secret", time.Second); err == nil {
+			t.Errorf("NewSidecarClient(%q) succeeded, want a refusal", endpoint)
+		}
+	}
+	for _, endpoint := range []string{"http://127.0.0.1:9000", "http://localhost:9000", "unix:///tmp/fasttask-sidecar.sock"} {
+		if _, err := NewSidecarClient(endpoint, "secret", time.Second); err != nil {
+			t.Errorf("NewSidecarClient(%q) failed: %v", endpoint, err)
+		}
 	}
 }

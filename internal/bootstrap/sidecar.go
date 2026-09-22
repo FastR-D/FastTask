@@ -196,6 +196,18 @@ func (s *SidecarSupervisor) Start(ctx context.Context) error {
 	return fmt.Errorf("sidecar did not become healthy within %s", timeout)
 }
 
+// webRoot is the absolute path of the web workspace whose node_modules the sidecar resolves libfx from.
+func (s *SidecarSupervisor) webRoot() string {
+	root := filepath.Dir(s.cfg.WebDist)
+	if filepath.IsAbs(root) {
+		return root
+	}
+	if absolute, err := filepath.Abs(root); err == nil {
+		return absolute
+	}
+	return root
+}
+
 // recordFailure counts one crash and flips the supervisor to unavailable at the threshold (§8.4). It
 // returns the failure count so the supervisor loop can log it.
 func (s *SidecarSupervisor) recordFailure() int {
@@ -222,6 +234,10 @@ func (s *SidecarSupervisor) spawn(ctx context.Context) error {
 		"FASTTASK_SIDECAR_SECRET="+s.secret,
 		"FASTTASK_SERVER_ORIGIN="+strings.TrimRight(s.cfg.PublicURL, "/"),
 		"FASTTASK_LIBFX_VERSION="+application.LibfxVersion,
+		// The sidecar resolves libfx out of the web workspace's node_modules instead of keeping a second
+		// copy of the 6 MB native addons (§8.2). The path is absolute: Node's module resolution is
+		// relative to the process, not to this one's working directory.
+		"FASTTASK_WEB_ROOT="+s.webRoot(),
 	)
 	// The sidecar is a fallback for a browser; it must not inherit a controlling terminal or keep the
 	// server's stdout interleaved with its own.

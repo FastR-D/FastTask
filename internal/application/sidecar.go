@@ -122,12 +122,18 @@ func (c *SidecarClient) Drive(ctx context.Context, run SidecarRun) (SidecarResul
 	if c == nil {
 		return SidecarResult{}, fmt.Errorf("no sidecar is configured")
 	}
+	// The field names are the sidecar's SidecarRunRequest; the two sides are checked against each other by
+	// TestSidecarRunPayloadMatchesHost, because a rename here fails only at runtime, in a process that the
+	// Go test suite cannot see.
 	payload, err := json.Marshal(map[string]any{
 		"run_id":        run.RunID,
 		"harness_token": run.HarnessToken,
 		"prompt":        run.Prompt,
 		"checkpoint":    run.Checkpoint,
 		"libfx_version": run.LibfxVersion,
+		"model":         run.Model,
+		"instructions":  run.Instructions,
+		"thread_id":     run.ThreadID,
 	})
 	if err != nil {
 		return SidecarResult{}, err

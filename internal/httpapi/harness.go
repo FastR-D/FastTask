@@ -28,6 +28,17 @@ import (
 // into a principal the handler reads with harnessPrincipal.
 func harnessSecurity() []map[string][]string { return []map[string][]string{{"harnessToken": {}}} }
 
+// toolsSecurity accepts either a user token or a run capability (doc/harness.md §3.4, §8.1).
+//
+// A browser host asks with the user's JWT; the Node sidecar holds nothing but the capability the server
+// just handed it, so refusing that would mean the fallback host cannot learn which tools exist. The
+// manifest is a read-only list of names and schemas — no credential, no user data — and every call it
+// describes is authorized again when it is executed (§5.3), so a capability gains nothing it did not
+// already have.
+func toolsSecurity() []map[string][]string {
+	return []map[string][]string{{"userBearer": {}}, {"harnessToken": {}}}
+}
+
 type harnessPrincipalKey struct{}
 
 // harnessPrincipal returns the capability a harness token resolved to. UserID always comes from
@@ -80,7 +91,7 @@ func (s harnessRoutes) RegisterRoutes(api huma.API) {
 	// The manifest is the single source of truth a host builds its tools from
 	// (doc/harness.md §3.4). The etag is what makes a mid-run manifest change detectable
 	// (§10.3).
-	register(api, "list-agent-tools", http.MethodGet, "/agent/tools", "List agent tools", userSecurity(), func(ctx context.Context, input *emptyInput) (*toolManifestResponse, error) {
+	register(api, "list-agent-tools", http.MethodGet, "/agent/tools", "List agent tools", toolsSecurity(), func(ctx context.Context, input *emptyInput) (*toolManifestResponse, error) {
 		return &toolManifestResponse{
 			ETag: s.agent.ToolsETag(),
 			Body: toolManifestBody{Tools: s.agent.ToolManifest()},
