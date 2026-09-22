@@ -79,11 +79,11 @@ type AuditView struct {
 	TargetDisplayName string    `json:"target_display_name,omitempty"`
 }
 
-func (a *App) CurrentAdmin(ctx context.Context) (persistence.User, error) {
+func (a *AdminService) CurrentAdmin(ctx context.Context) (persistence.User, error) {
 	return currentAdmin(ctx, a.Store)
 }
 
-func (a *App) ListUsers(ctx context.Context, query, status string) ([]persistence.User, error) {
+func (a *AdminService) ListUsers(ctx context.Context, query, status string) ([]persistence.User, error) {
 	q := a.Store.DB.WithContext(ctx).Model(&persistence.User{})
 	if text := strings.TrimSpace(query); text != "" {
 		like := "%" + text + "%"
@@ -96,7 +96,7 @@ func (a *App) ListUsers(ctx context.Context, query, status string) ([]persistenc
 	return users, q.Order("created_at DESC").Limit(500).Find(&users).Error
 }
 
-func (a *App) CreateUser(ctx context.Context, actor persistence.User, command CreateUserCommand) (*persistence.User, error) {
+func (a *AdminService) CreateUser(ctx context.Context, actor persistence.User, command CreateUserCommand) (*persistence.User, error) {
 	command.Identifier = strings.ToLower(strings.TrimSpace(command.Identifier))
 	command.DisplayName = strings.TrimSpace(command.DisplayName)
 	command.Role = normalizeRole(command.Role)
@@ -130,7 +130,7 @@ func (a *App) CreateUser(ctx context.Context, actor persistence.User, command Cr
 	return user, nil
 }
 
-func (a *App) UpdateUser(ctx context.Context, actor persistence.User, id string, expected int, command UpdateUserCommand) (*persistence.User, error) {
+func (a *AdminService) UpdateUser(ctx context.Context, actor persistence.User, id string, expected int, command UpdateUserCommand) (*persistence.User, error) {
 	if command.Role != nil {
 		*command.Role = normalizeRole(*command.Role)
 		if !validRole(*command.Role) {
@@ -205,7 +205,7 @@ func (a *App) UpdateUser(ctx context.Context, actor persistence.User, id string,
 	return &user, nil
 }
 
-func (a *App) ResetUserPassword(ctx context.Context, actor persistence.User, id, password string) error {
+func (a *AdminService) ResetUserPassword(ctx context.Context, actor persistence.User, id, password string) error {
 	hash, err := platformauth.HashPassword(password)
 	if err != nil {
 		return ErrValidation
@@ -225,7 +225,7 @@ func (a *App) ResetUserPassword(ctx context.Context, actor persistence.User, id,
 	})
 }
 
-func (a *App) ListUserSessions(ctx context.Context, userID string, activeOnly bool) ([]SessionView, error) {
+func (a *AdminService) ListUserSessions(ctx context.Context, userID string, activeOnly bool) ([]SessionView, error) {
 	q := a.Store.DB.WithContext(ctx).Model(&persistence.Session{}).Where("user_id = ?", userID)
 	if activeOnly {
 		q = q.Where("status = ? AND expires_at > ?", "active", persistence.Now())
@@ -241,7 +241,7 @@ func (a *App) ListUserSessions(ctx context.Context, userID string, activeOnly bo
 	return views, nil
 }
 
-func (a *App) RevokeUserSessions(ctx context.Context, actor persistence.User, id string) error {
+func (a *AdminService) RevokeUserSessions(ctx context.Context, actor persistence.User, id string) error {
 	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		result := tx.Model(&persistence.Session{}).Where("user_id = ? AND status = ?", id, "active").Updates(map[string]any{"status": "revoked", "updated_at": persistence.Now()})
 		if result.Error != nil {
@@ -257,7 +257,7 @@ func (a *ProviderService) ListModelProviders(ctx context.Context) ([]persistence
 	return providers, err
 }
 
-func (a *App) ListAuditEvents(ctx context.Context, action string, limit int) ([]AuditView, error) {
+func (a *AdminService) ListAuditEvents(ctx context.Context, action string, limit int) ([]AuditView, error) {
 	if limit < 1 || limit > 200 {
 		limit = 50
 	}

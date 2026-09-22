@@ -39,14 +39,31 @@ type App struct {
 	Store *persistence.Store
 	*ProviderService
 	*LensService
+	*DeviceService
+	*IntegrationService
+	*AdminService
 }
 
 func New(store *persistence.Store) *App {
-	return &App{Store: store, ProviderService: NewProviderService(store, nil), LensService: NewLensService(store)}
+	return newApp(store, nil)
 }
 
 func NewWithSecret(store *persistence.Store, secret string) *App {
-	return &App{Store: store, ProviderService: NewProviderService(store, deriveSecretKey(secret)), LensService: NewLensService(store)}
+	return newApp(store, deriveSecretKey(secret))
+}
+
+// newApp assembles the aggregate with the given (possibly nil) provider key. It
+// preserves the historical New vs NewWithSecret behaviour exactly: New passes a
+// nil key (encryption fails closed), NewWithSecret always derives one.
+func newApp(store *persistence.Store, secretKey []byte) *App {
+	return &App{
+		Store:              store,
+		ProviderService:    NewProviderService(store, secretKey),
+		LensService:        NewLensService(store),
+		DeviceService:      NewDeviceService(store),
+		IntegrationService: NewIntegrationService(store),
+		AdminService:       NewAdminService(store),
+	}
 }
 
 func (a *App) CreateGoal(ctx context.Context, userID string, goal *persistence.Goal) error {
@@ -90,7 +107,7 @@ func (a *App) UpdateGoal(ctx context.Context, userID, id string, expected int, c
 
 func (a *App) CreateTask(ctx context.Context, userID string, task *persistence.Task) error {
 	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		return a.createTaskTx(tx, userID, task, "manual task creation", "user")
+		return createTaskTx(tx, userID, task, "manual task creation", "user")
 	})
 }
 
@@ -109,7 +126,7 @@ type ConvertExternalImportCommand struct {
 	DecisionNote    string
 }
 
-func (a *App) CreateExternalImport(ctx context.Context, userID string, item *persistence.ExternalImport) error {
+func (a *IntegrationService) CreateExternalImport(ctx context.Context, userID string, item *persistence.ExternalImport) error {
 	item.SchemaVersion = strings.TrimSpace(item.SchemaVersion)
 	item.SourceSystem = strings.TrimSpace(item.SourceSystem)
 	item.SourceExternalID = strings.TrimSpace(item.SourceExternalID)
@@ -158,7 +175,7 @@ func (a *App) CreateExternalImport(ctx context.Context, userID string, item *per
 	})
 }
 
-func (a *App) ConvertExternalImport(ctx context.Context, userID, id string, expected int, command ConvertExternalImportCommand) (*persistence.ExternalImport, *persistence.Task, error) {
+func (a *IntegrationService) ConvertExternalImport(ctx context.Context, userID, id string, expected int, command ConvertExternalImportCommand) (*persistence.ExternalImport, *persistence.Task, error) {
 	var item persistence.ExternalImport
 	var task persistence.Task
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
@@ -189,7 +206,7 @@ func (a *App) ConvertExternalImport(ctx context.Context, userID, id string, expe
 				command.Description = item.Description
 			}
 			task = persistence.Task{GoalID: command.GoalID, ParentID: command.ParentID, Type: command.Type, Title: command.Title, Description: command.Description, SuccessCriteria: command.SuccessCriteria, MinimumAction: command.MinimumAction, Priority: command.Priority, EstimateMinutes: command.EstimateMinutes, Position: command.Position}
-			if err := a.createTaskTx(tx, userID, &task, "external import converted", "external_import"); err != nil {
+			if err := createTaskTx(tx, userID, &task, "external import converted", "external_import"); err != nil {
 				return err
 			}
 		}
@@ -212,7 +229,7 @@ func (a *App) ConvertExternalImport(ctx context.Context, userID, id string, expe
 	return &item, &task, nil
 }
 
-func (a *App) RejectExternalImport(ctx context.Context, userID, id string, expected int, note string) (*persistence.ExternalImport, error) {
+func (a *IntegrationService) RejectExternalImport(ctx context.Context, userID, id string, expected int, note string) (*persistence.ExternalImport, error) {
 	var item persistence.ExternalImport
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&item).Error; err != nil {
@@ -282,7 +299,7 @@ func (a *App) UpdateTask(ctx context.Context, userID, id string, expected int, c
 		if result.RowsAffected != 1 {
 			return ErrRevision
 		}
-		return a.snapshotTaskTree(tx, userID, task.GoalID, "manual task update", "user")
+		return snapshotTaskTree(tx, userID, task.GoalID, "manual task update", "user")
 	})
 	if err != nil {
 		return nil, err
@@ -456,7 +473,7 @@ func (a *App) CompleteTask(ctx context.Context, userID, id string, expected int,
 		if err := tx.Create(&event).Error; err != nil {
 			return err
 		}
-		if err := a.snapshotTaskTree(tx, userID, task.GoalID, eventType, "user"); err != nil {
+		if err := snapshotTaskTree(tx, userID, task.GoalID, eventType, "user"); err != nil {
 			return err
 		}
 		return createOutbox(tx, userID, "task.status_changed", map[string]any{"task_id": id, "status": status})
@@ -935,7 +952,7 @@ func (a *App) MaterializeJobResult(tx *gorm.DB, job persistence.AgentJob, output
 	return nil
 }
 
-func (a *App) RegisterDevice(ctx context.Context, userID string, device *persistence.Device) (string, error) {
+func (a *DeviceService) RegisterDevice(ctx context.Context, userID string, device *persistence.Device) (string, error) {
 	token, err := secureToken()
 	if err != nil {
 		return "", err
@@ -952,7 +969,7 @@ func (a *App) RegisterDevice(ctx context.Context, userID string, device *persist
 	return token, a.Store.DB.WithContext(ctx).Create(device).Error
 }
 
-func (a *App) RotateDeviceToken(ctx context.Context, userID, deviceID string, expected int) (*persistence.Device, string, error) {
+func (a *DeviceService) RotateDeviceToken(ctx context.Context, userID, deviceID string, expected int) (*persistence.Device, string, error) {
 	var device persistence.Device
 	if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", deviceID, userID).First(&device).Error; err != nil {
 		return nil, "", notFound(err)
@@ -985,7 +1002,7 @@ func secureToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(tokenBytes), nil
 }
 
-func (a *App) DeviceByToken(ctx context.Context, token string) (*persistence.Device, error) {
+func (a *DeviceService) DeviceByToken(ctx context.Context, token string) (*persistence.Device, error) {
 	var device persistence.Device
 	if err := a.Store.DB.WithContext(ctx).Where("token_hash = ? AND status = 'active'", persistence.Hash(token)).First(&device).Error; err != nil {
 		return nil, notFound(err)
@@ -1141,7 +1158,7 @@ func (a *App) ApplyProposal(ctx context.Context, userID string, proposal *persis
 				return ErrValidation
 			}
 		}
-		if err := a.snapshotTaskTree(tx, userID, current.GoalID, "agent proposal applied", "agent"); err != nil {
+		if err := snapshotTaskTree(tx, userID, current.GoalID, "agent proposal applied", "agent"); err != nil {
 			return err
 		}
 		result := tx.Model(&persistence.Proposal{}).Where("id = ? AND revision = ? AND status = 'pending'", current.ID, current.Revision).Updates(map[string]any{"status": "applied", "revision": current.Revision + 1, "updated_at": now})
@@ -1183,7 +1200,7 @@ func intValue(value any) int {
 	}
 }
 
-func (a *App) snapshotTaskTree(tx *gorm.DB, userID, goalID, reason, source string) error {
+func snapshotTaskTree(tx *gorm.DB, userID, goalID, reason, source string) error {
 	var tasks []persistence.Task
 	if err := tx.Where("goal_id = ? AND user_id = ?", goalID, userID).Order("position, id").Find(&tasks).Error; err != nil {
 		return err
@@ -1197,7 +1214,7 @@ func (a *App) snapshotTaskTree(tx *gorm.DB, userID, goalID, reason, source strin
 	return tx.Create(&record).Error
 }
 
-func (a *App) createTaskTx(tx *gorm.DB, userID string, task *persistence.Task, reason, source string) error {
+func createTaskTx(tx *gorm.DB, userID string, task *persistence.Task, reason, source string) error {
 	var goal persistence.Goal
 	if err := tx.Where("id = ? AND user_id = ?", task.GoalID, userID).First(&goal).Error; err != nil {
 		return notFound(err)
@@ -1233,7 +1250,7 @@ func (a *App) createTaskTx(tx *gorm.DB, userID string, task *persistence.Task, r
 	if err := tx.Create(task).Error; err != nil {
 		return err
 	}
-	return a.snapshotTaskTree(tx, userID, task.GoalID, reason, source)
+	return snapshotTaskTree(tx, userID, task.GoalID, reason, source)
 }
 
 func createOutbox(tx *gorm.DB, userID, eventType string, payload any) error {
