@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FastR-D/FastTask/internal/config"
+	"github.com/FastR-D/FastTask/internal/persistence"
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxtest"
 	"go.uber.org/goleak"
@@ -213,5 +214,76 @@ func TestServeReturnsOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("Serve did not return after context cancellation")
+	}
+}
+
+// seedRunningRun opens the database at path, migrates it, and leaves one agent
+// run in the running state — simulating a predecessor process that crashed mid
+// run. It returns the owning user and the stale run id.
+func seedRunningRun(t *testing.T, path string) (userID, runID string) {
+	t.Helper()
+	store, err := persistence.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := persistence.Now()
+	user := persistence.User{ID: persistence.NewID("user"), Identifier: "reap", PasswordHash: "h", DisplayName: "Reap", Timezone: "UTC", Locale: "en", Role: "member", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := store.DB.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	repo := persistence.NewAgentRepository(store)
+	thread, err := repo.CreateThread(ctx, user.ID, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &persistence.AgentRun{UserID: user.ID, ThreadID: thread.ID, Status: persistence.RunRunning}
+	if err := repo.CreateRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	return user.ID, run.ID
+}
+
+// TestWorkerStartupReapsInterruptedRuns proves the phase F wiring: the worker's
+// OnStart marks runs left in flight by a crashed predecessor as interrupted
+// BEFORE it claims any job (agent-impl.md §4.2, §10 "进程重启后运行标记为
+// interrupted"). v1 does not resume across a process restart, so a stale running
+// run must be terminal-failed on boot rather than silently re-executed.
+func TestWorkerStartupReapsInterruptedRuns(t *testing.T) {
+	defer goleak.VerifyNone(t,
+		goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"),
+		goleak.IgnoreAnyFunction("os/signal.signal_recv"),
+	)
+
+	cfg := testConfig(t)
+	userID, runID := seedRunningRun(t, cfg.DatabasePath)
+
+	var store *persistence.Store
+	app := fxtest.New(t, append(serveOptions(cfg, ServeOptions{WithWorker: true}), fx.Populate(&store), fx.NopLogger)...)
+	app.RequireStart()
+	defer app.RequireStop()
+
+	// OnStart runs synchronously, so the reap has already happened by the time
+	// RequireStart returns; poll briefly to be robust against scheduling.
+	repo := persistence.NewAgentRepository(store)
+	deadline := time.Now().Add(3 * time.Second)
+	var status string
+	for time.Now().Before(deadline) {
+		run, err := repo.GetRun(context.Background(), userID, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status = run.Status
+		if status == persistence.RunInterrupted {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if status != persistence.RunInterrupted {
+		t.Fatalf("stale run status=%q, want interrupted (worker OnStart must reap before claiming jobs)", status)
 	}
 }
