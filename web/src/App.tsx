@@ -1,5 +1,5 @@
 import { CSSProperties, FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, request, token } from './api'
+import { ApiError, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, readOfflineUser, rememberUser, request, token } from './api'
 import type { Device, Goal, Job, Plan, PlanItem, Proposal, Task, TaskTree, User, WorkSession } from './types'
 import { fieldValue, useMduiEvent } from './mdui-react'
 import { Admin } from './Admin'
@@ -28,7 +28,7 @@ export function App() {
     let alive = true
     ensureFreshAccessToken().then(restored => {
       if (!alive) return
-      setAuthenticated(Boolean(restored))
+      setAuthenticated(Boolean(restored) || offlineSessionAvailable())
       setRestoring(false)
     })
     return () => { alive = false }
@@ -82,12 +82,12 @@ function Login({ onLogin }: { onLogin: () => void }) {
 
 function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
   const [tab, setTab] = useState<Tab>('today')
-  const [user, setUser] = useState<User | null>(null)
+  const [user, setUser] = useState<User | null>(readOfflineUser)
   const [notice, setNotice] = useState('')
   const [drawerOpen, setDrawerOpen] = useState(false)
   const drawerRef = useRef<HTMLElement>(null)
   const snackbarRef = useRef<HTMLElement>(null)
-  useEffect(() => { request<User>('/me').then(r => setUser(r.data)).catch(e => { if (e instanceof ApiError && e.status === 401) onLogout() }) }, [onLogout])
+  useEffect(() => { request<User>('/me').then(r => { setUser(r.data); rememberUser(r.data) }).catch(e => { if (e instanceof ApiError && e.status === 401 && !offlineSessionAvailable()) onLogout() }) }, [onLogout])
   useMduiEvent(drawerRef, 'close', () => setDrawerOpen(false))
   useMduiEvent(snackbarRef, 'close', () => setNotice(''))
   const items = navItems(user)
@@ -204,7 +204,7 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
   useMduiEvent(createDialogRef, 'close', () => setShowCreate(false))
   const [goalDraft,setGoalDraft]=useState({title:'',criteria:'',target:'',description:''})
   const [taskDraft,setTaskDraft]=useState({title:'',criteria:'',minimum:''})
-	async function load(goal=selected){const g=await request<{items:Goal[]}>('/goals');setGoals(g.data.items);const t=await request<{items:Task[]}>('/tasks');setTasks(t.data.items);const active=goal||g.data.items[0]||null;if(!selected&&active)setSelected(active);if(active){const response=await request<TaskTree>(`/goals/${active.id}/task-tree`);setTree(response.data);setTreeETag(response.etag||etag('tree',active.id,response.data.revision))}}
+	async function load(goal=selected){const g=await request<{items:Goal[]}>('/goals');setGoals(g.data.items);const t=await request<{items:Task[]}>('/tasks').catch(()=>null);if(t)setTasks(t.data.items);const active=goal||g.data.items[0]||null;if(!selected&&active)setSelected(active);if(active){const response=await request<TaskTree>(`/goals/${active.id}/task-tree`);setTree(response.data);setTreeETag(response.etag||etag('tree',active.id,response.data.revision))}}
   useEffect(()=>{load().catch(e=>onNotice(errorText(e)))},[])
   async function createGoal(){if(!goalDraft.title.trim()||!goalDraft.criteria.trim())return;try{await request('/goals',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({title:goalDraft.title,description:goalDraft.description,success_criteria:goalDraft.criteria,target_date:goalDraft.target||null})});setShowCreate(false);setGoalDraft({title:'',criteria:'',target:'',description:''});onNotice('目标已创建');load()}catch(e){onNotice(errorText(e))}}
   async function addTask(){if(!selected||!taskDraft.title.trim()||!taskDraft.criteria.trim()||!taskDraft.minimum.trim())return;try{await request('/tasks',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({goal_id:selected.id,type:'task',title:taskDraft.title,description:'',success_criteria:taskDraft.criteria,minimum_action:taskDraft.minimum,estimate_minutes:50,priority:70,position:tasks.length})});setTaskDraft({title:'',criteria:'',minimum:''});onNotice('任务已加入目标树');load()}catch(e){onNotice(errorText(e))}}
