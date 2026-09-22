@@ -29,11 +29,18 @@ const (
 	agentStreamMaxAge    = 190 * time.Second // a little over the 180s run wall clock (§6)
 	agentMaxCommandBytes = 1 << 20           // command payloads are small; reject oversized bodies
 	agentHeartbeatEvery  = 15 * time.Second  // §9.3
+
+	// agentLocalThreadPrefix is the remoteId assistant-ui's in-memory thread list
+	// invents for a chat that has never round-tripped a server thread. It is not a
+	// conversation id, so it is never looked up as one (§2.2, §2.8).
+	agentLocalThreadPrefix = "__LOCALID_"
 )
 
-// registerAgent mounts the three streaming endpoints on a dedicated group that
+// registerAgent mounts the agent transport endpoints on a dedicated group that
 // inherits only the global middleware (request id, recovery, security headers,
-// CORS) plus a body limit — never the idempotency middleware.
+// CORS) plus a body limit — never the idempotency middleware. Alongside the three
+// streaming routes it serves GET /thread-state, the read a remounted chat view
+// uses to restore the conversation instead of starting an empty one.
 func (s *Server) registerAgent() {
 	group := s.Engine.Group("/api/v1/agent")
 	group.Use(func(c *gin.Context) {
@@ -41,9 +48,32 @@ func (s *Server) registerAgent() {
 		c.Next()
 	})
 	group.POST("/commands", s.handleAgentCommands)
+	group.GET("/thread-state", s.handleAgentThreadState)
 	group.POST("/resume-state", s.handleAgentResumeState)
 	group.POST("/resume", s.handleAgentResume)
 	s.registerAgentOpenAPI()
+}
+
+// handleAgentThreadState serves GET /agent/thread-state: the authoritative state
+// (§2.7 shape) of the caller's most recent conversation, so a chat view that was
+// unmounted by a tab switch or a reload restores its history instead of showing
+// an empty thread. 204 means the user has no agent conversation yet. The scope is
+// always the authenticated user — the client sends no thread id it could forge.
+func (s *Server) handleAgentThreadState(c *gin.Context) {
+	principal, ok := s.authenticateAgent(c)
+	if !ok {
+		return
+	}
+	state, found, err := s.agent.LatestThreadState(c.Request.Context(), principal.UserID)
+	if err != nil {
+		agentAbort(c, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if !found {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"state": state})
 }
 
 // authenticateAgent resolves the caller from the Authorization header. user_id
@@ -98,7 +128,18 @@ func (s *Server) handleAgentResumeState(c *gin.Context) {
 		agentAbort(c, http.StatusBadRequest, "threadId is required")
 		return
 	}
-	result, found, err := s.agent.ResumeState(c.Request.Context(), principal.UserID, strings.TrimSpace(body.ThreadID))
+	threadID := strings.TrimSpace(body.ThreadID)
+	var result application.ResumeStateResult
+	var found bool
+	var err error
+	if strings.HasPrefix(threadID, agentLocalThreadPrefix) {
+		// A remounted chat only has assistant-ui's temporary id, and the library
+		// posts it here without a prepare hook to rewrite it. Resolve the resume
+		// against the authenticated user's own in-flight run instead (§2.8).
+		result, found, err = s.agent.ResumeCurrentState(c.Request.Context(), principal.UserID)
+	} else {
+		result, found, err = s.agent.ResumeState(c.Request.Context(), principal.UserID, threadID)
+	}
 	if err != nil {
 		if persistence.IsNotFound(err) {
 			agentAbort(c, http.StatusNotFound, "thread not found")
@@ -305,6 +346,17 @@ func (s *Server) registerAgentOpenAPI() {
 		Security:    bearer,
 		RequestBody: jsonBody("commands, threadId, parentId; state/system/tools are ignored"),
 		Responses:   withConflict(sseResponses),
+	}}
+	api.Paths["/agent/thread-state"] = &huma.PathItem{Get: &huma.Operation{
+		OperationID: "agent-thread-state",
+		Summary:     "Restore the user's latest agent conversation",
+		Description: "Returns the authoritative message state for the authenticated user's latest agent run. Returns 204 when there is no agent conversation.",
+		Security:    bearer,
+		Responses: map[string]*huma.Response{
+			"200": {Description: "latest agent conversation", Content: map[string]*huma.MediaType{"application/json": {}}},
+			"204": {Description: "no agent conversation"},
+			"401": {Description: "authentication required"},
+		},
 	}}
 	api.Paths["/agent/resume-state"] = &huma.PathItem{Post: &huma.Operation{
 		OperationID: "agent-resume-state",

@@ -353,10 +353,20 @@ func TestAgentCommandsEmptyText422(t *testing.T) {
 // token even though they bypass Huma's auth middleware (§9.1).
 func TestAgentCommandsUnauthenticated401(t *testing.T) {
 	api := newTestAPI(t)
-	for _, path := range []string{"/api/v1/agent/commands", "/api/v1/agent/resume-state", "/api/v1/agent/resume"} {
-		response := api.do(t, http.MethodPost, path, map[string]any{}, map[string]string{"Authorization": "Bearer not-a-real-token"})
+	routes := []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/agent/commands"},
+		{http.MethodGet, "/api/v1/agent/thread-state"},
+		{http.MethodPost, "/api/v1/agent/resume-state"},
+		{http.MethodPost, "/api/v1/agent/resume"},
+	}
+	for _, route := range routes {
+		var body any
+		if route.method == http.MethodPost {
+			body = map[string]any{}
+		}
+		response := api.do(t, route.method, route.path, body, map[string]string{"Authorization": "Bearer not-a-real-token"})
 		if response.Code != http.StatusUnauthorized {
-			t.Fatalf("%s unauthenticated status=%d, want 401", path, response.Code)
+			t.Fatalf("%s %s unauthenticated status=%d, want 401", route.method, route.path, response.Code)
 		}
 	}
 }
@@ -503,6 +513,177 @@ func dataChunk(t *testing.T, marker string) string {
 		t.Fatal(err)
 	}
 	return string(encoded)
+}
+
+// threadStateBody is the 200 body of GET /agent/thread-state.
+type threadStateBody struct {
+	State protocol.State `json:"state"`
+}
+
+// TestAgentThreadStateRestoresCompletedConversation asserts the restore read a
+// remounted chat view depends on: after a run finishes, the persisted
+// conversation comes back with the server threadId that lets the next command
+// continue the same thread instead of opening a new one (§2.2, §2.7).
+func TestAgentThreadStateRestoresCompletedConversation(t *testing.T) {
+	api := newTestAPI(t)
+	cancel := startAgentWorker(t, api)
+	defer cancel()
+
+	first := api.do(t, http.MethodPost, "/api/v1/agent/commands", commandsBody("帮我把论文拆成任务"), nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("commands status=%d body=%s", first.Code, first.Body.String())
+	}
+	streamed := applyOps(t, parseSSE(t, first.Body.String()).ops)
+	threadID, _ := getAt(streamed, []string{"fasttask", "threadId"})
+
+	response := api.do(t, http.MethodGet, "/api/v1/agent/thread-state", nil, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("thread-state status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body threadStateBody
+	decode(t, response, &body)
+	if body.State.FastTask.ThreadID != threadID {
+		t.Fatalf("restored threadId=%q, want %v", body.State.FastTask.ThreadID, threadID)
+	}
+	if body.State.IsRunning {
+		t.Fatal("restored state reports isRunning after a completed run")
+	}
+	if len(body.State.Messages) != 2 {
+		t.Fatalf("restored %d messages, want 2 (user + assistant): %#v", len(body.State.Messages), body.State.Messages)
+	}
+	if body.State.Messages[0].Role != protocol.RoleUser || body.State.Messages[1].Role != protocol.RoleAssistant {
+		t.Fatalf("restored roles=%q,%q, want user,assistant", body.State.Messages[0].Role, body.State.Messages[1].Role)
+	}
+	if got := firstTextPart(body.State.Messages[0]); got != "帮我把论文拆成任务" {
+		t.Fatalf("restored user text=%q", got)
+	}
+	if got := body.State.Messages[1].Status; got.Type != protocol.StatusComplete {
+		t.Fatalf("restored assistant status=%+v, want complete", got)
+	}
+}
+
+// TestAgentThreadStateRebuildsFromPersistedMessages covers a run that has not
+// checkpointed a snapshot yet: state_json is still "{}", so the restore read must
+// rebuild the wire state from the persisted thread and report the run as live so
+// the client re-attaches the stream (§2.8).
+func TestAgentThreadStateRebuildsFromPersistedMessages(t *testing.T) {
+	api := newTestAPI(t)
+	// No worker: the run stays queued with an empty retained snapshot.
+	submitted, err := api.agent.SubmitCommands(context.Background(), api.user.ID, application.CommandsRequest{
+		Commands: []application.Command{{Type: "add-message", Message: &application.CommandMessage{Role: "user", Parts: []application.CommandPart{{Type: "text", Text: "进行中的一轮"}}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := api.do(t, http.MethodGet, "/api/v1/agent/thread-state", nil, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("thread-state status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body threadStateBody
+	decode(t, response, &body)
+	if body.State.FastTask.ThreadID != submitted.ThreadID {
+		t.Fatalf("restored threadId=%q, want %q", body.State.FastTask.ThreadID, submitted.ThreadID)
+	}
+	if !body.State.IsRunning {
+		t.Fatal("restored state must report isRunning while the run is queued")
+	}
+	if len(body.State.Messages) != 1 {
+		t.Fatalf("restored %d messages, want the persisted user message: %#v", len(body.State.Messages), body.State.Messages)
+	}
+	if got := firstTextPart(body.State.Messages[0]); got != "进行中的一轮" {
+		t.Fatalf("restored user text=%q", got)
+	}
+}
+
+// TestAgentThreadStateNoHistory204 asserts a user without agent history gets 204,
+// which the chat view reads as "start an empty conversation".
+func TestAgentThreadStateNoHistory204(t *testing.T) {
+	api := newTestAPI(t)
+	response := api.do(t, http.MethodGet, "/api/v1/agent/thread-state", nil, nil)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("thread-state status=%d, want 204 body=%s", response.Code, response.Body.String())
+	}
+}
+
+// TestAgentThreadStateScopedToCaller asserts the restore read never leaks another
+// user's conversation: a caller with no runs of their own gets 204 even while a
+// different user has a full thread (arch.md §12).
+func TestAgentThreadStateScopedToCaller(t *testing.T) {
+	api := newTestAPI(t)
+	otherToken := agentSecondToken(t, api)
+	cancel := startAgentWorker(t, api)
+	defer cancel()
+
+	if response := api.do(t, http.MethodPost, "/api/v1/agent/commands", commandsBody("管理员的对话"), nil); response.Code != http.StatusOK {
+		t.Fatalf("commands status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response := api.do(t, http.MethodGet, "/api/v1/agent/thread-state", nil, map[string]string{"Authorization": "Bearer " + otherToken})
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("other user's thread-state status=%d, want 204 body=%s", response.Code, response.Body.String())
+	}
+}
+
+// TestAgentResumeStateLocalThreadIDResolvesActiveRun covers the remount resume:
+// assistant-ui posts the temporary __LOCALID_... remoteId it invented, which is
+// not a conversation id, so the caller's own in-flight run answers instead — and
+// only for that caller (§2.8).
+func TestAgentResumeStateLocalThreadIDResolvesActiveRun(t *testing.T) {
+	api := newTestAPI(t)
+	otherToken := agentSecondToken(t, api)
+	submitted, err := api.agent.SubmitCommands(context.Background(), api.user.ID, application.CommandsRequest{
+		Commands: []application.Command{{Type: "add-message", Message: &application.CommandMessage{Role: "user", Parts: []application.CommandPart{{Type: "text", Text: "进行中"}}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := api.do(t, http.MethodPost, "/api/v1/agent/resume-state", map[string]any{"threadId": "__LOCALID_browser-generated"}, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("resume-state status=%d, want 200 body=%s", response.Code, response.Body.String())
+	}
+	var result application.ResumeStateResult
+	decode(t, response, &result)
+	if result.RunID != submitted.RunID {
+		t.Fatalf("runId=%q, want %q", result.RunID, submitted.RunID)
+	}
+	if len(result.State) == 0 || !json.Valid(result.State) {
+		t.Fatalf("state is not valid JSON: %s", response.Body.String())
+	}
+
+	// The same temporary id from another user resolves to nothing, not to this run.
+	other := api.do(t, http.MethodPost, "/api/v1/agent/resume-state", map[string]any{"threadId": "__LOCALID_browser-generated"}, map[string]string{"Authorization": "Bearer " + otherToken})
+	if other.Code != http.StatusNoContent {
+		t.Fatalf("other user's resume-state status=%d, want 204 body=%s", other.Code, other.Body.String())
+	}
+}
+
+// TestAgentResumeStateLocalThreadIDWithoutActiveRun204 asserts the temporary id
+// path still answers 204 when nothing is in flight, so a client that resumes on
+// mount does not error out.
+func TestAgentResumeStateLocalThreadIDWithoutActiveRun204(t *testing.T) {
+	api := newTestAPI(t)
+	cancel := startAgentWorker(t, api)
+	defer cancel()
+
+	if response := api.do(t, http.MethodPost, "/api/v1/agent/commands", commandsBody("完成一次"), nil); response.Code != http.StatusOK {
+		t.Fatalf("commands status=%d body=%s", response.Code, response.Body.String())
+	}
+	response := api.do(t, http.MethodPost, "/api/v1/agent/resume-state", map[string]any{"threadId": "__LOCALID_browser-generated"}, nil)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("resume-state status=%d, want 204 body=%s", response.Code, response.Body.String())
+	}
+}
+
+// firstTextPart returns the text of a message's first text part.
+func firstTextPart(message protocol.Message) string {
+	for _, part := range message.Parts {
+		if part.Type == protocol.PartText {
+			return part.Text
+		}
+	}
+	return ""
 }
 
 // TestAgentResumeReplaysUncheckpointedChunks asserts resume replays chunks with

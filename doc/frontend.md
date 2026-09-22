@@ -105,6 +105,14 @@ const runtime = useAssistantTransportRuntime({
 
 实现上不要用 assistant-ui 的 `DictationAdapter`——它面向的是浏览器内实时听写，而 FastTask 的转写走服务端作业，两者模型不同。用普通按钮加 `composer.setText()` 即可。
 
+### 4.3 重新挂载时恢复对话
+
+assistant-ui 的会话状态只存在于运行时内存里。对话视图被卸载（切到其他页签、刷新、PWA 冷启动）再挂载时，用户看到什么完全由 `initialState` 决定：从空状态开始，就等于把刚才那段对话抹掉了。
+
+所以 `AgentChat` 在创建运行时**之前**先读一次 `GET /api/v1/agent/thread-state`（[`agent-impl.md`](agent-impl.md) §2.1），用返回的 §2.7 结构当 `initialState`；`204` 表示该用户还没有会话，从空对话开始。这次读取走 `api.ts` 的 `request`，因此自动享有 401 刷新重试（与 §5 里三个传输端点的手工 `authHeaders` 不同）。读取失败时退回空对话并提示，**不要停在加载态**——恢复不了历史不该让对话变成不可用。
+
+恢复出来的状态若带 `isRunning`，说明服务端那次运行还在跑（客户端断开不会终止运行，[`agent-impl.md`](agent-impl.md) §8），挂载后调用一次 `runtime.thread.resumeRun({ parentId: null })` 接回流。该方法在类型上返回 `void`，传输失败经由运行时的 `onError` 上报，这里只需要捕获同步抛出。
+
 **顺带修掉 `App.tsx:240` 的 `audio/webm` 硬编码**：用 `MediaRecorder.isTypeSupported` 协商容器格式，并把实际 MIME 与扩展名一起传给后端，否则 iOS 上必坏（见 [`pwa.md`](pwa.md) §2）。
 
 ## 5. 认证
@@ -121,7 +129,7 @@ async function authHeaders() {
 要求：
 
 - 刷新逻辑必须与 `api.ts` 现有的 `refreshInFlight` 单飞机制共用，避免并发刷新导致 refresh token 轮换冲突。
-- 三个 agent 端点的 401 不能依赖 `api.ts:21` 的重试逻辑（那是 `execute` 内部的，assistant-ui 不走这条路径），必须在 `authHeaders` 里前置保证 token 有效。
+- 三个传输端点的 401 不能依赖 `api.ts:21` 的重试逻辑（那是 `execute` 内部的，assistant-ui 不走这条路径），必须在 `authHeaders` 里前置保证 token 有效。§4.3 的恢复读走 `request`，本身就有这条重试。
 
 **token 存储位置需要从 `sessionStorage` 改为持久存储**（`api.ts:10-12`、`api.ts:35-52`），否则 PWA 每次冷启动都要重新登录。这是 §2 文件边界的唯一例外：两条工作流都会碰 `api.ts`，需要提前协调。具体方案见 [`doc/pwa.md`](pwa.md) §4。
 

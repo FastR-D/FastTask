@@ -13,7 +13,7 @@
 
 ### 2.1 端点
 
-三个端点全部是 `POST`，全部使用同一组请求头（前端 `headers` 选项返回的内容，含 `Authorization`）。
+三个传输端点全部是 `POST`，全部使用同一组请求头（前端 `headers` 选项返回的内容，含 `Authorization`）。
 
 | 前端选项 | 路径 | 用途 |
 |---|---|---|
@@ -22,6 +22,14 @@
 | `resumeApi` | `POST /api/v1/agent/resume` | 续流一次进行中的运行 |
 
 前端必须显式设置 `protocol: "assistant-transport"`。**该选项默认值是 `"data-stream"`，漏设会静默走错协议且难以排查。**
+
+传输协议之外还有一个恢复读，它不是 assistant-ui 的选项，由前端在挂载时自己调用：
+
+| 路径 | 用途 |
+|---|---|
+| `GET /api/v1/agent/thread-state` | 取回当前用户最近一次会话的权威状态 |
+
+响应二选一：`204`（该用户还没有 agent 会话，前端从空对话开始）或 `200` + `{"state": <§2.7 结构>}`。作用域永远是认证用户，客户端不传 `threadId`，因此没有跨用户读取的入口。assistant-ui 的会话状态只活在运行时内存里，视图被卸载（切页签、刷新、PWA 冷启动）就丢了；这个端点是重新挂载时唯一的恢复来源，返回的 `fasttask.threadId` 让下一条命令继续同一条会话，而不是又新开一条。运行尚未 checkpoint 时，状态由已持久化的线程消息重建（§2.6 渲染的同一份数据）。
 
 ### 2.2 `api` 请求体
 
@@ -168,6 +176,8 @@ data: [DONE]\n\n
 
 - `204 No Content` —— 没有进行中的运行，客户端跳过续流。
 - `200` + `{"state": <任意>, "runId": "<字符串>"}` —— 两个键都必需，`runId` 必须是字符串，否则客户端抛错。
+
+**`threadId` 可能是 assistant-ui 自己造的临时 id。** 前端用的是内存 thread list，重新挂载的对话在第一条命令之前拿到的 `remoteId` 形如 `__LOCALID_...`，而库请求 `resumeStateApi` 时不提供改写请求体的钩子。服务端把这种 id 理解为「客户端说不出自己是哪条会话」：按认证用户解析其在途运行（§9.3 的每用户最多一个活跃运行），而不是拿它当会话 id 去查。真实会话 id 仍走归属校验，跨用户返回 `404`。
 
 拿到之后客户端 `POST resumeApi`，请求体里 `commands` 为空数组、带 `runId`、**不带 `state`**。服务端据此重放并继续该运行。
 
@@ -426,10 +436,10 @@ POST /agent/commands
 
 ### 9.1 必须绕过 Huma
 
-三个 agent 端点用裸 Gin handler 注册，原因见 §2.4。随之而来的义务：
+`/api/v1/agent/*` 的端点用裸 Gin handler 注册：三个流式端点的原因见 §2.4，恢复读 `GET /agent/thread-state` 同组注册，共用同一个 handler 级认证入口。随之而来的义务：
 
 - 在 `doc/interface.md` 中显式记录这是「Huma 为字段级事实来源」的例外。
-- 为这三个端点手工维护 OpenAPI 描述，保证其他 FastResearch 项目仍能拿到完整契约。
+- 为这一组端点手工维护 OpenAPI 描述，保证其他 FastResearch 项目仍能拿到完整契约。
 
 ### 9.2 必须修掉的阻塞项
 
@@ -441,7 +451,7 @@ POST /agent/commands
 - 建议每 15 秒发一个 SSE 注释行（`: ping\n\n`）作为心跳，穿透反向代理的空闲超时。注释行不是 `data:` 行，不会进解码器。
 - 反向代理需关闭该路径的响应缓冲（nginx：`proxy_buffering off`）。
 - 现有 CSP 的 `connect-src 'self'`（`server.go:61`）允许同源 SSE，无需修改。
-- **幂等中间件需要放行这三个端点。** 现有 `idempotencyMiddleware`（`server.go:1588`）会缓存响应体，对流式响应无意义且有害。
+- **幂等中间件需要放行这一组端点。** 现有 `idempotencyMiddleware`（`server.go:1588`）会缓存响应体，对流式响应无意义且有害。
 - 速率限制：按用户限制并发运行数，建议每用户同时最多 1 个活跃运行。
 
 ## 10. 测试要求
@@ -452,7 +462,8 @@ POST /agent/commands
 - chunk 编码器对每种类型产出合法 JSON，`path` 规则正确。
 - `update-state` 的 `append-text` 前必有建立字符串的 `set`。
 - 流以 `[DONE]` 结束；响应不含 `event:` 行。
-- `resume-state` 在无活跃运行时返回 `204`，有活跃运行时返回含 `state` 与字符串 `runId` 的 `200`。
+- `resume-state` 在无活跃运行时返回 `204`，有活跃运行时返回含 `state` 与字符串 `runId` 的 `200`；`__LOCALID_` 形式的 `threadId` 解析到调用者自己的在途运行，且解析不到别人的。
+- `thread-state` 在无历史时返回 `204`，有历史时返回 §2.7 结构与 `fasttask.threadId`；未 checkpoint 的运行由持久化消息重建；跨用户不可见。
 
 **运行时**
 - 客户端断开后运行继续，重连可重放并接上。

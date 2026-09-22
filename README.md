@@ -183,6 +183,7 @@ go vet ./...
 - 辅助任务必须在全部核心项满足后创建。
 - 服务端 Session 时长和单活动 Session 约束。
 - Agent Job 持久化、Lease 和提案保存。
+- Agent 对话恢复读：最近会话的权威状态、未 checkpoint 时由持久化消息重建、临时 `__LOCALID_` 续流只解析到调用者自己的在途运行、无历史和跨用户均为 `204`。
 - 真实 SQLite Migration、WAL、外键、事务回滚和数据库重开。
 - SQLite 一致性备份和恢复读取。
 - User、Device、Panel 认证边界和跨用户 `404`。
