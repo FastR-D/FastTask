@@ -14,8 +14,8 @@ import '../agent.css'
 // the layout and never wraps it. Everything inside lives in web/src/agent/ and is
 // styled with mdui tokens only (ADR-0004).
 export function AgentChat({ goalId, onNotice }: { goalId: string | null; onNotice?: (message: string) => void }) {
-  const runtime = useAgentRuntime(goalId)
   const notify = onNotice ?? (() => {})
+  const runtime = useAgentRuntime(goalId, notify)
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       {/* Rendering these registers the proposal approval cards by tool name (§7.1). */}
