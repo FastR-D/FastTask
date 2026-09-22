@@ -542,6 +542,12 @@ func (t *harnessTranscript) Finish(_ context.Context, reason string) error {
 func (t *harnessTranscript) createPart(kind, id, name, argsJSON string) (*persistence.AgentMessagePart, int, error) {
 	if kind == "tool-call" && id != "" {
 		if existing, err := t.svc.repo().GetPartByToolCallID(t.ctx, t.run.UserID, id); err == nil {
+			if existing.MessageID != t.sess.assistantID {
+				// The call id is unique per user, so a hit on another message means the model reused an id
+				// from an earlier run. Adopting that row would write this run's result onto another run's
+				// transcript, and the global unique index forbids a second row: fail loudly instead.
+				return nil, 0, fmt.Errorf("%w: %s", ErrToolCallIDCollision, id)
+			}
 			t.mirrorPart(existing)
 			return existing, existing.Idx, nil
 		}
@@ -570,10 +576,14 @@ func (t *harnessTranscript) createPart(kind, id, name, argsJSON string) (*persis
 		part.Idx = idx
 		if err := repo.CreatePartAtIdx(t.ctx, part); err != nil {
 			if persistence.IsUniqueViolation(err) && part.ToolCallID != nil {
-				// The tool surface won the race; adopt its row rather than duplicating the call.
+				// The tool surface won the race for THIS run's part; adopt its row rather than
+				// duplicating the call. A row belonging to another run is a collision, not a race.
 				found, lookupErr := repo.GetPartByToolCallID(t.ctx, t.run.UserID, *part.ToolCallID)
 				if lookupErr != nil {
 					return lookupErr
+				}
+				if found.MessageID != t.sess.assistantID {
+					return fmt.Errorf("%w: %s", ErrToolCallIDCollision, *part.ToolCallID)
 				}
 				*part = *found
 				return nil

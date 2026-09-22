@@ -18,9 +18,12 @@ import (
 )
 
 // Core holds the modules every role depends on: the lifecycle observer,
-// persistence, auth and the application aggregate. It carries no long-running
-// lifecycle of its own beyond the store and admin bootstrap hooks.
-var Core = fx.Options(LifecycleModule, PersistenceModule, AuthModule, ApplicationModule)
+// persistence, auth, the sidecar supervisor and the application aggregate. It carries no long-running
+// lifecycle of its own beyond the store, the admin bootstrap hooks and the optional sidecar.
+//
+// SidecarModule comes before ApplicationModule because the agent service takes the sidecar driver, and
+// before HTTPModule in the serve composition so the sidecar stops after HTTP has drained (§8.4).
+var Core = fx.Options(LifecycleModule, PersistenceModule, AuthModule, SidecarModule, ApplicationModule)
 
 // Role compositions (wiring.md §3). AgentRuntimeModule joins ServeRole and
 // WorkerRole once the agent runtime lands (doc/agent-impl.md); until then the

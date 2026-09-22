@@ -21,6 +21,12 @@ import (
 // is scoped by the harness principal: the identity comes from the token, and a body that
 // claims one is ignored (agent.md §4 invariant 5).
 
+// ErrToolCallIDCollision means a model reused a tool call id that another run of the same user already
+// owns. The id is the key that ties a result to a call (§4.4.1), so the run fails rather than writing into
+// somebody else's transcript. Provider-generated ids make this practically unreachable; a host that
+// fabricates ids does not.
+var ErrToolCallIDCollision = errors.New("tool call id belongs to another run")
+
 // approvalPollInterval is how often a long poll re-reads the decision. It is short
 // enough that a cancellation reaches a waiting host well inside the 5 second budget §5.2
 // promises, and long enough that a 15 minute wait is not a spin loop.
@@ -158,6 +164,11 @@ func (s *harnessTools) ensureToolCallPart(ctx context.Context, sess *runSession,
 	if toolCallID != "" {
 		existing, err := s.repo().GetPartByToolCallID(ctx, run.UserID, toolCallID)
 		if err == nil {
+			if existing.MessageID != sess.assistantID {
+				// Another run's part carries this id. Writing a result onto it would put this run's tool
+				// output in somebody else's transcript, and a second row is blocked by the unique index.
+				return nil, fmt.Errorf("%w: %s", ErrToolCallIDCollision, toolCallID)
+			}
 			s.syncPartIntoState(sess, existing)
 			return existing, nil
 		}
@@ -187,10 +198,13 @@ func (s *harnessTools) ensureToolCallPart(ctx context.Context, sess *runSession,
 		part.Idx = idx
 		if err := repo.CreatePartAtIdx(ctx, &part); err != nil {
 			if persistence.IsUniqueViolation(err) && toolCallID != "" {
-				// The proxy won the race; use its row rather than duplicating the call.
+				// The proxy won the race for this run's part; use its row rather than duplicating the call.
 				found, lookupErr := repo.GetPartByToolCallID(ctx, run.UserID, toolCallID)
 				if lookupErr != nil {
 					return lookupErr
+				}
+				if found.MessageID != sess.assistantID {
+					return fmt.Errorf("%w: %s", ErrToolCallIDCollision, toolCallID)
 				}
 				part = *found
 				return nil
