@@ -478,8 +478,7 @@ func (t *harnessTranscript) ReasoningDelta(ctx context.Context, delta string) er
 	}
 	if t.reasoningID == "" {
 		t.reasoningSeq++
-		id := fmt.Sprintf("reasoning_%s_%d", t.run.ID, t.reasoningSeq)
-		part, idx, err := t.createPart("reasoning", id, "", "")
+		part, idx, err := t.createPart("reasoning", t.reasoningPartID(t.reasoningSeq), "", "")
 		if err != nil {
 			return err
 		}
@@ -493,6 +492,17 @@ func (t *harnessTranscript) ReasoningDelta(ctx context.Context, delta string) er
 		return err
 	}
 	return t.sess.sink.Emit(ctx, protocol.UpdateState(op))
+}
+
+// reasoningPartID names a chain-of-thought part.
+//
+// The id is the part's primary key, and a run makes several model calls, each with its own transcript and
+// therefore its own sequence counter. Numbering the id by call as well as by sequence is what keeps two
+// calls in one run from claiming the same key: when they did, the second call's insert failed, the
+// transcribing copy aborted mid-stream, the host saw a truncated response and retried — and the run burned
+// its whole turn budget without ever recording the answer it had already been given.
+func (t *harnessTranscript) reasoningPartID(seq int) string {
+	return fmt.Sprintf("reasoning_%s_%d_%d", t.run.ID, t.run.ModelCalls+1, seq)
 }
 
 // ToolCallDelta records a call the model is making. The part is created as soon as the call is
@@ -548,6 +558,15 @@ func (t *harnessTranscript) createPart(kind, id, name, argsJSON string) (*persis
 				// transcript, and the global unique index forbids a second row: fail loudly instead.
 				return nil, 0, fmt.Errorf("%w: %s", ErrToolCallIDCollision, id)
 			}
+			t.mirrorPart(existing)
+			return existing, existing.Idx, nil
+		}
+	}
+	if kind == "reasoning" && id != "" {
+		// A retried model call re-creates the part it was writing when the previous attempt broke. Reusing
+		// the row keeps one part per chain of thought instead of failing the insert, which is what aborted
+		// the stream last time.
+		if existing, err := t.svc.repo().GetPart(t.ctx, t.run.UserID, id); err == nil && existing.MessageID == t.sess.assistantID {
 			t.mirrorPart(existing)
 			return existing, existing.Idx, nil
 		}

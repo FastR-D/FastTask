@@ -551,3 +551,65 @@ func (s slowTool) Execute(ctx context.Context, _ ToolContext, _ map[string]any) 
 		return ToolResult{}, ctx.Err()
 	}
 }
+
+// Two model calls in one run, each with a chain of thought.
+//
+// A reasoning part's id is its primary key, and it used to be numbered only by sequence within one call,
+// so the second call of a run claimed the first call's key. The insert failed, the transcribing copy
+// aborted mid-stream, and the host saw a response that stopped early — which libfx retries. The run then
+// burned its whole turn budget and "succeeded" with the budget notice instead of the answer the model had
+// already given, with nothing in any log to explain it (§4.4.1).
+func TestReasoningAcrossModelCallsKeepsItsOwnParts(t *testing.T) {
+	upstream := newFakeUpstream(t,
+		scriptedTurn{
+			reasoning: "先查活跃目标",
+			toolCalls: []agent.ToolCall{{ID: "call_reason_1", Name: "list_goals", Arguments: `{"status":"active"}`}},
+		},
+		scriptedTurn{reasoning: "再报标题", text: "你有一个活跃目标。"},
+	)
+	f := newFixture(t)
+	svc := NewAgentService(f.app, WithCredentialsResolver(upstream.resolver()))
+	runID := submitHarnessRun(t, svc, f.store, f.user.ID, "我有哪些目标")
+	host := newTestHost(t, svc, upstream, f.user.ID, runID)
+	host.drive(4)
+
+	status := runStatus(t, svc, f.user.ID, runID)
+	if status.Status != persistence.RunSucceeded {
+		t.Fatalf("run status=%q (%s/%s), want succeeded", status.Status, status.ErrorCode, status.ErrorMessage)
+	}
+	if status.ModelCalls != 2 {
+		t.Fatalf("model calls=%d, want 2 — a call that had to be retried means the transcript broke", status.ModelCalls)
+	}
+
+	parts := assistantParts(t, svc, f.user.ID, runID)
+	seen := map[string]bool{}
+	var reasoning []string
+	for _, part := range parts {
+		if part.Type != "reasoning" {
+			continue
+		}
+		if seen[part.ID] {
+			t.Fatalf("reasoning part %q was written twice", part.ID)
+		}
+		seen[part.ID] = true
+		reasoning = append(reasoning, strings.TrimSpace(part.Text))
+	}
+	if len(reasoning) != 2 {
+		t.Fatalf("reasoning parts=%d %v, want one per model call", len(reasoning), reasoning)
+	}
+	if reasoning[0] != "先查活跃目标" || reasoning[1] != "再报标题" {
+		t.Fatalf("reasoning=%v, want each call's own chain of thought in order", reasoning)
+	}
+	if got := strings.TrimSpace(concatText(parts)); got != "你有一个活跃目标。" {
+		t.Fatalf("assistant text=%q, want the second call's answer", got)
+	}
+	var toolResult string
+	for _, part := range parts {
+		if part.Type == "tool-call" {
+			toolResult = part.ResultJSON
+		}
+	}
+	if strings.TrimSpace(toolResult) == "" {
+		t.Fatalf("the tool call has no recorded result; parts=%+v", parts)
+	}
+}

@@ -389,6 +389,25 @@ func (r *AgentRepository) GetPartByToolCallID(ctx context.Context, userID, toolC
 	return &part, nil
 }
 
+// LatestUnfinishedToolPart returns the newest tool-call part of one name on one message that has no
+// result yet, or gorm.ErrRecordNotFound.
+//
+// It exists for a host that cannot echo a tool call id back (doc/harness.md §4.4.1): libfx hands a
+// HostTool its input and an abort signal and nothing else, so the call is matched on (run, tool name)
+// instead. A host runs same-name calls one at a time, which is what makes "newest without a result"
+// unambiguous.
+func (r *AgentRepository) LatestUnfinishedToolPart(ctx context.Context, userID, messageID, toolName string) (*AgentMessagePart, error) {
+	var part AgentMessagePart
+	err := r.db(ctx).
+		Where("message_id = ? AND user_id = ? AND type = ? AND tool_name = ? AND (result_json IS NULL OR result_json = '')",
+			messageID, userID, "tool-call", toolName).
+		Order("idx DESC").First(&part).Error
+	if err != nil {
+		return nil, err
+	}
+	return &part, nil
+}
+
 // GetPart returns one part owned by userID, or gorm.ErrRecordNotFound.
 func (r *AgentRepository) GetPart(ctx context.Context, userID, partID string) (*AgentMessagePart, error) {
 	var part AgentMessagePart

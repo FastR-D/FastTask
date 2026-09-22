@@ -12,8 +12,14 @@ import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-
 // The same file is used by the browser host and by the Node sidecar; the only difference is where
 // serverOrigin comes from (§4.2).
 
-/** The URL libfx calls by default. Only requests to it are intercepted. */
+/** The origin libfx talks to by default. Every request to it is intercepted; none of them leaves. */
 export const GATEWAY_ORIGIN = 'https://ai-gateway.vercel.sh'
+
+/** The completion endpoints, current and previous (libfx accepts either as gatewayChatUrl). */
+export const GATEWAY_CHAT_PATHS = ['/v4/ai/language-model', '/v3/ai/language-model']
+
+/** The model catalog libfx lists before it will prompt. */
+export const GATEWAY_MODELS_PATH = '/coding-agent/v1/models'
 
 export type GatewayFetchOptions = {
   /** The run this host is driving. It scopes the proxy endpoint, so a token cannot be replayed. */
@@ -47,10 +53,36 @@ export function gatewayBaseURL(runId: string, serverOrigin?: string): string {
   return `${origin}/api/v1/agent/runs/${encodeURIComponent(runId)}/openai`
 }
 
-/** isGatewayRequest reports whether a fetch target is the AI Gateway call the shim owns. */
+/** isGatewayRequest reports whether a fetch target belongs to the AI Gateway the shim owns. */
 export function isGatewayRequest(input: RequestInfo | URL): boolean {
+  return gatewayPathOf(input) !== null
+}
+
+/** gatewayPathOf is the pathname of a gateway request, or null for anything the shim does not own. */
+function gatewayPathOf(input: RequestInfo | URL): string | null {
   const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-  return url.startsWith(GATEWAY_ORIGIN)
+  if (!url.startsWith(GATEWAY_ORIGIN)) return null
+  try {
+    return new URL(url).pathname
+  } catch {
+    return null
+  }
+}
+
+/**
+ * modelCatalogResponse answers the catalog request locally.
+ *
+ * libfx lists models before it will prompt, and it treats a failed listing as fatal: answering anything
+ * else — an error, or nothing — leaves the turn waiting forever, which is what a proxy that only knew the
+ * completion endpoint did. The catalog is answered from the model the server assigned, because that is the
+ * only model this run may use (§4.2), and because letting the request through would reach Vercel
+ * (ADR-0005 §3.3).
+ */
+export function modelCatalogResponse(model: string): Response {
+  return new Response(
+    JSON.stringify({ object: 'list', data: [{ id: model, object: 'model', type: 'language', owned_by: 'fasttask' }] }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  )
 }
 
 /**
@@ -63,15 +95,28 @@ export function createGatewayFetch(options: GatewayFetchOptions): typeof fetch {
   const baseURL = gatewayBaseURL(options.runId, options.serverOrigin)
 
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    if (!isGatewayRequest(input)) {
+    const path = gatewayPathOf(input)
+    if (path === null) {
       if (!passthrough) throw new TypeError('fetch is unavailable')
       return passthrough(input, init)
+    }
+    const modelIdHint = options.model ?? 'server-decides'
+    if (path === GATEWAY_MODELS_PATH) {
+      options.onEvent?.({ type: 'shim.catalog', model: modelIdHint })
+      return modelCatalogResponse(modelIdHint)
+    }
+    if (!GATEWAY_CHAT_PATHS.includes(path)) {
+      // An endpoint this shim has never seen. Passing it through would reach the public gateway, so it is
+      // refused here and reported: a libfx upgrade that adds a call shows up as this event instead of as a
+      // run that silently hangs (§3.1 rule 3).
+      options.onEvent?.({ type: 'shim.unhandled', method: String(init?.method ?? 'GET'), path })
+      return errorResponseOf(new Error(`the gateway shim does not handle ${path}`), 404)
     }
     try {
       // Inside the try on purpose: a body this shim cannot read must surface as an error response, so
       // libfx fails the turn cleanly instead of seeing its fetch throw.
-      const callOptions = parseCallOptions(init?.body)
-      const modelId = bodyModel(callOptions) ?? options.model ?? 'server-decides'
+      const callOptions = await parseCallOptions(init?.body)
+      const modelId = bodyModel(callOptions) ?? modelIdHint
       options.onEvent?.({ type: 'shim.request', model: modelId, endpoint: maskOrigin(baseURL) })
       const model = createOpenAICompatible({
         name: 'fasttask',
@@ -89,7 +134,7 @@ export function createGatewayFetch(options: GatewayFetchOptions): typeof fetch {
       // libfx retries once on a transport failure (§3.6); answering with an error response is what
       // makes that path run instead of leaving the turn hanging.
       options.onEvent?.({ type: 'shim.error', error: messageOf(error) })
-      return errorResponseOf(error)
+      return errorResponseOf(error, 502)
     }
   }
 }
@@ -98,12 +143,24 @@ function currentToken(token: string | (() => string)): string {
   return typeof token === 'function' ? token() : token
 }
 
-/** parseCallOptions reads the LanguageModelV4CallOptions libfx serializes into the request body. */
-export function parseCallOptions(body: BodyInit | null | undefined): LanguageModelV4CallOptions {
-  if (typeof body !== 'string') {
+/**
+ * parseCallOptions reads the LanguageModelV4CallOptions libfx serializes into the request body.
+ *
+ * The body is not necessarily a string, and assuming it was one cost a whole run: Node hands the shim the
+ * bytes the runtime produced, so `init.body` arrives as a Uint8Array there while a browser test double
+ * passes a string. Response's own reader accepts every BodyInit shape, which is why the body is decoded
+ * through it rather than by a chain of instanceof checks that would have to be kept in step with the
+ * platform (§16.3: a shim that cannot read its input must fail the turn loudly, not silently).
+ */
+export async function parseCallOptions(body: BodyInit | null | undefined): Promise<LanguageModelV4CallOptions> {
+  if (body === null || body === undefined) {
     throw new TypeError('the gateway shim expects a JSON request body')
   }
-  const parsed = JSON.parse(body) as LanguageModelV4CallOptions & { model?: string }
+  const text = typeof body === 'string' ? body : await new Response(body).text()
+  if (!text.trim()) {
+    throw new TypeError('the gateway shim expects a JSON request body')
+  }
+  const parsed = JSON.parse(text) as LanguageModelV4CallOptions & { model?: string }
   if (!parsed || typeof parsed !== 'object') {
     throw new TypeError('the gateway request body is not an object')
   }
@@ -143,9 +200,9 @@ export function streamResponseOf(stream: ReadableStream<LanguageModelV4StreamPar
   })
 }
 
-function errorResponseOf(error: unknown): Response {
+function errorResponseOf(error: unknown, status: number): Response {
   return new Response(JSON.stringify({ error: { message: messageOf(error) } }), {
-    status: 502,
+    status,
     headers: { 'content-type': 'application/json' },
   })
 }

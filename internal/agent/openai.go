@@ -46,7 +46,7 @@ func NewOpenAIValues(baseURL, model, apiKey, transcriptionModel string) *OpenAI 
 		model:              model,
 		apiKey:             apiKey,
 		transcriptionModel: transcriptionModel,
-		client: &http.Client{Timeout: 45 * time.Second},
+		client:             &http.Client{Timeout: 45 * time.Second},
 	}
 }
 
