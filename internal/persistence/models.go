@@ -357,6 +357,38 @@ type AgentMessagePart struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+// AgentThread is one persisted agent conversation (doc/chat-features.md §2.3).
+// It replaced the conversations table as the agent's Thread: a thread owns the
+// libfx checkpoint, the regular/archived status and the client-owned `custom`
+// blob, none of which belong to the conversation aggregate.
+//
+// Custom is untrusted display data written by the client; nothing that takes part
+// in authorization or an invariant may be read from it. Checkpoint is opaque
+// versioned bytes whose format belongs to libfx_version (doc/harness.md §6).
+type AgentThread struct {
+	ID           string     `json:"id"`
+	UserID       string     `json:"-"`
+	GoalID       *string    `json:"goal_id,omitempty"`
+	Title        string     `json:"title"`
+	Status       string     `json:"status"`
+	Custom       string     `json:"custom,omitempty"`
+	Checkpoint   []byte     `json:"-"`
+	LibfxVersion string     `json:"libfx_version,omitempty"`
+	// SourceConversationID is set only by migration 000006, which backfilled one
+	// thread per pre-existing conversation. It is never written afterwards.
+	SourceConversationID *string    `json:"-"`
+	LastMessageAt        *time.Time `json:"last_message_at,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
+// Thread statuses (doc/chat-features.md §2.2): archived keeps every row, delete
+// removes them.
+const (
+	ThreadRegular  = "regular"
+	ThreadArchived = "archived"
+)
+
 // AgentRunChunk is one emitted protocol chunk in a run's persistent log. Chunks
 // are replayed on reconnect (§2.8, §8). The primary key is (RunID, Seq).
 type AgentRunChunk struct {

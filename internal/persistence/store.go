@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"embed"
 	"encoding/hex"
 	"errors"
@@ -25,7 +26,7 @@ var embeddedMigrations embed.FS
 
 type Store struct{ DB *gorm.DB }
 
-const ExpectedSchemaVersion = 5
+const ExpectedSchemaVersion = 6
 
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -99,12 +100,71 @@ func RunMigrations(ctx context.Context, db *gorm.DB) error {
 		if err != nil {
 			return err
 		}
-		if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if strings.Contains(string(contents), noTransactionMarker) {
+			if err := execSchemaRewrite(ctx, db, string(contents)); err != nil {
+				return fmt.Errorf("apply migration %s: %w", name, err)
+			}
+		} else if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			return tx.Exec(string(contents)).Error
 		}); err != nil {
 			return fmt.Errorf("apply migration %s: %w", name, err)
 		}
 		currentVersion = version
+	}
+	return nil
+}
+
+// noTransactionMarker opts a migration out of the wrapping transaction. A
+// migration that rebuilds a table other tables reference must disable foreign
+// key enforcement while it does so, and PRAGMA foreign_keys is a no-op inside a
+// transaction — so such a file carries this marker on its first line and runs on
+// a dedicated connection instead.
+const noTransactionMarker = "--migration:no-transaction"
+
+// execSchemaRewrite applies a no-transaction migration. Safety does not come from
+// the transaction it lacks but from PRAGMA foreign_key_check at the end: with
+// enforcement off a dangling reference is written silently, so the check is what
+// turns a half-applied rewrite into a loud failure. The file's own statements are
+// idempotent, which makes a failed run replayable.
+func execSchemaRewrite(ctx context.Context, db *gorm.DB, contents string) error {
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	// PRAGMA foreign_keys is per connection, so every statement must share one.
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx), "PRAGMA foreign_keys = ON")
+	}()
+	if _, err := conn.ExecContext(ctx, contents); err != nil {
+		return err
+	}
+	rows, err := conn.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var violations []string
+	for rows.Next() {
+		var table, rowID, parent sql.NullString
+		var fkID int
+		if err := rows.Scan(&table, &rowID, &parent, &fkID); err != nil {
+			return err
+		}
+		violations = append(violations, fmt.Sprintf("%s row %s references %s", table.String, rowID.String, parent.String))
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(violations) > 0 {
+		return fmt.Errorf("foreign key violations after rewrite: %s", strings.Join(violations, "; "))
 	}
 	return nil
 }
