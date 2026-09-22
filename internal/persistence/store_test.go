@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gorm.io/gorm"
@@ -180,8 +181,9 @@ func TestUpgradeFromVersionThreePreservesData(t *testing.T) {
 	}
 }
 
-// TestUpgradeFromVersionFourPreservesData covers the v4 -> v5 release path that
-// adds the agent runtime tables (doc/agent-impl.md §3.2). Existing data must
+// TestUpgradeFromVersionFourPreservesData covers the v4 -> current release path
+// that adds the agent runtime tables (doc/agent-impl.md §3.2) and then moves
+// threads onto their own table (doc/chat-features.md §2.3). Existing data must
 // survive, /health/ready must pass after migration, and the new tables must be
 // writable.
 func TestUpgradeFromVersionFourPreservesData(t *testing.T) {
@@ -257,13 +259,17 @@ func TestUpgradeFromVersionFourPreservesData(t *testing.T) {
 		t.Fatalf("legacy conversation message changed during upgrade: %#v", migratedMessage)
 	}
 
-	// The reused conversations table now also backs agent threads: a run and its
+	// Agent rows hang off agent_threads (doc/chat-features.md §2.3): a run and its
 	// message/part/chunk log must be writable against the upgraded schema.
-	run := AgentRun{ID: NewID("run"), UserID: user.ID, ThreadID: conversation.ID, Status: "queued", StateJSON: "{}", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	thread := AgentThread{ID: NewID("thr"), UserID: user.ID, Title: "升级后的会话", Status: ThreadRegular, CreatedAt: now, UpdatedAt: now}
+	if err := reopened.DB.Create(&thread).Error; err != nil {
+		t.Fatalf("write agent_thread after upgrade: %v", err)
+	}
+	run := AgentRun{ID: NewID("run"), UserID: user.ID, ThreadID: thread.ID, Status: "queued", StateJSON: "{}", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	if err := reopened.DB.Create(&run).Error; err != nil {
 		t.Fatalf("write agent_run after upgrade: %v", err)
 	}
-	message := AgentMessage{ID: NewID("amsg"), UserID: user.ID, ThreadID: conversation.ID, RunID: run.ID, Role: "assistant", Seq: 1, CreatedAt: now}
+	message := AgentMessage{ID: NewID("amsg"), UserID: user.ID, ThreadID: thread.ID, RunID: run.ID, Role: "assistant", Seq: 1, CreatedAt: now}
 	if err := reopened.DB.Create(&message).Error; err != nil {
 		t.Fatalf("write agent_message after upgrade: %v", err)
 	}
@@ -404,4 +410,198 @@ func newTestStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	return store
+}
+
+// TestUpgradeFromVersionFiveBackfillsAgentThreads covers the v5 -> v6 release path
+// (doc/chat-features.md §2.3): agent threads move from the conversations table onto
+// their own table, existing runs and messages are repointed, and nothing is lost.
+// The migration rewrites two referenced tables, so it also proves the rewrite leaves
+// the schema referentially sound and can be replayed without duplicating threads.
+func TestUpgradeFromVersionFiveBackfillsAgentThreads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v5.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"000001_init.up.sql", "000002_external_imports.up.sql", "000003_admin_platform.up.sql", "000004_task_coords.up.sql", "000005_agent_runtime.up.sql"} {
+		contents, err := embeddedMigrations.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DB.Exec(string(contents)).Error; err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+	}
+	var version int
+	if err := store.DB.Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version).Error; err != nil {
+		t.Fatal(err)
+	}
+	if version != 5 {
+		t.Fatalf("prepared database is at version %d, want 5", version)
+	}
+
+	now := Now()
+	user := User{ID: NewID("user"), Identifier: "threads-v5", PasswordHash: "hash", DisplayName: "Threads", Timezone: "Asia/Shanghai", Locale: "zh-CN", Role: "member", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := store.DB.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	// A titled conversation and an untitled one whose thread title must fall back to
+	// the first user message (§2.3 backfill step 1).
+	titled := Conversation{ID: NewID("conv"), UserID: user.ID, Title: "论文拆解", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	untitled := Conversation{ID: NewID("conv"), UserID: user.ID, Title: "   ", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	// A conversation with no agent messages must NOT become a thread.
+	unused := Conversation{ID: NewID("conv"), UserID: user.ID, Title: "旧对话", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	for i := range []Conversation{titled, untitled, unused} {
+		conversation := []Conversation{titled, untitled, unused}[i]
+		if err := store.DB.Create(&conversation).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	newRun := func(threadID, status string) AgentRun {
+		return AgentRun{ID: NewID("run"), UserID: user.ID, ThreadID: threadID, Status: status, StateJSON: "{}", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	}
+	titledRun, untitledRun := newRun(titled.ID, "succeeded"), newRun(untitled.ID, "succeeded")
+	if err := store.DB.Create(&titledRun).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.Create(&untitledRun).Error; err != nil {
+		t.Fatal(err)
+	}
+	titledMessage := AgentMessage{ID: NewID("amsg"), UserID: user.ID, ThreadID: titled.ID, RunID: titledRun.ID, Role: "user", Seq: 1, CreatedAt: now}
+	untitledMessage := AgentMessage{ID: NewID("amsg"), UserID: user.ID, ThreadID: untitled.ID, RunID: untitledRun.ID, Role: "user", Seq: 1, CreatedAt: now}
+	if err := store.DB.Create(&titledMessage).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.Create(&untitledMessage).Error; err != nil {
+		t.Fatal(err)
+	}
+	untitledPart := AgentMessagePart{ID: NewID("apart"), UserID: user.ID, MessageID: untitledMessage.ID, Idx: 0, Type: "text", Text: "帮我把这周的实验排一下顺序，顺便看看有没有卡住的任务，再给一个今天就能开始的最小行动", ArgsJSON: "{}", CreatedAt: now, UpdatedAt: now}
+	if err := store.DB.Create(&untitledPart).Error; err != nil {
+		t.Fatal(err)
+	}
+	chunk := AgentRunChunk{RunID: titledRun.ID, Seq: 0, UserID: user.ID, ChunkJSON: `{"type":"step-start"}`, CreatedAt: now}
+	if err := store.DB.Create(&chunk).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate v5 database: %v", err)
+	}
+	if err := reopened.Ready(context.Background()); err != nil {
+		t.Fatalf("readiness after upgrade: %v", err)
+	}
+
+	var threads []AgentThread
+	if err := reopened.DB.Order("created_at").Find(&threads).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 2 {
+		t.Fatalf("backfilled %d threads, want 2 (only conversations with agent messages): %#v", len(threads), threads)
+	}
+	bySource := map[string]AgentThread{}
+	for _, thread := range threads {
+		if thread.SourceConversationID == nil {
+			t.Fatalf("backfilled thread without source_conversation_id: %#v", thread)
+		}
+		bySource[*thread.SourceConversationID] = thread
+	}
+	backfilled, ok := bySource[titled.ID]
+	if !ok {
+		t.Fatalf("no thread backfilled for conversation %s", titled.ID)
+	}
+	if backfilled.Title != "论文拆解" || backfilled.Status != ThreadRegular || backfilled.UserID != user.ID {
+		t.Fatalf("backfilled thread mismatch: %#v", backfilled)
+	}
+	if backfilled.Checkpoint != nil || backfilled.LibfxVersion != "" {
+		t.Fatalf("pre-harness thread must have no checkpoint: %#v", backfilled)
+	}
+	if backfilled.LastMessageAt == nil {
+		t.Fatal("backfilled thread has no last_message_at")
+	}
+	fallback, ok := bySource[untitled.ID]
+	if !ok {
+		t.Fatalf("no thread backfilled for conversation %s", untitled.ID)
+	}
+	if want := "帮我把这周的实验排一下顺序，顺便看看有没有卡住的任务，再给一"; fallback.Title != want {
+		t.Fatalf("untitled thread title=%q, want the first 30 runes of the first user message %q", fallback.Title, want)
+	}
+	if _, ok := bySource[unused.ID]; ok {
+		t.Fatal("a conversation without agent messages became a thread")
+	}
+
+	// Runs, messages, parts and chunks survive with repointed thread ids.
+	var migratedRun AgentRun
+	if err := reopened.DB.First(&migratedRun, "id = ?", titledRun.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migratedRun.ThreadID != backfilled.ID {
+		t.Fatalf("run thread_id=%q, want the backfilled thread %q", migratedRun.ThreadID, backfilled.ID)
+	}
+	var migratedMessage AgentMessage
+	if err := reopened.DB.First(&migratedMessage, "id = ?", untitledMessage.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migratedMessage.ThreadID != fallback.ID {
+		t.Fatalf("message thread_id=%q, want the backfilled thread %q", migratedMessage.ThreadID, fallback.ID)
+	}
+	var parts, chunks int64
+	if err := reopened.DB.Model(&AgentMessagePart{}).Count(&parts).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.DB.Model(&AgentRunChunk{}).Count(&chunks).Error; err != nil {
+		t.Fatal(err)
+	}
+	if parts != 1 || chunks != 1 {
+		t.Fatalf("parts=%d chunks=%d, want 1 and 1", parts, chunks)
+	}
+	var legacy Conversation
+	if err := reopened.DB.First(&legacy, "id = ?", titled.ID).Error; err != nil {
+		t.Fatalf("the conversations table must survive the rewrite: %v", err)
+	}
+
+	// The rewritten tables reference agent_threads, not conversations.
+	for table, want := range map[string]string{"agent_runs": "%REFERENCES agent_threads%", "agent_messages": "%REFERENCES agent_threads%"} {
+		var ddl string
+		if err := reopened.DB.Raw("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&ddl).Error; err != nil {
+			t.Fatal(err)
+		}
+		if !like(ddl, want) {
+			t.Fatalf("%s ddl does not reference agent_threads: %s", table, ddl)
+		}
+		if like(ddl, "%thread_id TEXT NOT NULL REFERENCES conversations%") {
+			t.Fatalf("%s still points thread_id at conversations: %s", table, ddl)
+		}
+	}
+
+	// Replaying the migration must not duplicate threads (§2.3: 迁移必须可重入).
+	if err := reopened.Migrate(context.Background()); err != nil {
+		t.Fatalf("second migrate must be a no-op: %v", err)
+	}
+	var after int64
+	if err := reopened.DB.Model(&AgentThread{}).Count(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	if after != 2 {
+		t.Fatalf("threads=%d after a second migrate, want 2", after)
+	}
+	// A new run may only reference a thread, never a bare conversation id.
+	orphan := newRun(unused.ID, "queued")
+	if err := reopened.DB.Create(&orphan).Error; err == nil {
+		t.Fatal("a run pointing at a non-thread id was accepted")
+	}
+}
+
+// like is a minimal SQL LIKE for the DDL assertions above.
+func like(value, pattern string) bool {
+	pattern = strings.TrimSuffix(strings.TrimPrefix(pattern, "%"), "%")
+	return strings.Contains(value, pattern)
 }

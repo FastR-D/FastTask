@@ -15,8 +15,8 @@ import (
 var ErrActiveRunExists = errors.New("an active agent run already exists for this thread")
 
 // AgentRepository encapsulates every query against the agent runtime tables
-// (agent_runs, agent_messages, agent_message_parts, agent_run_chunks) plus the
-// conversations table reused as Thread (doc/agent-impl.md §3).
+// (agent_threads, agent_runs, agent_messages, agent_message_parts,
+// agent_run_chunks); doc/agent-impl.md §3, doc/chat-features.md §2.3.
 //
 // Two invariants are enforced here rather than left to callers:
 //
@@ -80,36 +80,58 @@ const (
 // pending approval must not start a second concurrent run.
 var activeRunStatuses = []string{RunQueued, RunRunning, RunAwaitingApproval}
 
-// --- Thread (reused conversations table) ---
+// --- Thread (agent_threads; doc/chat-features.md §2.3) ---
 
-// CreateThread inserts a conversations row that backs an agent thread. goalID
-// may be nil (agent.md §11: goal binding is optional).
-func (r *AgentRepository) CreateThread(ctx context.Context, userID string, goalID *string, title string) (*Conversation, error) {
+// CreateThread inserts an agent thread. goalID may be nil (agent.md §11: goal
+// binding is optional). The checkpoint starts NULL: a thread that predates the
+// harness has no libfx history, and its first run takes the documented degraded
+// path that rebuilds a summary from the authoritative message parts
+// (doc/harness.md §6.3).
+func (r *AgentRepository) CreateThread(ctx context.Context, userID string, goalID *string, title string) (*AgentThread, error) {
 	now := Now()
-	if strings.TrimSpace(title) == "" {
-		title = "Agent 会话"
+	thread := &AgentThread{
+		ID: NewID("thr"), UserID: userID, GoalID: goalID, Title: strings.TrimSpace(title),
+		Status: ThreadRegular, CreatedAt: now, UpdatedAt: now,
 	}
-	thread := &Conversation{ID: NewID("conv"), UserID: userID, GoalID: goalID, Title: title, Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	if err := r.db(ctx).Create(thread).Error; err != nil {
 		return nil, err
 	}
 	return thread, nil
 }
 
-// GetThread returns a thread owned by userID, or gorm.ErrRecordNotFound.
-func (r *AgentRepository) GetThread(ctx context.Context, userID, threadID string) (*Conversation, error) {
-	var thread Conversation
+// GetThread returns a thread owned by userID, or gorm.ErrRecordNotFound. A thread
+// belonging to another user is indistinguishable from a missing one (arch.md §12).
+func (r *AgentRepository) GetThread(ctx context.Context, userID, threadID string) (*AgentThread, error) {
+	var thread AgentThread
 	if err := r.db(ctx).Where("id = ? AND user_id = ?", threadID, userID).First(&thread).Error; err != nil {
 		return nil, err
 	}
 	return &thread, nil
 }
 
-// TouchThread bumps updated_at so thread listings sort by recent activity.
+// TouchThread records activity: it bumps updated_at and last_message_at so thread
+// listings sort by recency (doc/chat-features.md §2.2).
 func (r *AgentRepository) TouchThread(ctx context.Context, userID, threadID string) error {
-	return r.db(ctx).Model(&Conversation{}).
+	now := Now()
+	return r.db(ctx).Model(&AgentThread{}).
 		Where("id = ? AND user_id = ?", threadID, userID).
-		Updates(map[string]any{"updated_at": Now()}).Error
+		Updates(map[string]any{"updated_at": now, "last_message_at": now}).Error
+}
+
+// SaveThreadCheckpoint stores the libfx checkpoint for a thread
+// (doc/harness.md §6.1). The write is scoped by user and thread, so a harness
+// token can never move a checkpoint onto somebody else's thread.
+func (r *AgentRepository) SaveThreadCheckpoint(ctx context.Context, userID, threadID string, checkpoint []byte, libfxVersion string) error {
+	res := r.db(ctx).Model(&AgentThread{}).
+		Where("id = ? AND user_id = ?", threadID, userID).
+		Updates(map[string]any{"checkpoint": checkpoint, "libfx_version": libfxVersion, "updated_at": Now()})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // --- Runs ---

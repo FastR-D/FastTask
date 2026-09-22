@@ -238,8 +238,8 @@ func TestAgentCommandsStreamsEchoAndRendersMessage(t *testing.T) {
 	// The thread id is pushed so the client can attach a new thread (§2.2).
 	fasttask, _ := state["fasttask"].(map[string]any)
 	threadID, _ := fasttask["threadId"].(string)
-	if !strings.HasPrefix(threadID, "conv_") {
-		t.Fatalf("fasttask.threadId=%q, want a conversation id", threadID)
+	if !strings.HasPrefix(threadID, "thr_") {
+		t.Fatalf("fasttask.threadId=%q, want an agent thread id", threadID)
 	}
 
 	messages, _ := state["messages"].([]any)
