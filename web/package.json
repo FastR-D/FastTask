@@ -9,8 +9,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@assistant-ui/react": "^0.15.21",
     "@fontsource/material-icons": "^5.3.0",
     "@vitejs/plugin-react": "latest",
+    "assistant-stream": "^0.3.44",
     "mdui": "^2.1.5",
     "react": "latest",
     "react-dom": "latest",

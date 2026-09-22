@@ -1,0 +1,134 @@
+/* AgentChat (workflow B) — frontend.md §3, ADR-0004: mdui tokens only, zero
+   hardcoded color values. The shell is a flex column so the assistant-ui Thread
+   viewport is bounded by the parent grid's minmax(0,1fr) row and manages its own
+   scroll (frontend.md §6) — no magic-number height like the old .chat-shell. */
+
+.agent-chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  gap: .5rem;
+}
+
+.agent-viewport {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+  padding: .25rem .25rem .5rem;
+}
+
+.agent-empty {
+  margin: auto;
+  display: grid;
+  justify-items: center;
+  gap: .6rem;
+  padding: 2rem 1rem;
+  text-align: center;
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+.agent-empty mdui-icon { font-size: 2.4rem; color: rgb(var(--mdui-color-primary)); }
+.agent-empty p {
+  max-width: 30rem;
+  font-size: var(--mdui-typescale-body-large-size);
+  line-height: 1.7;
+}
+
+.agent-msg { display: flex; width: 100%; }
+.agent-msg-user { justify-content: flex-end; }
+.agent-msg-assistant { justify-content: flex-start; }
+.agent-bubble {
+  max-width: min(46rem, 88%);
+  padding: .6rem .9rem;
+  border-radius: var(--mdui-shape-corner-large);
+  font-size: var(--mdui-typescale-body-medium-size);
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.agent-msg-user .agent-bubble {
+  background: rgb(var(--mdui-color-primary));
+  color: rgb(var(--mdui-color-on-primary));
+  border-bottom-right-radius: var(--mdui-shape-corner-extra-small);
+}
+.agent-msg-assistant .agent-bubble {
+  background: rgb(var(--mdui-color-surface-container));
+  color: rgb(var(--mdui-color-on-surface));
+  border-bottom-left-radius: var(--mdui-shape-corner-extra-small);
+}
+
+/* Proposal approval card (agent-impl.md §7.1). */
+.agent-proposal {
+  display: grid;
+  gap: .6rem;
+  margin: .35rem 0;
+  padding: .9rem 1rem;
+  border-radius: var(--mdui-shape-corner-large);
+  background: rgb(var(--mdui-color-surface-container-low));
+  border: 1px solid rgb(var(--mdui-color-outline-variant));
+  color: rgb(var(--mdui-color-on-surface));
+}
+.agent-proposal.decided { opacity: .85; }
+.agent-proposal-head {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  font-size: var(--mdui-typescale-label-large-size);
+}
+.agent-proposal-head mdui-icon { color: rgb(var(--mdui-color-primary)); }
+.agent-proposal-state { margin-left: auto; color: rgb(var(--mdui-color-on-surface-variant)); }
+.agent-proposal-body { font-size: var(--mdui-typescale-body-medium-size); line-height: 1.6; }
+.agent-proposal-count { color: rgb(var(--mdui-color-on-surface-variant)); font-size: var(--mdui-typescale-label-large-size); }
+.agent-proposal-reason { font-size: var(--mdui-typescale-body-small-size); color: rgb(var(--mdui-color-on-surface-variant)); }
+.agent-proposal-actions { display: grid; gap: .6rem; }
+.agent-proposal-buttons { display: flex; gap: .5rem; flex-wrap: wrap; }
+
+/* Composer. */
+.agent-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: .35rem;
+  padding: .4rem;
+  border-radius: var(--mdui-shape-corner-extra-large);
+  background: rgb(var(--mdui-color-surface-container));
+  border: 1px solid rgb(var(--mdui-color-outline-variant));
+}
+.agent-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 9rem;
+  padding: .6rem .5rem;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: rgb(var(--mdui-color-on-surface));
+  font-family: inherit;
+  font-size: var(--mdui-typescale-body-medium-size);
+  line-height: 1.5;
+}
+.agent-input::placeholder { color: rgb(var(--mdui-color-on-surface-variant)); }
+.agent-composer-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  border: none;
+  cursor: pointer;
+  border-radius: var(--mdui-shape-corner-full);
+  background: transparent;
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+.agent-send { background: rgb(var(--mdui-color-primary)); color: rgb(var(--mdui-color-on-primary)); }
+.agent-send:disabled { opacity: .4; cursor: default; }
+.agent-mic.recording { color: rgb(var(--mdui-color-error)); }
+
+/* Narrow screens (pwa.md §8: usable at 400px, no horizontal scroll). */
+@media (max-width: 599.98px) {
+  .agent-bubble { max-width: 92%; }
+  .agent-proposal-buttons mdui-button { flex: 1 1 auto; }
+}
