@@ -170,6 +170,29 @@
 }
 .agent-md tbody tr:nth-child(even) { background: rgb(var(--mdui-color-surface-container-low)); }
 
+/* The user bubble sits on --mdui-color-primary, so every surface/foreground
+   token the rules above pick (surface-container-high, on-surface-variant,
+   outline-variant, primary links) would land on the wrong side of the contrast
+   pair. Inside it the scheme inverts: on-primary becomes the surface and primary
+   becomes the ink. Solid tokens only — ADR-0004 §4.2 permits no literal color,
+   and neither mdui nor this repo uses rgb() alpha anywhere. */
+.agent-msg-user .agent-md a { color: rgb(var(--mdui-color-on-primary)); }
+.agent-msg-user .agent-md del,
+.agent-msg-user .agent-md blockquote { color: rgb(var(--mdui-color-on-primary)); }
+.agent-msg-user .agent-md blockquote,
+.agent-msg-user .agent-md hr,
+.agent-msg-user .agent-md h2 { border-color: rgb(var(--mdui-color-on-primary)); }
+.agent-msg-user .agent-md :not(pre) > code,
+.agent-msg-user .agent-md pre,
+.agent-msg-user .agent-md th {
+  background: rgb(var(--mdui-color-on-primary));
+  color: rgb(var(--mdui-color-primary));
+}
+.agent-msg-user .agent-md pre code { color: rgb(var(--mdui-color-primary)); }
+.agent-msg-user .agent-md th, .agent-msg-user .agent-md td { border-color: rgb(var(--mdui-color-on-primary)); }
+.agent-msg-user .agent-md tbody tr:nth-child(even) { background: transparent; }
+.agent-msg-user .agent-md li.task-list-item > input[type='checkbox'] { accent-color: rgb(var(--mdui-color-on-primary)); }
+
 /* Proposal approval card (agent-impl.md §7.1). */
 .agent-proposal {
   display: grid;

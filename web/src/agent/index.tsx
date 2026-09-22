@@ -7,7 +7,7 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import { request } from '../api'
 import { useAgentRuntime } from './runtime'
-import { MarkdownText } from './Markdown'
+import { MarkdownText, UserMarkdownText } from './Markdown'
 import type { ServerAgentState } from './state'
 import { DailyPlanProposalUI, TaskTreeProposalUI } from './tools/ProposalApproval'
 import { VoiceButton } from './VoiceButton'
@@ -101,8 +101,8 @@ function AgentConversation({ initialState, onNotice }: { initialState: ServerAge
 function UserMessage() {
   return (
     <MessagePrimitive.Root className="agent-msg agent-msg-user">
-      <div className="agent-bubble">
-        <MessagePrimitive.Parts />
+      <div className="agent-bubble agent-bubble-markdown">
+        <MessagePrimitive.Parts components={{ Text: UserMarkdownText }} />
       </div>
     </MessagePrimitive.Root>
   )
