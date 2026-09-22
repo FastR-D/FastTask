@@ -4,6 +4,7 @@ import type { Conversation, Device, Goal, Job, Message, Plan, PlanItem, Proposal
 import { fieldValue, useMduiEvent } from './mdui-react'
 import { Admin } from './Admin'
 import { GoalMapView, Review } from './Lens'
+import { PwaUpdate } from './PwaUpdate'
 
 type Tab = 'today' | 'goals' | 'dialogue' | 'jobs' | 'review' | 'devices' | 'admin'
 
@@ -31,8 +32,14 @@ export function App() {
     return () => { alive = false }
   }, [restoring])
   if (restoring) return null
-  if (!authenticated) return <Login onLogin={() => setAuthenticated(true)} />
-	return <Workspace onLogout={async () => { await logout(); setAuthenticated(false) }} />
+  return (
+    <>
+      {authenticated
+        ? <Workspace onLogout={async () => { await logout(); setAuthenticated(false) }} />
+        : <Login onLogin={() => setAuthenticated(true)} />}
+      <PwaUpdate />
+    </>
+  )
 }
 
 function Login({ onLogin }: { onLogin: () => void }) {

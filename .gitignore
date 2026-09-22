@@ -7,3 +7,9 @@
 *.db-shm
 *.db-wal
 .env
+# Compiled vite config (the source of truth is web/vite.config.ts; vite resolves
+# vite.config.js before .ts, so a stale emit would silently shadow it).
+/web/vite.config.js
+/web/vite.config.d.ts
+# TypeScript incremental build info.
+*.tsbuildinfo

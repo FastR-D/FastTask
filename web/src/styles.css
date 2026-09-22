@@ -337,3 +337,15 @@ button,input,textarea{font:inherit}
 .form-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}
 @media (max-width:599.98px){.form-row{grid-template-columns:1fr}}
 .form-actions{display:flex;gap:.6rem;justify-content:flex-end;flex-wrap:wrap}
+
+/* ===== PWA 更新提示（pwa.md §3.2）===== */
+.pwa-update{
+  position:fixed;left:50%;bottom:calc(1rem + env(safe-area-inset-bottom));transform:translateX(-50%);
+  z-index:1000;display:flex;align-items:center;gap:.5rem;
+  padding:.4rem .4rem .4rem 1rem;max-width:calc(100vw - 2rem);
+  border-radius:var(--mdui-shape-corner-medium);
+  background:rgb(var(--mdui-color-inverse-surface));color:rgb(var(--mdui-color-inverse-on-surface));
+  font-size:var(--mdui-typescale-label-large-size);
+}
+.pwa-update>span{flex:1 1 auto;min-width:0}
+.pwa-update mdui-button-icon{color:rgb(var(--mdui-color-inverse-on-surface))}
