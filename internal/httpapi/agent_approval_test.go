@@ -330,8 +330,11 @@ func TestAgentApprovalStreamStaysOpenDuringWait(t *testing.T) {
 // wall clock must not fail the run, because time spent waiting for a human is not the model's budget.
 func TestAgentApprovalWaitDoesNotCountAgainstWallClock(t *testing.T) {
 	stub := newModelStub(t)
+	// The budget has to be comfortably larger than the work a run does under `-race`, and comfortably
+	// smaller than the wait below: the assertion is "a wait longer than the whole budget did not fail the
+	// run", and a budget so tight that ordinary instrumentation exceeds it would fail for the wrong reason.
 	api := newHarnessAPI(t, stub, application.WithLoopLimits(application.LoopLimits{
-		MaxTurns: 4, WallClock: 50 * time.Millisecond, ToolTimeout: time.Second,
+		MaxTurns: 4, WallClock: 1500 * time.Millisecond, ToolTimeout: time.Second,
 	}))
 	goalResp := api.do(t, http.MethodPost, "/api/v1/goals", map[string]any{"title": "完成论文", "success_criteria": "通过评审"}, map[string]string{"Idempotency-Key": "goal-wallclock"})
 	if goalResp.Code != http.StatusCreated {
@@ -350,7 +353,9 @@ func TestAgentApprovalWaitDoesNotCountAgainstWallClock(t *testing.T) {
 	// decision happens on another goroutine because the poll holds this one open.
 	codes := make(chan int, 1)
 	go func() {
-		time.Sleep(150 * time.Millisecond)
+		// Longer than the run's entire wall clock budget, so if this wait were charged to the run it could
+		// not possibly survive it.
+		time.Sleep(2500 * time.Millisecond)
 		response := api.do(t, http.MethodPost, "/api/v1/agent/commands", toolResultBody("call_http_propose", "approve", ""), nil)
 		codes <- response.Code
 	}()

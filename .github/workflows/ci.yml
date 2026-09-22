@@ -1,0 +1,185 @@
+# CI (doc/tech.md §18.6, §20.1; doc/README.md §3.2).
+#
+# Two jobs, because two toolchains produce one deployment: the Go binary and the web bundle the binary
+# serves. The web job builds for real — a green test suite has historically been able to hide a bundle
+# that does not compile (src/mdui.ts is only reachable from main.tsx), which is why `npm run build` is a
+# required step rather than a local habit.
+#
+# The Go job also does what §19 demands of it: migrate an EMPTY database, start the binary, and write and
+# read a row through the HTTP API. Compilation alone proves nothing about SQLite under CGO.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go (fmt, vet, test, race, migrate, smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # §18.6: CI checks formatting, it does not silently reformat a commit.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test ./... -count=1
+
+      - name: test -race
+        run: go test -race ./... -count=1
+
+      - name: build the binary
+        run: go build -o /tmp/fasttask ./cmd/fasttask
+
+      # §9.3: migrations must run from an empty database, not only inside tests.
+      - name: migrate an empty database
+        run: |
+          export FASTTASK_DATABASE=/tmp/ci-empty/fasttask.db
+          mkdir -p /tmp/ci-empty
+          /tmp/fasttask migrate
+          sqlite3 "$FASTTASK_DATABASE" '.tables' | tr ' ' '\n' | grep -qx agent_threads
+          sqlite3 "$FASTTASK_DATABASE" '.tables' | tr ' ' '\n' | grep -qx agent_attachments
+          sqlite3 "$FASTTASK_DATABASE" 'select count(*) from schema_migrations'
+
+      # §19: the binary must actually open SQLite, serve, and round-trip a write.
+      - name: sqlite smoke test over HTTP
+        run: |
+          set -euo pipefail
+          export FASTTASK_ENV=development
+          export FASTTASK_LISTEN=127.0.0.1
+          export FASTTASK_PORT=18080
+          export FASTTASK_PUBLIC_URL=http://127.0.0.1:18080
+          export FASTTASK_DATABASE=/tmp/ci-smoke/fasttask.db
+          export FASTTASK_JWT_SECRET=ci-jwt-secret-not-for-production
+          export FASTTASK_ADMIN_USER=admin
+          export FASTTASK_ADMIN_PASSWORD=ci-admin-password-not-for-production
+          mkdir -p /tmp/ci-smoke
+          /tmp/fasttask migrate
+          /tmp/fasttask serve &
+          server=$!
+          trap 'kill $server 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18080/health/ready >/dev/null 2>&1; then break; fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:18080/health/ready
+          token=$(curl -fsS -X POST http://127.0.0.1:18080/api/v1/auth/login \
+            -H 'content-type: application/json' \
+            -d "{\"identifier\":\"admin\",\"password\":\"$FASTTASK_ADMIN_PASSWORD\"}" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+          test -n "$token"
+          curl -fsS -X POST http://127.0.0.1:18080/api/v1/goals \
+            -H "authorization: Bearer $token" -H 'content-type: application/json' \
+            -H 'Idempotency-Key: ci-smoke-goal' \
+            -d '{"title":"CI 烟雾目标","success_criteria":"写入后可读回"}' >/dev/null
+          curl -fsS http://127.0.0.1:18080/api/v1/goals -H "authorization: Bearer $token" \
+            | grep -q 'CI 烟雾目标'
+          # The agent's own surface must answer too: the tool manifest is what a host builds tools from.
+          curl -fsS http://127.0.0.1:18080/api/v1/agent/tools -H "authorization: Bearer $token" \
+            | grep -q list_goals
+
+      - name: doctor
+        run: |
+          export FASTTASK_ENV=development
+          export FASTTASK_DATABASE=/tmp/ci-smoke/fasttask.db
+          export FASTTASK_JWT_SECRET=ci-jwt-secret-not-for-production
+          /tmp/fasttask doctor
+
+  web:
+    name: Web (typecheck, test, build, sidecar)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # libfx's native addon needs glibc 2.34+ and Node 20+ (doc/harness.md §8.2).
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: install
+        run: npm ci
+
+      - name: typecheck
+        run: npx tsc -b
+
+      - name: unit and integration tests
+        # integration.test.ts loads the real libfx/node native addon, so this step also proves the
+        # runtime is present and loadable on the runner (doc/harness.md §16.6).
+        run: npm test
+
+      - name: build the bundle
+        run: npm run build
+
+      # The runtime is self-hosted, so the bundle must carry it (doc/harness.md §9.1).
+      - name: assert fx-core.wasm is self-hosted
+        run: |
+          test -s dist/fx-core.wasm
+          test -s dist/fx-core.wasm.br
+          test -s dist/fx-core.wasm.gz
+          # The browser bundle must not drag in the terminal runtime or a native addon.
+          ! find dist -name 'fx-term.wasm' | grep -q .
+          ! find dist -name '*.node' | grep -q .
+
+      - name: build the sidecar
+        run: npm run build:sidecar
+
+      # A built sidecar that cannot start is not a fallback. This starts the real bundle and exercises
+      # both halves of its auth rule: the secret works, and nothing works without it (doc/harness.md §8.2).
+      - name: sidecar smoke test
+        run: |
+          set -euo pipefail
+          socket=/tmp/ci-sidecar.sock
+          FASTTASK_SIDECAR_SECRET=ci-sidecar-secret \
+          FASTTASK_SIDECAR_ENDPOINT="unix://$socket" \
+          FASTTASK_SERVER_ORIGIN=http://127.0.0.1:18080 \
+          FASTTASK_WEB_ROOT="$GITHUB_WORKSPACE/web" \
+            node ../sidecar/dist/host.mjs &
+          sidecar=$!
+          trap 'kill $sidecar 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            if [ -S "$socket" ]; then break; fi
+            sleep 0.5
+          done
+          test -S "$socket"
+          health=$(curl -fsS --unix-socket "$socket" -H 'authorization: Bearer ci-sidecar-secret' http://sidecar/healthz)
+          echo "$health"
+          echo "$health" | grep -q '"ok":true'
+          echo "$health" | grep -q '"native_addon":true'
+          # The version is reported, not pinned here: a libfx bump must not break CI, and a checkpoint
+          # written by another version is handled at runtime (doc/harness.md §6.3).
+          echo "$health" | grep -Eq '"libfx_version":"[0-9]+\.[0-9]+\.[0-9]+"'
+          # Unauthenticated: refused, and it must not reveal whether a host is here.
+          code=$(curl -s -o /dev/null -w '%{http_code}' --unix-socket "$socket" http://sidecar/healthz)
+          test "$code" = 401
