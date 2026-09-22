@@ -7,20 +7,21 @@ import (
 
 	"github.com/FastR-D/FastTask/internal/application"
 	"github.com/FastR-D/FastTask/internal/persistence"
+	"github.com/danielgtaylor/huma/v2"
 )
 
-func (s *Server) registerAdmin() {
-	s.registerAdminUsers()
-	s.registerAdminModelProviders()
-	s.registerAdminAudit()
+func (s adminRoutes) RegisterRoutes(api huma.API) {
+	s.registerAdminUsers(api)
+	s.registerAdminModelProviders(api)
+	s.registerAdminAudit(api)
 }
 
-func (s *Server) registerAdminUsers() {
+func (s adminRoutes) registerAdminUsers(api huma.API) {
 	type listInput struct {
 		Query  string `query:"q"`
 		Status string `query:"status"`
 	}
-	register(s.API, "list-admin-users", http.MethodGet, "/admin/users", "List users", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.User], error) {
+	register(api, "list-admin-users", http.MethodGet, "/admin/users", "List users", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.User], error) {
 		if _, err := s.app.CurrentAdmin(ctx); err != nil {
 			return nil, mapError(err)
 		}
@@ -43,7 +44,7 @@ func (s *Server) registerAdminUsers() {
 			Role        string `json:"role" enum:"member,admin"`
 		}
 	}
-	register(s.API, "create-admin-user", http.MethodPost, "/admin/users", "Create user", userSecurity(), func(ctx context.Context, input *createInput) (*itemResponse[persistence.User], error) {
+	register(api, "create-admin-user", http.MethodPost, "/admin/users", "Create user", userSecurity(), func(ctx context.Context, input *createInput) (*itemResponse[persistence.User], error) {
 		actor, err := s.app.CurrentAdmin(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -58,7 +59,7 @@ func (s *Server) registerAdminUsers() {
 	type itemInput struct {
 		UserID string `path:"user_id"`
 	}
-	register(s.API, "get-admin-user", http.MethodGet, "/admin/users/{user_id}", "Get user", userSecurity(), func(ctx context.Context, input *itemInput) (*resourceResponse[persistence.User], error) {
+	register(api, "get-admin-user", http.MethodGet, "/admin/users/{user_id}", "Get user", userSecurity(), func(ctx context.Context, input *itemInput) (*resourceResponse[persistence.User], error) {
 		if _, err := s.app.CurrentAdmin(ctx); err != nil {
 			return nil, mapError(err)
 		}
@@ -80,7 +81,7 @@ func (s *Server) registerAdminUsers() {
 			Status      *string `json:"status,omitempty" enum:"active,disabled"`
 		}
 	}
-	register(s.API, "update-admin-user", http.MethodPatch, "/admin/users/{user_id}", "Update user", userSecurity(), func(ctx context.Context, input *updateInput) (*resourceResponse[persistence.User], error) {
+	register(api, "update-admin-user", http.MethodPatch, "/admin/users/{user_id}", "Update user", userSecurity(), func(ctx context.Context, input *updateInput) (*resourceResponse[persistence.User], error) {
 		actor, err := s.app.CurrentAdmin(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -102,7 +103,7 @@ func (s *Server) registerAdminUsers() {
 			Password string `json:"password" minLength:"12" maxLength:"200"`
 		}
 	}
-	register(s.API, "reset-admin-user-password", http.MethodPost, "/admin/users/{user_id}/password", "Reset user password", userSecurity(), func(ctx context.Context, input *passwordInput) (*struct{}, error) {
+	register(api, "reset-admin-user-password", http.MethodPost, "/admin/users/{user_id}/password", "Reset user password", userSecurity(), func(ctx context.Context, input *passwordInput) (*struct{}, error) {
 		actor, err := s.app.CurrentAdmin(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -117,7 +118,7 @@ func (s *Server) registerAdminUsers() {
 		UserID     string `path:"user_id"`
 		ActiveOnly string `query:"active_only"`
 	}
-	register(s.API, "list-admin-user-sessions", http.MethodGet, "/admin/users/{user_id}/sessions", "List user sessions", userSecurity(), func(ctx context.Context, input *sessionInput) (*listResponse[application.SessionView], error) {
+	register(api, "list-admin-user-sessions", http.MethodGet, "/admin/users/{user_id}/sessions", "List user sessions", userSecurity(), func(ctx context.Context, input *sessionInput) (*listResponse[application.SessionView], error) {
 		if _, err := s.app.CurrentAdmin(ctx); err != nil {
 			return nil, mapError(err)
 		}
@@ -130,7 +131,7 @@ func (s *Server) registerAdminUsers() {
 		return out, nil
 	})
 
-	register(s.API, "revoke-admin-user-sessions", http.MethodPost, "/admin/users/{user_id}/session-revocation", "Revoke user sessions", userSecurity(), func(ctx context.Context, input *itemInput) (*struct{}, error) {
+	register(api, "revoke-admin-user-sessions", http.MethodPost, "/admin/users/{user_id}/session-revocation", "Revoke user sessions", userSecurity(), func(ctx context.Context, input *itemInput) (*struct{}, error) {
 		actor, err := s.app.CurrentAdmin(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -142,8 +143,8 @@ func (s *Server) registerAdminUsers() {
 	})
 }
 
-func (s *Server) registerAdminModelProviders() {
-	register(s.API, "list-admin-model-providers", http.MethodGet, "/admin/model-providers", "List model providers", userSecurity(), func(ctx context.Context, input *struct{}) (*listResponse[persistence.ModelProvider], error) {
+func (s adminRoutes) registerAdminModelProviders(api huma.API) {
+	register(api, "list-admin-model-providers", http.MethodGet, "/admin/model-providers", "List model providers", userSecurity(), func(ctx context.Context, input *struct{}) (*listResponse[persistence.ModelProvider], error) {
 		if _, err := s.app.CurrentAdmin(ctx); err != nil {
 			return nil, mapError(err)
 		}
@@ -167,7 +168,7 @@ func (s *Server) registerAdminModelProviders() {
 			IsDefault          bool   `json:"is_default" required:"false"`
 		}
 	}
-	register(s.API, "create-model-provider", http.MethodPost, "/admin/model-providers", "Create model provider", userSecurity(), func(ctx context.Context, input *createInput) (*itemResponse[persistence.ModelProvider], error) {
+	register(api, "create-model-provider", http.MethodPost, "/admin/model-providers", "Create model provider", userSecurity(), func(ctx context.Context, input *createInput) (*itemResponse[persistence.ModelProvider], error) {
 		actor, err := s.app.CurrentAdmin(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -192,7 +193,7 @@ func (s *Server) registerAdminModelProviders() {
 			IsDefault          *bool   `json:"is_default,omitempty"`
 		}
 	}
-	register(s.API, "update-model-provider", http.MethodPatch, "/admin/model-providers/{provider_id}", "Update model provider", userSecurity(), func(ctx context.Context, input *updateInput) (*resourceResponse[persistence.ModelProvider], error) {
+	register(api, "update-model-provider", http.MethodPatch, "/admin/model-providers/{provider_id}", "Update model provider", userSecurity(), func(ctx context.Context, input *updateInput) (*resourceResponse[persistence.ModelProvider], error) {
 		actor, err := s.app.CurrentAdmin(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -211,7 +212,7 @@ func (s *Server) registerAdminModelProviders() {
 	type activateInput struct {
 		ID string `path:"provider_id"`
 	}
-	register(s.API, "activate-model-provider", http.MethodPost, "/admin/model-providers/{provider_id}/activation", "Activate model provider", userSecurity(), func(ctx context.Context, input *activateInput) (*resourceResponse[persistence.ModelProvider], error) {
+	register(api, "activate-model-provider", http.MethodPost, "/admin/model-providers/{provider_id}/activation", "Activate model provider", userSecurity(), func(ctx context.Context, input *activateInput) (*resourceResponse[persistence.ModelProvider], error) {
 		actor, err := s.app.CurrentAdmin(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -223,7 +224,7 @@ func (s *Server) registerAdminModelProviders() {
 		return &resourceResponse[persistence.ModelProvider]{ETag: application.StrongETag("provider", provider.ID, provider.Revision), Body: *provider}, nil
 	})
 
-	register(s.API, "delete-model-provider", http.MethodDelete, "/admin/model-providers/{provider_id}", "Delete model provider", userSecurity(), func(ctx context.Context, input *activateInput) (*struct{}, error) {
+	register(api, "delete-model-provider", http.MethodDelete, "/admin/model-providers/{provider_id}", "Delete model provider", userSecurity(), func(ctx context.Context, input *activateInput) (*struct{}, error) {
 		actor, err := s.app.CurrentAdmin(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -242,7 +243,7 @@ func (s *Server) registerAdminModelProviders() {
 		Provider string `json:"provider"`
 		Detail   string `json:"detail,omitempty"`
 	}
-	register(s.API, "verify-model-provider", http.MethodPost, "/admin/model-providers/{provider_id}/verification", "Verify model provider credentials", userSecurity(), func(ctx context.Context, input *verifyInput) (*itemResponse[verifyBody], error) {
+	register(api, "verify-model-provider", http.MethodPost, "/admin/model-providers/{provider_id}/verification", "Verify model provider credentials", userSecurity(), func(ctx context.Context, input *verifyInput) (*itemResponse[verifyBody], error) {
 		actor, err := s.app.CurrentAdmin(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -258,12 +259,12 @@ func (s *Server) registerAdminModelProviders() {
 	})
 }
 
-func (s *Server) registerAdminAudit() {
+func (s adminRoutes) registerAdminAudit(api huma.API) {
 	type listInput struct {
 		Action string `query:"action"`
 		Limit  int    `query:"limit"`
 	}
-	register(s.API, "list-admin-audit-events", http.MethodGet, "/admin/audit-events", "List administrative audit events", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[application.AuditView], error) {
+	register(api, "list-admin-audit-events", http.MethodGet, "/admin/audit-events", "List administrative audit events", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[application.AuditView], error) {
 		if _, err := s.app.CurrentAdmin(ctx); err != nil {
 			return nil, mapError(err)
 		}

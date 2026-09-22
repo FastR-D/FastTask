@@ -39,7 +39,7 @@ type Server struct {
 	cfg    config.Config
 }
 
-func New(app *application.App, authService *platformauth.Service, cfg config.Config, agent *application.AgentService) *Server {
+func New(app *application.App, authService *platformauth.Service, cfg config.Config, agent *application.AgentService, routes ...RouteRegistrar) *Server {
 	if agent == nil {
 		agent = application.NewAgentService(app)
 	}
@@ -102,7 +102,17 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	api := humagin.NewWithGroup(engine, v1, humaConfig)
 	server := &Server{Engine: engine, API: api, app: app, auth: authService, agent: agent, cfg: cfg}
 	api.UseMiddleware(server.authenticationMiddleware)
-	server.register()
+	// Domain routes come from the "routes" value group (wiring.md §5, §7 step 7).
+	// Callers that build a Server directly (unit tests, §2 rule 4) pass none and
+	// get the builtin registrars, preserving the historical registration set.
+	if len(routes) == 0 {
+		routes = BuiltinRouteRegistrars(NewRouteDeps(app, authService, &server.cfg))
+	}
+	for _, registrar := range routes {
+		registrar.RegisterRoutes(api)
+	}
+	// The agent transport endpoints are bare-Gin (§9.1) and the SPA fallback is
+	// not a huma route, so both stay direct Server calls rather than registrars.
 	server.registerAgent()
 	server.static()
 	return server
@@ -179,24 +189,6 @@ type acceptedResponse struct {
 	Body     persistence.AgentJob
 }
 
-func (s *Server) register() {
-	s.registerAuth()
-	s.registerMe()
-	s.registerGoals()
-	s.registerTasks()
-	s.registerTaskTree()
-	s.registerLens()
-	s.registerPlans()
-	s.registerSessions()
-	s.registerConversations()
-	s.registerJobs()
-	s.registerDevices()
-	s.registerPanel()
-	s.registerImports()
-	s.registerIntegrationStatus()
-	s.registerAdmin()
-}
-
 func register[I, O any](api huma.API, id, method, path, summary string, security []map[string][]string, handler func(context.Context, *I) (*O, error)) {
 	huma.Register(api, huma.Operation{OperationID: id, Method: method, Path: path, Summary: summary, Security: security, DefaultStatus: operationStatus(id), Errors: []int{400, 401, 403, 404, 409, 412, 422, 428, 500}}, handler)
 }
@@ -216,7 +208,7 @@ func operationStatus(id string) int {
 	}
 }
 
-func (s *Server) registerAuth() {
+func (s authRoutes) RegisterRoutes(api huma.API) {
 	type loginInput struct {
 		Body struct {
 			Identifier string `json:"identifier" minLength:"1"`
@@ -231,7 +223,7 @@ func (s *Server) registerAuth() {
 		RefreshExpiresIn int              `json:"refresh_expires_in"`
 		User             persistence.User `json:"user"`
 	}
-	register(s.API, "auth-login", http.MethodPost, "/auth/login", "Login", publicSecurity(), func(ctx context.Context, input *loginInput) (*itemResponse[tokenBody], error) {
+	register(api, "auth-login", http.MethodPost, "/auth/login", "Login", publicSecurity(), func(ctx context.Context, input *loginInput) (*itemResponse[tokenBody], error) {
 		user, access, refresh, err := s.auth.Login(ctx, input.Body.Identifier, input.Body.Password)
 		if err != nil {
 			return nil, huma.Error401Unauthorized("invalid credentials")
@@ -244,7 +236,7 @@ func (s *Server) registerAuth() {
 			RefreshToken string `json:"refresh_token" minLength:"20"`
 		}
 	}
-	register(s.API, "auth-refresh", http.MethodPost, "/auth/refresh", "Rotate refresh token", publicSecurity(), func(ctx context.Context, input *refreshInput) (*itemResponse[tokenBody], error) {
+	register(api, "auth-refresh", http.MethodPost, "/auth/refresh", "Rotate refresh token", publicSecurity(), func(ctx context.Context, input *refreshInput) (*itemResponse[tokenBody], error) {
 		user, access, refresh, err := s.auth.Refresh(ctx, input.Body.RefreshToken)
 		if err != nil {
 			return nil, huma.Error401Unauthorized("invalid refresh token")
@@ -252,21 +244,21 @@ func (s *Server) registerAuth() {
 		return &itemResponse[tokenBody]{Body: tokenBody{"Bearer", access, 3600, refresh, 2592000, user}}, nil
 	})
 	type emptyInput struct{}
-	register(s.API, "auth-logout", http.MethodPost, "/auth/logout", "Logout", userSecurity(), func(ctx context.Context, input *emptyInput) (*struct{}, error) {
+	register(api, "auth-logout", http.MethodPost, "/auth/logout", "Logout", userSecurity(), func(ctx context.Context, input *emptyInput) (*struct{}, error) {
 		p := principal(ctx)
 		if err := s.auth.Logout(ctx, p.SessionID); err != nil {
 			return nil, mapError(err)
 		}
 		return &struct{}{}, nil
 	})
-	register(s.API, "auth-session", http.MethodGet, "/auth/session", "Current session", userSecurity(), func(ctx context.Context, input *emptyInput) (*itemResponse[platformauth.Principal], error) {
+	register(api, "auth-session", http.MethodGet, "/auth/session", "Current session", userSecurity(), func(ctx context.Context, input *emptyInput) (*itemResponse[platformauth.Principal], error) {
 		return &itemResponse[platformauth.Principal]{Body: principal(ctx)}, nil
 	})
 }
 
-func (s *Server) registerMe() {
+func (s meRoutes) RegisterRoutes(api huma.API) {
 	type empty struct{}
-	register(s.API, "get-me", http.MethodGet, "/me", "Get current user", userSecurity(), func(ctx context.Context, input *empty) (*resourceResponse[persistence.User], error) {
+	register(api, "get-me", http.MethodGet, "/me", "Get current user", userSecurity(), func(ctx context.Context, input *empty) (*resourceResponse[persistence.User], error) {
 		var user persistence.User
 		p := principal(ctx)
 		if err := s.app.Store.DB.WithContext(ctx).First(&user, "id = ?", p.UserID).Error; err != nil {
@@ -282,7 +274,7 @@ func (s *Server) registerMe() {
 			Locale      *string `json:"locale,omitempty"`
 		}
 	}
-	register(s.API, "patch-me", http.MethodPatch, "/me", "Update current user", userSecurity(), func(ctx context.Context, input *patch) (*resourceResponse[persistence.User], error) {
+	register(api, "patch-me", http.MethodPatch, "/me", "Update current user", userSecurity(), func(ctx context.Context, input *patch) (*resourceResponse[persistence.User], error) {
 		p := principal(ctx)
 		var user persistence.User
 		if err := s.app.Store.DB.WithContext(ctx).First(&user, "id = ?", p.UserID).Error; err != nil {
@@ -312,11 +304,11 @@ func (s *Server) registerMe() {
 	})
 }
 
-func (s *Server) registerGoals() {
+func (s goalRoutes) RegisterRoutes(api huma.API) {
 	type listInput struct {
 		Status string `query:"status"`
 	}
-	register(s.API, "list-goals", http.MethodGet, "/goals", "List goals", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.Goal], error) {
+	register(api, "list-goals", http.MethodGet, "/goals", "List goals", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.Goal], error) {
 		p := principal(ctx)
 		var goals []persistence.Goal
 		q := s.app.Store.DB.WithContext(ctx).Where("user_id = ?", p.UserID)
@@ -339,7 +331,7 @@ func (s *Server) registerGoals() {
 			TargetDate      *string `json:"target_date,omitempty"`
 		}
 	}
-	register(s.API, "create-goal", http.MethodPost, "/goals", "Create goal", userSecurity(), func(ctx context.Context, input *createInput) (*resourceResponse[persistence.Goal], error) {
+	register(api, "create-goal", http.MethodPost, "/goals", "Create goal", userSecurity(), func(ctx context.Context, input *createInput) (*resourceResponse[persistence.Goal], error) {
 		p := principal(ctx)
 		goal := persistence.Goal{Title: input.Body.Title, Description: input.Body.Description, SuccessCriteria: input.Body.SuccessCriteria, TargetDate: input.Body.TargetDate}
 		if err := s.app.CreateGoal(ctx, p.UserID, &goal); err != nil {
@@ -350,7 +342,7 @@ func (s *Server) registerGoals() {
 	type getInput struct {
 		ID string `path:"goal_id"`
 	}
-	register(s.API, "get-goal", http.MethodGet, "/goals/{goal_id}", "Get goal", userSecurity(), func(ctx context.Context, input *getInput) (*resourceResponse[persistence.Goal], error) {
+	register(api, "get-goal", http.MethodGet, "/goals/{goal_id}", "Get goal", userSecurity(), func(ctx context.Context, input *getInput) (*resourceResponse[persistence.Goal], error) {
 		p := principal(ctx)
 		var goal persistence.Goal
 		if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.ID, p.UserID).First(&goal).Error; err != nil {
@@ -369,7 +361,7 @@ func (s *Server) registerGoals() {
 			TargetDate      *string `json:"target_date,omitempty"`
 		}
 	}
-	register(s.API, "patch-goal", http.MethodPatch, "/goals/{goal_id}", "Update goal", userSecurity(), func(ctx context.Context, input *patchInput) (*resourceResponse[persistence.Goal], error) {
+	register(api, "patch-goal", http.MethodPatch, "/goals/{goal_id}", "Update goal", userSecurity(), func(ctx context.Context, input *patchInput) (*resourceResponse[persistence.Goal], error) {
 		expected, err := revisionFromETag(input.IfMatch)
 		if err != nil {
 			return nil, mapError(err)
@@ -398,13 +390,13 @@ func (s *Server) registerGoals() {
 	})
 }
 
-func (s *Server) registerTasks() {
+func (s taskRoutes) RegisterRoutes(api huma.API) {
 	type listInput struct {
 		GoalID   string `query:"goal_id"`
 		ParentID string `query:"parent_id"`
 		Status   string `query:"status"`
 	}
-	register(s.API, "list-tasks", http.MethodGet, "/tasks", "List tasks", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.Task], error) {
+	register(api, "list-tasks", http.MethodGet, "/tasks", "List tasks", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.Task], error) {
 		p := principal(ctx)
 		var tasks []persistence.Task
 		q := s.app.Store.DB.WithContext(ctx).Where("user_id = ?", p.UserID)
@@ -439,7 +431,7 @@ func (s *Server) registerTasks() {
 			Position        int     `json:"position"`
 		}
 	}
-	register(s.API, "create-task", http.MethodPost, "/tasks", "Create task", userSecurity(), func(ctx context.Context, input *createInput) (*resourceResponse[persistence.Task], error) {
+	register(api, "create-task", http.MethodPost, "/tasks", "Create task", userSecurity(), func(ctx context.Context, input *createInput) (*resourceResponse[persistence.Task], error) {
 		b := input.Body
 		task := persistence.Task{GoalID: b.GoalID, ParentID: b.ParentID, Type: b.Type, Title: b.Title, Description: b.Description, SuccessCriteria: b.SuccessCriteria, EstimateMinutes: b.EstimateMinutes, MinimumAction: b.MinimumAction, Priority: b.Priority, Position: b.Position}
 		if err := s.app.CreateTask(ctx, principal(ctx).UserID, &task); err != nil {
@@ -450,7 +442,7 @@ func (s *Server) registerTasks() {
 	type getInput struct {
 		ID string `path:"task_id"`
 	}
-	register(s.API, "get-task", http.MethodGet, "/tasks/{task_id}", "Get task", userSecurity(), func(ctx context.Context, input *getInput) (*resourceResponse[persistence.Task], error) {
+	register(api, "get-task", http.MethodGet, "/tasks/{task_id}", "Get task", userSecurity(), func(ctx context.Context, input *getInput) (*resourceResponse[persistence.Task], error) {
 		var task persistence.Task
 		if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&task).Error; err != nil {
 			return nil, mapError(err)
@@ -472,7 +464,7 @@ func (s *Server) registerTasks() {
 			BlockedReason   *string `json:"blocked_reason,omitempty"`
 		}
 	}
-	register(s.API, "patch-task", http.MethodPatch, "/tasks/{task_id}", "Update task", userSecurity(), func(ctx context.Context, input *patchInput) (*resourceResponse[persistence.Task], error) {
+	register(api, "patch-task", http.MethodPatch, "/tasks/{task_id}", "Update task", userSecurity(), func(ctx context.Context, input *patchInput) (*resourceResponse[persistence.Task], error) {
 		expected, e := revisionFromETag(input.IfMatch)
 		if e != nil {
 			return nil, mapError(e)
@@ -499,7 +491,7 @@ func (s *Server) registerTasks() {
 			Summary string `json:"summary" minLength:"1"`
 		}
 	}
-	register(s.API, "complete-task", http.MethodPost, "/tasks/{task_id}/completions", "Complete task", userSecurity(), func(ctx context.Context, input *completionInput) (*resourceResponse[persistence.Task], error) {
+	register(api, "complete-task", http.MethodPost, "/tasks/{task_id}/completions", "Complete task", userSecurity(), func(ctx context.Context, input *completionInput) (*resourceResponse[persistence.Task], error) {
 		rev, e := revisionFromETag(input.IfMatch)
 		if e != nil {
 			return nil, mapError(e)
@@ -510,7 +502,7 @@ func (s *Server) registerTasks() {
 		}
 		return &resourceResponse[persistence.Task]{ETag: application.StrongETag("task", task.ID, task.Revision), Body: *task}, nil
 	})
-	register(s.API, "reopen-task", http.MethodPost, "/tasks/{task_id}/reopenings", "Reopen task", userSecurity(), func(ctx context.Context, input *completionInput) (*resourceResponse[persistence.Task], error) {
+	register(api, "reopen-task", http.MethodPost, "/tasks/{task_id}/reopenings", "Reopen task", userSecurity(), func(ctx context.Context, input *completionInput) (*resourceResponse[persistence.Task], error) {
 		rev, e := revisionFromETag(input.IfMatch)
 		if e != nil {
 			return nil, mapError(e)
@@ -521,7 +513,7 @@ func (s *Server) registerTasks() {
 		}
 		return &resourceResponse[persistence.Task]{ETag: application.StrongETag("task", task.ID, task.Revision), Body: *task}, nil
 	})
-	register(s.API, "task-progress", http.MethodGet, "/tasks/{task_id}/progress-events", "Task progress", userSecurity(), func(ctx context.Context, input *getInput) (*listResponse[persistence.ProgressEvent], error) {
+	register(api, "task-progress", http.MethodGet, "/tasks/{task_id}/progress-events", "Task progress", userSecurity(), func(ctx context.Context, input *getInput) (*listResponse[persistence.ProgressEvent], error) {
 		var events []persistence.ProgressEvent
 		if err := s.app.Store.DB.WithContext(ctx).Where("task_id = ? AND user_id = ?", input.ID, principal(ctx).UserID).Order("occurred_at DESC").Find(&events).Error; err != nil {
 			return nil, mapError(err)
@@ -532,7 +524,7 @@ func (s *Server) registerTasks() {
 	})
 }
 
-func (s *Server) registerTaskTree() {
+func (s taskTreeRoutes) RegisterRoutes(api huma.API) {
 	type goalInput struct {
 		GoalID string `path:"goal_id"`
 	}
@@ -542,7 +534,7 @@ func (s *Server) registerTaskTree() {
 		Nodes     []map[string]any       `json:"nodes"`
 		Proposals []persistence.Proposal `json:"proposals"`
 	}
-	register(s.API, "get-task-tree", http.MethodGet, "/goals/{goal_id}/task-tree", "Get task tree", userSecurity(), func(ctx context.Context, input *goalInput) (*resourceResponse[treeBody], error) {
+	register(api, "get-task-tree", http.MethodGet, "/goals/{goal_id}/task-tree", "Get task tree", userSecurity(), func(ctx context.Context, input *goalInput) (*resourceResponse[treeBody], error) {
 		p := principal(ctx)
 		var goal persistence.Goal
 		if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.GoalID, p.UserID).First(&goal).Error; err != nil {
@@ -596,9 +588,9 @@ func (s *Server) registerTaskTree() {
 			return &acceptedResponse{Location: "/api/v1/agent-jobs/" + job.ID, Body: *job}, nil
 		}
 	}
-	register(s.API, "generate-task-tree", http.MethodPost, "/goals/{goal_id}/task-tree/generation-jobs", "Generate task tree", userSecurity(), createJob("task_tree_generation"))
-	register(s.API, "revise-task-tree", http.MethodPost, "/goals/{goal_id}/task-tree/revision-jobs", "Revise task tree", userSecurity(), createJob("task_tree_revision"))
-	register(s.API, "list-task-tree-revisions", http.MethodGet, "/goals/{goal_id}/task-tree/revisions", "List task tree revisions", userSecurity(), func(ctx context.Context, input *goalInput) (*listResponse[persistence.TaskTreeRevision], error) {
+	register(api, "generate-task-tree", http.MethodPost, "/goals/{goal_id}/task-tree/generation-jobs", "Generate task tree", userSecurity(), createJob("task_tree_generation"))
+	register(api, "revise-task-tree", http.MethodPost, "/goals/{goal_id}/task-tree/revision-jobs", "Revise task tree", userSecurity(), createJob("task_tree_revision"))
+	register(api, "list-task-tree-revisions", http.MethodGet, "/goals/{goal_id}/task-tree/revisions", "List task tree revisions", userSecurity(), func(ctx context.Context, input *goalInput) (*listResponse[persistence.TaskTreeRevision], error) {
 		var items []persistence.TaskTreeRevision
 		if err := s.app.Store.DB.WithContext(ctx).Where("goal_id = ? AND user_id = ?", input.GoalID, principal(ctx).UserID).Order("revision DESC").Find(&items).Error; err != nil {
 			return nil, mapError(err)
@@ -612,7 +604,7 @@ func (s *Server) registerTaskTree() {
 		ProposalID string `path:"proposal_id"`
 		IfMatch    string `header:"If-Match" required:"true"`
 	}
-	register(s.API, "apply-task-tree-proposal", http.MethodPost, "/goals/{goal_id}/task-tree/proposals/{proposal_id}/application", "Apply proposal", userSecurity(), func(ctx context.Context, input *proposalInput) (*itemResponse[map[string]any], error) {
+	register(api, "apply-task-tree-proposal", http.MethodPost, "/goals/{goal_id}/task-tree/proposals/{proposal_id}/application", "Apply proposal", userSecurity(), func(ctx context.Context, input *proposalInput) (*itemResponse[map[string]any], error) {
 		p := principal(ctx)
 		expected, e := revisionFromETag(input.IfMatch)
 		if e != nil {
@@ -637,7 +629,7 @@ func (s *Server) registerTaskTree() {
 		}
 		return &itemResponse[map[string]any]{Body: map[string]any{"proposal_id": proposal.ID, "created_tasks": created}}, nil
 	})
-	register(s.API, "reject-task-tree-proposal", http.MethodPut, "/goals/{goal_id}/task-tree/proposals/{proposal_id}/rejection", "Reject proposal", userSecurity(), func(ctx context.Context, input *proposalInput) (*itemResponse[persistence.Proposal], error) {
+	register(api, "reject-task-tree-proposal", http.MethodPut, "/goals/{goal_id}/task-tree/proposals/{proposal_id}/rejection", "Reject proposal", userSecurity(), func(ctx context.Context, input *proposalInput) (*itemResponse[persistence.Proposal], error) {
 		rev, e := revisionFromETag(input.IfMatch)
 		if e != nil {
 			return nil, mapError(e)
@@ -650,9 +642,9 @@ func (s *Server) registerTaskTree() {
 	})
 }
 
-func (s *Server) registerPlans() {
+func (s planRoutes) RegisterRoutes(api huma.API) {
 	type listInput struct{}
-	register(s.API, "list-daily-plans", http.MethodGet, "/daily-plans", "List daily plans", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.DailyPlan], error) {
+	register(api, "list-daily-plans", http.MethodGet, "/daily-plans", "List daily plans", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.DailyPlan], error) {
 		var plans []persistence.DailyPlan
 		if err := s.app.Store.DB.WithContext(ctx).Where("user_id = ?", principal(ctx).UserID).Order("local_date DESC").Find(&plans).Error; err != nil {
 			return nil, mapError(err)
@@ -670,7 +662,7 @@ func (s *Server) registerPlans() {
 			AvailableMinutes int      `json:"available_minutes" minimum:"0"`
 		}
 	}
-	register(s.API, "create-daily-plan", http.MethodPost, "/daily-plans", "Create daily plan", userSecurity(), func(ctx context.Context, input *createInput) (*itemResponse[map[string]any], error) {
+	register(api, "create-daily-plan", http.MethodPost, "/daily-plans", "Create daily plan", userSecurity(), func(ctx context.Context, input *createInput) (*itemResponse[map[string]any], error) {
 		if err := application.ParseDateInZone(input.Body.LocalDate, input.Body.Timezone); err != nil {
 			return nil, mapError(err)
 		}
@@ -681,7 +673,7 @@ func (s *Server) registerPlans() {
 		return &itemResponse[map[string]any]{Body: map[string]any{"plan": plan, "items": items}}, nil
 	})
 	type currentInput struct{}
-	register(s.API, "current-daily-plan", http.MethodGet, "/daily-plans/current", "Get current daily plan", userSecurity(), func(ctx context.Context, input *currentInput) (*resourceResponse[map[string]any], error) {
+	register(api, "current-daily-plan", http.MethodGet, "/daily-plans/current", "Get current daily plan", userSecurity(), func(ctx context.Context, input *currentInput) (*resourceResponse[map[string]any], error) {
 		p := principal(ctx)
 		var user persistence.User
 		if err := s.app.Store.DB.First(&user, "id = ?", p.UserID).Error; err != nil {
@@ -700,7 +692,7 @@ func (s *Server) registerPlans() {
 	type getInput struct {
 		PlanID string `path:"plan_id"`
 	}
-	register(s.API, "get-daily-plan", http.MethodGet, "/daily-plans/{plan_id}", "Get daily plan", userSecurity(), func(ctx context.Context, input *getInput) (*resourceResponse[map[string]any], error) {
+	register(api, "get-daily-plan", http.MethodGet, "/daily-plans/{plan_id}", "Get daily plan", userSecurity(), func(ctx context.Context, input *getInput) (*resourceResponse[map[string]any], error) {
 		var plan persistence.DailyPlan
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.PlanID, principal(ctx).UserID).First(&plan).Error; err != nil {
 			return nil, mapError(err)
@@ -709,7 +701,7 @@ func (s *Server) registerPlans() {
 		s.app.Store.DB.Where("plan_id = ? AND plan_revision = ?", plan.ID, plan.CurrentRevision).Order("kind, position").Find(&items)
 		return &resourceResponse[map[string]any]{ETag: application.StrongETag("plan", plan.ID, plan.Revision), Body: map[string]any{"plan": plan, "items": items}}, nil
 	})
-	register(s.API, "list-daily-plan-revisions", http.MethodGet, "/daily-plans/{plan_id}/revisions", "List plan revisions", userSecurity(), func(ctx context.Context, input *getInput) (*listResponse[persistence.DailyPlanRevision], error) {
+	register(api, "list-daily-plan-revisions", http.MethodGet, "/daily-plans/{plan_id}/revisions", "List plan revisions", userSecurity(), func(ctx context.Context, input *getInput) (*listResponse[persistence.DailyPlanRevision], error) {
 		var plan persistence.DailyPlan
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.PlanID, principal(ctx).UserID).First(&plan).Error; err != nil {
 			return nil, mapError(err)
@@ -727,7 +719,7 @@ func (s *Server) registerPlans() {
 			Status string `json:"status" enum:"active,closed,cancelled"`
 		}
 	}
-	register(s.API, "patch-daily-plan", http.MethodPatch, "/daily-plans/{plan_id}", "Update plan status", userSecurity(), func(ctx context.Context, input *patchPlanInput) (*resourceResponse[persistence.DailyPlan], error) {
+	register(api, "patch-daily-plan", http.MethodPatch, "/daily-plans/{plan_id}", "Update plan status", userSecurity(), func(ctx context.Context, input *patchPlanInput) (*resourceResponse[persistence.DailyPlan], error) {
 		rev, e := revisionFromETag(input.IfMatch)
 		if e != nil {
 			return nil, mapError(e)
@@ -749,7 +741,7 @@ func (s *Server) registerPlans() {
 			BaseRevision     int    `json:"base_revision,omitempty"`
 		}
 	}
-	register(s.API, "generate-daily-plan", http.MethodPost, "/daily-plans/generation-jobs", "Generate daily plan", userSecurity(), func(ctx context.Context, input *genInput) (*acceptedResponse, error) {
+	register(api, "generate-daily-plan", http.MethodPost, "/daily-plans/generation-jobs", "Generate daily plan", userSecurity(), func(ctx context.Context, input *genInput) (*acceptedResponse, error) {
 		job, err := s.app.CreateJob(ctx, principal(ctx).UserID, "daily_plan_generation", "user", principal(ctx).UserID, 0, input.Body)
 		if err != nil {
 			return nil, mapError(err)
@@ -770,7 +762,7 @@ func (s *Server) registerPlans() {
 			Position      int     `json:"position"`
 		}
 	}
-	register(s.API, "add-daily-plan-item", http.MethodPost, "/daily-plans/{plan_id}/items", "Add daily plan item", userSecurity(), func(ctx context.Context, input *addItemInput) (*resourceResponse[persistence.DailyPlanItem], error) {
+	register(api, "add-daily-plan-item", http.MethodPost, "/daily-plans/{plan_id}/items", "Add daily plan item", userSecurity(), func(ctx context.Context, input *addItemInput) (*resourceResponse[persistence.DailyPlanItem], error) {
 		rev, e := revisionFromETag(input.IfMatch)
 		if e != nil {
 			return nil, mapError(e)
@@ -786,7 +778,7 @@ func (s *Server) registerPlans() {
 		PlanID string `path:"plan_id"`
 		ItemID string `path:"item_id"`
 	}
-	register(s.API, "get-daily-plan-item", http.MethodGet, "/daily-plans/{plan_id}/items/{item_id}", "Get plan item", userSecurity(), func(ctx context.Context, input *itemInput) (*resourceResponse[persistence.DailyPlanItem], error) {
+	register(api, "get-daily-plan-item", http.MethodGet, "/daily-plans/{plan_id}/items/{item_id}", "Get plan item", userSecurity(), func(ctx context.Context, input *itemInput) (*resourceResponse[persistence.DailyPlanItem], error) {
 		var item persistence.DailyPlanItem
 		if err := s.app.Store.DB.Where("id = ? AND plan_id = ? AND user_id = ?", input.ItemID, input.PlanID, principal(ctx).UserID).First(&item).Error; err != nil {
 			return nil, mapError(err)
@@ -806,7 +798,7 @@ func (s *Server) registerPlans() {
 			Status        *string `json:"status,omitempty" enum:"skipped"`
 		}
 	}
-	register(s.API, "patch-daily-plan-item", http.MethodPatch, "/daily-plans/{plan_id}/items/{item_id}", "Update plan item", userSecurity(), func(ctx context.Context, input *patchItemInput) (*resourceResponse[persistence.DailyPlanItem], error) {
+	register(api, "patch-daily-plan-item", http.MethodPatch, "/daily-plans/{plan_id}/items/{item_id}", "Update plan item", userSecurity(), func(ctx context.Context, input *patchItemInput) (*resourceResponse[persistence.DailyPlanItem], error) {
 		rev, e := revisionFromETag(input.IfMatch)
 		if e != nil {
 			return nil, mapError(e)
@@ -831,7 +823,7 @@ func (s *Server) registerPlans() {
 			WorkSessionIDs []string `json:"work_session_ids,omitempty"`
 		}
 	}
-	register(s.API, "complete-daily-plan-item", http.MethodPost, "/daily-plans/{plan_id}/items/{item_id}/completions", "Complete plan item", userSecurity(), func(ctx context.Context, input *completeInput) (*resourceResponse[persistence.DailyPlanItem], error) {
+	register(api, "complete-daily-plan-item", http.MethodPost, "/daily-plans/{plan_id}/items/{item_id}/completions", "Complete plan item", userSecurity(), func(ctx context.Context, input *completeInput) (*resourceResponse[persistence.DailyPlanItem], error) {
 		rev, e := revisionFromETag(input.IfMatch)
 		if e != nil {
 			return nil, mapError(e)
@@ -847,7 +839,7 @@ func (s *Server) registerPlans() {
 		IfMatch        string `header:"If-Match" required:"true"`
 		IdempotencyKey string `header:"Idempotency-Key"`
 	}
-	register(s.API, "generate-support-items", http.MethodPost, "/daily-plans/{plan_id}/support-generation-jobs", "Generate support items", userSecurity(), func(ctx context.Context, input *supportInput) (*acceptedResponse, error) {
+	register(api, "generate-support-items", http.MethodPost, "/daily-plans/{plan_id}/support-generation-jobs", "Generate support items", userSecurity(), func(ctx context.Context, input *supportInput) (*acceptedResponse, error) {
 		var plan persistence.DailyPlan
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.PlanID, principal(ctx).UserID).First(&plan).Error; err != nil {
 			return nil, mapError(err)
@@ -872,9 +864,9 @@ func (s *Server) registerPlans() {
 	})
 }
 
-func (s *Server) registerSessions() {
+func (s sessionRoutes) RegisterRoutes(api huma.API) {
 	type listInput struct{}
-	register(s.API, "list-work-sessions", http.MethodGet, "/work-sessions", "List sessions", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.WorkSession], error) {
+	register(api, "list-work-sessions", http.MethodGet, "/work-sessions", "List sessions", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.WorkSession], error) {
 		var items []persistence.WorkSession
 		if err := s.app.Store.DB.Where("user_id = ?", principal(ctx).UserID).Order("created_at DESC").Find(&items).Error; err != nil {
 			return nil, mapError(err)
@@ -893,7 +885,7 @@ func (s *Server) registerSessions() {
 			StartedAt       time.Time `json:"started_at,omitempty"`
 		}
 	}
-	register(s.API, "create-work-session", http.MethodPost, "/work-sessions", "Start session", userSecurity(), func(ctx context.Context, input *createInput) (*resourceResponse[persistence.WorkSession], error) {
+	register(api, "create-work-session", http.MethodPost, "/work-sessions", "Start session", userSecurity(), func(ctx context.Context, input *createInput) (*resourceResponse[persistence.WorkSession], error) {
 		b := input.Body
 		session := persistence.WorkSession{TaskID: b.TaskID, DailyPlanItemID: b.DailyPlanItemID, SessionType: b.SessionType, TargetMinutes: b.TargetMinutes, StartedAt: b.StartedAt}
 		if err := s.app.StartSession(ctx, principal(ctx).UserID, &session); err != nil {
@@ -904,7 +896,7 @@ func (s *Server) registerSessions() {
 	type getInput struct {
 		ID string `path:"session_id"`
 	}
-	register(s.API, "get-work-session", http.MethodGet, "/work-sessions/{session_id}", "Get session", userSecurity(), func(ctx context.Context, input *getInput) (*resourceResponse[persistence.WorkSession], error) {
+	register(api, "get-work-session", http.MethodGet, "/work-sessions/{session_id}", "Get session", userSecurity(), func(ctx context.Context, input *getInput) (*resourceResponse[persistence.WorkSession], error) {
 		var item persistence.WorkSession
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&item).Error; err != nil {
 			return nil, mapError(err)
@@ -924,7 +916,7 @@ func (s *Server) registerSessions() {
 	}
 	for _, definition := range []struct{ id, path, action string }{{"pause-work-session", "/work-sessions/{session_id}/pauses", "pause"}, {"resume-work-session", "/work-sessions/{session_id}/resumptions", "resume"}, {"complete-work-session", "/work-sessions/{session_id}/completions", "complete"}, {"stop-work-session", "/work-sessions/{session_id}/stoppings", "stop"}, {"invalidate-work-session", "/work-sessions/{session_id}/invalidations", "invalidate"}} {
 		def := definition
-		register(s.API, def.id, http.MethodPost, def.path, def.action+" session", userSecurity(), func(ctx context.Context, input *transitionInput) (*resourceResponse[persistence.WorkSession], error) {
+		register(api, def.id, http.MethodPost, def.path, def.action+" session", userSecurity(), func(ctx context.Context, input *transitionInput) (*resourceResponse[persistence.WorkSession], error) {
 			rev, e := revisionFromETag(input.IfMatch)
 			if e != nil {
 				return nil, mapError(e)
@@ -942,9 +934,9 @@ func (s *Server) registerSessions() {
 	}
 }
 
-func (s *Server) registerConversations() {
+func (s conversationRoutes) RegisterRoutes(api huma.API) {
 	type listInput struct{}
-	register(s.API, "list-conversations", http.MethodGet, "/conversations", "List conversations", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.Conversation], error) {
+	register(api, "list-conversations", http.MethodGet, "/conversations", "List conversations", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.Conversation], error) {
 		var items []persistence.Conversation
 		s.app.Store.DB.Where("user_id = ?", principal(ctx).UserID).Order("created_at DESC").Find(&items)
 		out := &listResponse[persistence.Conversation]{}
@@ -958,7 +950,7 @@ func (s *Server) registerConversations() {
 			Title  string  `json:"title"`
 		}
 	}
-	register(s.API, "create-conversation", http.MethodPost, "/conversations", "Create conversation", userSecurity(), func(ctx context.Context, input *createInput) (*resourceResponse[persistence.Conversation], error) {
+	register(api, "create-conversation", http.MethodPost, "/conversations", "Create conversation", userSecurity(), func(ctx context.Context, input *createInput) (*resourceResponse[persistence.Conversation], error) {
 		now := persistence.Now()
 		if input.Body.GoalID != nil {
 			var goal persistence.Goal
@@ -975,7 +967,7 @@ func (s *Server) registerConversations() {
 	type convInput struct {
 		ID string `path:"conversation_id"`
 	}
-	register(s.API, "get-conversation", http.MethodGet, "/conversations/{conversation_id}", "Get conversation", userSecurity(), func(ctx context.Context, input *convInput) (*resourceResponse[persistence.Conversation], error) {
+	register(api, "get-conversation", http.MethodGet, "/conversations/{conversation_id}", "Get conversation", userSecurity(), func(ctx context.Context, input *convInput) (*resourceResponse[persistence.Conversation], error) {
 		var item persistence.Conversation
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&item).Error; err != nil {
 			return nil, mapError(err)
@@ -990,7 +982,7 @@ func (s *Server) registerConversations() {
 			Status *string `json:"status,omitempty"`
 		}
 	}
-	register(s.API, "patch-conversation", http.MethodPatch, "/conversations/{conversation_id}", "Update conversation", userSecurity(), func(ctx context.Context, input *patchInput) (*resourceResponse[persistence.Conversation], error) {
+	register(api, "patch-conversation", http.MethodPatch, "/conversations/{conversation_id}", "Update conversation", userSecurity(), func(ctx context.Context, input *patchInput) (*resourceResponse[persistence.Conversation], error) {
 		var item persistence.Conversation
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&item).Error; err != nil {
 			return nil, mapError(err)
@@ -1007,7 +999,7 @@ func (s *Server) registerConversations() {
 		s.app.Store.DB.First(&item, "id = ?", item.ID)
 		return &resourceResponse[persistence.Conversation]{ETag: application.StrongETag("conv", item.ID, item.Revision), Body: item}, nil
 	})
-	register(s.API, "list-conversation-messages", http.MethodGet, "/conversations/{conversation_id}/messages", "List messages", userSecurity(), func(ctx context.Context, input *convInput) (*listResponse[persistence.ConversationMessage], error) {
+	register(api, "list-conversation-messages", http.MethodGet, "/conversations/{conversation_id}/messages", "List messages", userSecurity(), func(ctx context.Context, input *convInput) (*listResponse[persistence.ConversationMessage], error) {
 		var conv persistence.Conversation
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&conv).Error; err != nil {
 			return nil, mapError(err)
@@ -1026,7 +1018,7 @@ func (s *Server) registerConversations() {
 			TranscriptionJobID string `json:"transcription_job_id,omitempty"`
 		}
 	}
-	register(s.API, "create-conversation-message", http.MethodPost, "/conversations/{conversation_id}/messages", "Send message", userSecurity(), func(ctx context.Context, input *messageInput) (*acceptedResponse, error) {
+	register(api, "create-conversation-message", http.MethodPost, "/conversations/{conversation_id}/messages", "Send message", userSecurity(), func(ctx context.Context, input *messageInput) (*acceptedResponse, error) {
 		p := principal(ctx)
 		var conv persistence.Conversation
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.ID, p.UserID).First(&conv).Error; err != nil {
@@ -1052,7 +1044,7 @@ func (s *Server) registerConversations() {
 		IdempotencyKey string `header:"Idempotency-Key"`
 		RawBody        multipart.Form
 	}
-	register(s.API, "create-voice-transcription", http.MethodPost, "/voice-transcription-jobs", "Transcribe voice", userSecurity(), func(ctx context.Context, input *voiceInput) (*acceptedResponse, error) {
+	register(api, "create-voice-transcription", http.MethodPost, "/voice-transcription-jobs", "Transcribe voice", userSecurity(), func(ctx context.Context, input *voiceInput) (*acceptedResponse, error) {
 		files := input.RawBody.File["audio"]
 		if len(files) != 1 {
 			return nil, huma.Error400BadRequest("one audio file is required")
@@ -1082,9 +1074,9 @@ func (s *Server) registerConversations() {
 	})
 }
 
-func (s *Server) registerJobs() {
+func (s jobRoutes) RegisterRoutes(api huma.API) {
 	type listInput struct{}
-	register(s.API, "list-agent-jobs", http.MethodGet, "/agent-jobs", "List agent jobs", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.AgentJob], error) {
+	register(api, "list-agent-jobs", http.MethodGet, "/agent-jobs", "List agent jobs", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.AgentJob], error) {
 		var items []persistence.AgentJob
 		s.app.Store.DB.Where("user_id = ?", principal(ctx).UserID).Order("created_at DESC").Find(&items)
 		out := &listResponse[persistence.AgentJob]{}
@@ -1094,7 +1086,7 @@ func (s *Server) registerJobs() {
 	type jobInput struct {
 		ID string `path:"job_id"`
 	}
-	register(s.API, "get-agent-job", http.MethodGet, "/agent-jobs/{job_id}", "Get agent job", userSecurity(), func(ctx context.Context, input *jobInput) (*resourceResponse[persistence.AgentJob], error) {
+	register(api, "get-agent-job", http.MethodGet, "/agent-jobs/{job_id}", "Get agent job", userSecurity(), func(ctx context.Context, input *jobInput) (*resourceResponse[persistence.AgentJob], error) {
 		var job persistence.AgentJob
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&job).Error; err != nil {
 			return nil, mapError(err)
@@ -1106,7 +1098,7 @@ func (s *Server) registerJobs() {
 		IfMatch        string `header:"If-Match" required:"true"`
 		IdempotencyKey string `header:"Idempotency-Key"`
 	}
-	register(s.API, "cancel-agent-job", http.MethodPut, "/agent-jobs/{job_id}/cancellation", "Cancel agent job", userSecurity(), func(ctx context.Context, input *mutateInput) (*resourceResponse[persistence.AgentJob], error) {
+	register(api, "cancel-agent-job", http.MethodPut, "/agent-jobs/{job_id}/cancellation", "Cancel agent job", userSecurity(), func(ctx context.Context, input *mutateInput) (*resourceResponse[persistence.AgentJob], error) {
 		rev, e := revisionFromETag(input.IfMatch)
 		if e != nil {
 			return nil, mapError(e)
@@ -1117,7 +1109,7 @@ func (s *Server) registerJobs() {
 		}
 		return &resourceResponse[persistence.AgentJob]{ETag: application.StrongETag("job", job.ID, job.Revision), Body: *job}, nil
 	})
-	register(s.API, "retry-agent-job", http.MethodPost, "/agent-jobs/{job_id}/retries", "Retry agent job", userSecurity(), func(ctx context.Context, input *mutateInput) (*acceptedResponse, error) {
+	register(api, "retry-agent-job", http.MethodPost, "/agent-jobs/{job_id}/retries", "Retry agent job", userSecurity(), func(ctx context.Context, input *mutateInput) (*acceptedResponse, error) {
 		rev, e := revisionFromETag(input.IfMatch)
 		if e != nil {
 			return nil, mapError(e)
@@ -1142,7 +1134,7 @@ func (s *Server) registerJobs() {
 			ErrorMessage string         `json:"error_message,omitempty"`
 		}
 	}
-	register(s.API, "agent-job-callback", http.MethodPost, "/agent-jobs/{job_id}/callbacks", "External worker callback", serviceSecurity("serviceAgentJobsWrite"), func(ctx context.Context, input *callbackInput) (*resourceResponse[persistence.AgentJob], error) {
+	register(api, "agent-job-callback", http.MethodPost, "/agent-jobs/{job_id}/callbacks", "External worker callback", serviceSecurity("serviceAgentJobsWrite"), func(ctx context.Context, input *callbackInput) (*resourceResponse[persistence.AgentJob], error) {
 		job, err := s.app.AgentCallback(ctx, principal(ctx).UserID, input.ID, input.Body.AttemptNo, input.Body.LeaseVersion, input.Body.RunToken, input.Body.Status, input.Body.Result, input.Body.ErrorCode, input.Body.ErrorMessage)
 		if err != nil {
 			return nil, mapError(err)
@@ -1151,9 +1143,9 @@ func (s *Server) registerJobs() {
 	})
 }
 
-func (s *Server) registerDevices() {
+func (s deviceRoutes) RegisterRoutes(api huma.API) {
 	type listInput struct{}
-	register(s.API, "list-devices", http.MethodGet, "/devices", "List devices", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.Device], error) {
+	register(api, "list-devices", http.MethodGet, "/devices", "List devices", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.Device], error) {
 		var items []persistence.Device
 		s.app.Store.DB.Where("user_id = ?", principal(ctx).UserID).Find(&items)
 		out := &listResponse[persistence.Device]{}
@@ -1173,7 +1165,7 @@ func (s *Server) registerDevices() {
 		Device      persistence.Device `json:"device"`
 		DeviceToken string             `json:"device_token"`
 	}
-	register(s.API, "create-device", http.MethodPost, "/devices", "Register device", userSecurity(), func(ctx context.Context, input *createInput) (*itemResponse[deviceCreated], error) {
+	register(api, "create-device", http.MethodPost, "/devices", "Register device", userSecurity(), func(ctx context.Context, input *createInput) (*itemResponse[deviceCreated], error) {
 		capabilities, _ := json.Marshal(input.Body.Capabilities)
 		device := persistence.Device{Name: input.Body.Name, Kind: input.Body.Kind, Timezone: input.Body.Timezone, CapabilitiesJSON: string(capabilities)}
 		token, err := s.app.RegisterDevice(ctx, principal(ctx).UserID, &device)
@@ -1185,7 +1177,7 @@ func (s *Server) registerDevices() {
 	type deviceInput struct {
 		ID string `path:"device_id"`
 	}
-	register(s.API, "get-device", http.MethodGet, "/devices/{device_id}", "Get device", userSecurity(), func(ctx context.Context, input *deviceInput) (*resourceResponse[persistence.Device], error) {
+	register(api, "get-device", http.MethodGet, "/devices/{device_id}", "Get device", userSecurity(), func(ctx context.Context, input *deviceInput) (*resourceResponse[persistence.Device], error) {
 		var item persistence.Device
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&item).Error; err != nil {
 			return nil, mapError(err)
@@ -1200,7 +1192,7 @@ func (s *Server) registerDevices() {
 			Timezone *string `json:"timezone,omitempty"`
 		}
 	}
-	register(s.API, "patch-device", http.MethodPatch, "/devices/{device_id}", "Update device", userSecurity(), func(ctx context.Context, input *updateInput) (*resourceResponse[persistence.Device], error) {
+	register(api, "patch-device", http.MethodPatch, "/devices/{device_id}", "Update device", userSecurity(), func(ctx context.Context, input *updateInput) (*resourceResponse[persistence.Device], error) {
 		var item persistence.Device
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&item).Error; err != nil {
 			return nil, mapError(err)
@@ -1221,7 +1213,7 @@ func (s *Server) registerDevices() {
 		ID      string `path:"device_id"`
 		IfMatch string `header:"If-Match" required:"true"`
 	}
-	register(s.API, "revoke-device", http.MethodPut, "/devices/{device_id}/revocation", "Revoke device", userSecurity(), func(ctx context.Context, input *revokeInput) (*resourceResponse[persistence.Device], error) {
+	register(api, "revoke-device", http.MethodPut, "/devices/{device_id}/revocation", "Revoke device", userSecurity(), func(ctx context.Context, input *revokeInput) (*resourceResponse[persistence.Device], error) {
 		var item persistence.Device
 		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&item).Error; err != nil {
 			return nil, mapError(err)
@@ -1239,7 +1231,7 @@ func (s *Server) registerDevices() {
 		IfMatch        string `header:"If-Match" required:"true"`
 		IdempotencyKey string `header:"Idempotency-Key"`
 	}
-	register(s.API, "rotate-device-token", http.MethodPost, "/devices/{device_id}/token-rotations", "Rotate device token", userSecurity(), func(ctx context.Context, input *rotateInput) (*itemResponse[deviceCreated], error) {
+	register(api, "rotate-device-token", http.MethodPost, "/devices/{device_id}/token-rotations", "Rotate device token", userSecurity(), func(ctx context.Context, input *rotateInput) (*itemResponse[deviceCreated], error) {
 		rev, e := revisionFromETag(input.IfMatch)
 		if e != nil {
 			return nil, mapError(e)
@@ -1270,7 +1262,7 @@ func (s *Server) registerDevices() {
 		CacheControl string `header:"Cache-Control"`
 		Body         *pollBody
 	}
-	register(s.API, "poll-device", http.MethodGet, "/devices/self/poll", "Poll device view", publicSecurity(), func(ctx context.Context, input *pollInput) (*pollResponse, error) {
+	register(api, "poll-device", http.MethodGet, "/devices/self/poll", "Poll device view", publicSecurity(), func(ctx context.Context, input *pollInput) (*pollResponse, error) {
 		device, err := s.app.DeviceByToken(ctx, input.DeviceToken)
 		if err != nil {
 			return nil, huma.Error401Unauthorized("invalid device token")
@@ -1292,7 +1284,7 @@ func (s *Server) registerDevices() {
 	})
 }
 
-func (s *Server) registerPanel() {
+func (s panelRoutes) RegisterRoutes(api huma.API) {
 	type input struct {
 		Authorization string `header:"Authorization"`
 	}
@@ -1309,7 +1301,7 @@ func (s *Server) registerPanel() {
 		EntryURL      string    `json:"entry_url"`
 		UpdatedAt     time.Time `json:"updated_at"`
 	}
-	register(s.API, "panel-summary", http.MethodGet, "/panel/summary", "FastResearch panel summary", publicSecurity(), func(ctx context.Context, input *input) (*itemResponse[body], error) {
+	register(api, "panel-summary", http.MethodGet, "/panel/summary", "FastResearch panel summary", publicSecurity(), func(ctx context.Context, input *input) (*itemResponse[body], error) {
 		var userID string
 		if input.Authorization != "" {
 			p, err := s.auth.Authenticate(input.Authorization)
@@ -1388,7 +1380,7 @@ func externalImportResponse(item persistence.ExternalImport) externalImportBody 
 	return externalImportBody{ID: item.ID, SchemaVersion: item.SchemaVersion, TraceID: item.TraceID, Source: externalImportSourceBody{System: item.SourceSystem, ExternalID: item.SourceExternalID, URL: item.SourceURL, ContentHash: item.ContentHash}, Kind: item.Kind, Title: item.Title, Description: item.Description, SuggestedGoalID: item.SuggestedGoalID, Artifacts: artifacts, Metadata: metadata, Status: item.Status, TaskID: item.TaskID, DecisionNote: item.DecisionNote, Revision: item.Revision, DecidedAt: item.DecidedAt, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}
 }
 
-func (s *Server) registerImports() {
+func (s importRoutes) RegisterRoutes(api huma.API) {
 	type createInput struct {
 		IdempotencyKey string `header:"Idempotency-Key" required:"true"`
 		Body           struct {
@@ -1403,7 +1395,7 @@ func (s *Server) registerImports() {
 			Metadata        map[string]any           `json:"metadata,omitempty"`
 		}
 	}
-	register(s.API, "create-import", http.MethodPost, "/imports", "Create external import", userOrServiceSecurity("serviceImportsWrite"), func(ctx context.Context, input *createInput) (*resourceResponse[externalImportBody], error) {
+	register(api, "create-import", http.MethodPost, "/imports", "Create external import", userOrServiceSecurity("serviceImportsWrite"), func(ctx context.Context, input *createInput) (*resourceResponse[externalImportBody], error) {
 		if input.Body.Artifacts == nil {
 			input.Body.Artifacts = []map[string]any{}
 		}
@@ -1433,7 +1425,7 @@ func (s *Server) registerImports() {
 		Limit            int    `query:"limit" minimum:"1" maximum:"100" default:"20"`
 		Cursor           string `query:"cursor"`
 	}
-	register(s.API, "list-imports", http.MethodGet, "/imports", "List external imports", userOrServiceSecurity("serviceImportsRead"), func(ctx context.Context, input *listInput) (*listResponse[externalImportBody], error) {
+	register(api, "list-imports", http.MethodGet, "/imports", "List external imports", userOrServiceSecurity("serviceImportsRead"), func(ctx context.Context, input *listInput) (*listResponse[externalImportBody], error) {
 		var items []persistence.ExternalImport
 		q := s.app.Store.DB.WithContext(ctx).Where("user_id = ?", principal(ctx).UserID)
 		if input.Status != "" {
@@ -1476,7 +1468,7 @@ func (s *Server) registerImports() {
 	type getInput struct {
 		ID string `path:"import_id"`
 	}
-	register(s.API, "get-import", http.MethodGet, "/imports/{import_id}", "Get external import", userOrServiceSecurity("serviceImportsRead"), func(ctx context.Context, input *getInput) (*resourceResponse[externalImportBody], error) {
+	register(api, "get-import", http.MethodGet, "/imports/{import_id}", "Get external import", userOrServiceSecurity("serviceImportsRead"), func(ctx context.Context, input *getInput) (*resourceResponse[externalImportBody], error) {
 		var item persistence.ExternalImport
 		if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&item).Error; err != nil {
 			return nil, mapError(err)
@@ -1508,7 +1500,7 @@ func (s *Server) registerImports() {
 		Import externalImportBody `json:"import"`
 		Task   persistence.Task   `json:"task"`
 	}
-	register(s.API, "convert-import", http.MethodPost, "/imports/{import_id}/conversion", "Convert external import to task", userSecurity(), func(ctx context.Context, input *conversionInput) (*resourceResponse[conversionBody], error) {
+	register(api, "convert-import", http.MethodPost, "/imports/{import_id}/conversion", "Convert external import to task", userSecurity(), func(ctx context.Context, input *conversionInput) (*resourceResponse[conversionBody], error) {
 		revision, err := revisionFromResourceETag(input.IfMatch, "import", input.ID)
 		if err != nil {
 			return nil, mapError(err)
@@ -1535,7 +1527,7 @@ func (s *Server) registerImports() {
 			Note string `json:"note,omitempty" maxLength:"2000"`
 		}
 	}
-	register(s.API, "reject-import", http.MethodPut, "/imports/{import_id}/rejection", "Reject external import", userSecurity(), func(ctx context.Context, input *rejectionInput) (*resourceResponse[externalImportBody], error) {
+	register(api, "reject-import", http.MethodPut, "/imports/{import_id}/rejection", "Reject external import", userSecurity(), func(ctx context.Context, input *rejectionInput) (*resourceResponse[externalImportBody], error) {
 		revision, err := revisionFromResourceETag(input.IfMatch, "import", input.ID)
 		if err != nil {
 			return nil, mapError(err)

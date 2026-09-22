@@ -27,9 +27,9 @@ type integrationStatusBody struct {
 	Services []integrationStatus `json:"services"`
 }
 
-func (s *Server) registerIntegrationStatus() {
+func (s integrationStatusRoutes) RegisterRoutes(api huma.API) {
 	type input struct{}
-	register(s.API, "integration-status", http.MethodGet, "/integrations/status", "Check configured FastResearch services", userSecurity(), func(ctx context.Context, input *input) (*itemResponse[integrationStatusBody], error) {
+	register(api, "integration-status", http.MethodGet, "/integrations/status", "Check configured FastResearch services", userSecurity(), func(ctx context.Context, input *input) (*itemResponse[integrationStatusBody], error) {
 		if principal(ctx).Role != "admin" {
 			return nil, huma.Error403Forbidden("administrator access required")
 		}
@@ -43,7 +43,7 @@ func (s *Server) registerIntegrationStatus() {
 	})
 }
 
-func (s *Server) probeHTTP(ctx context.Context, name, baseURL, healthPath string) integrationStatus {
+func (s RouteDeps) probeHTTP(ctx context.Context, name, baseURL, healthPath string) integrationStatus {
 	checkedAt := time.Now().UTC()
 	result := integrationStatus{Name: name, Kind: "http", Configured: baseURL != "", CheckedAt: checkedAt}
 	if baseURL == "" {
