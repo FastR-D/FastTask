@@ -1,5 +1,5 @@
 import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react'
-import { ApiError, idem, login, logout, request, token } from './api'
+import { ApiError, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, request, token } from './api'
 import type { Conversation, Device, Goal, Job, Message, Plan, PlanItem, Proposal, Task, TaskTree, User, WorkSession } from './types'
 import { fieldValue, useMduiEvent } from './mdui-react'
 import { Admin } from './Admin'
@@ -15,6 +15,22 @@ const BAR_TABS: Tab[] = ['today', 'goals', 'dialogue', 'jobs', 'review']
 
 export function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(token.get()))
+  // Cold start of an installed PWA has an empty in-memory access token but a
+  // persisted refresh token (pwa.md §4). Restore the session silently rather
+  // than flashing the login screen; if the refresh token is gone or rejected the
+  // user lands on Login as before.
+  const [restoring, setRestoring] = useState(() => !token.get() && hasRefreshToken())
+  useEffect(() => {
+    if (!restoring) return
+    let alive = true
+    ensureFreshAccessToken().then(restored => {
+      if (!alive) return
+      setAuthenticated(Boolean(restored))
+      setRestoring(false)
+    })
+    return () => { alive = false }
+  }, [restoring])
+  if (restoring) return null
   if (!authenticated) return <Login onLogin={() => setAuthenticated(true)} />
 	return <Workspace onLogout={async () => { await logout(); setAuthenticated(false) }} />
 }
@@ -48,7 +64,7 @@ function Login({ onLogin }: { onLogin: () => void }) {
         <mdui-text-field label="密码" type="password" toggle-password variant="outlined" required autocomplete="current-password" value={password} onChange={e => setPassword(fieldValue(e))}/>
         {error && <p className="login-error" role="alert"><mdui-icon name="error_outline"/>{error}</p>}
         <mdui-button variant="filled" full-width disabled={busy} loading={busy} onClick={submit}>{busy ? '正在验证…' : '开始今天'}</mdui-button>
-        <small>生产环境请使用管理员下发账号，登录状态仅在当前浏览器标签会话中保留。</small>
+        <small>生产环境请使用管理员下发账号，登录状态会安全地保留在此设备上，退出登录时一并清除。</small>
       </form>
     </div>
   </main>
