@@ -13,7 +13,7 @@ FastTask 是一个面向研究生和科研人员的长期目标推进系统。�
 - `result`、`step`、`time`、`minimum_action` 四类当日推进证据。
 - 当日计划项完成与底层任务完成严格分离。
 - 番茄和自由专注 Session，时长由服务端计算。
-- 文本对话、浏览器录音和异步转写作业。
+- 流式对话 Agent（assistant-transport SSE）、只读工具循环、任务树/计划提案与用户审批、断线续流；浏览器录音和异步转写作业。
 - 持久化 Agent Job、Attempt、Lease、Fencing Token、重试和取消。
 - 墨水屏独立只读 Token、ETag 和 `304 Not Modified`。
 - FastResearch Panel 只读摘要接口。
@@ -23,7 +23,7 @@ FastTask 是一个面向研究生和科研人员的长期目标推进系统。�
 - 可选 FastRead/FastWrite 健康探测，不影响 FastTask Readiness。
 - Gin + Huma v2，自动生成 OpenAPI 和 API 文档。
 - SQLite WAL、版本化 SQL Migration、一致性备份和恢复验证。
-- 响应式桌面/移动 Web 管理界面。
+- 响应式桌面/移动 Web 管理界面，可安装 PWA（离线只读今日计划与任务树快照）。
 
 ## 技术栈
 
@@ -32,14 +32,14 @@ FastTask 是一个面向研究生和科研人员的长期目标推进系统。�
 - GORM + SQLite WAL
 - gocron v2
 - JWT + Argon2id
-- React + TypeScript + Vite
+- React + TypeScript + Vite + mdui（Material Web 组件）+ assistant-ui（Agent 对话区）+ vite-plugin-pwa
 - Vitest + Go `testing` + `httptest`
 
 ## 目录
 
 ```text
 cmd/fasttask/              CLI 和服务入口
-internal/agent/            OpenAI-compatible LLM Adapter
+internal/agent/            ChatProvider 端口、OpenAI-compatible LLM Adapter 与 assistant-transport 协议（protocol/）
 internal/application/      用例、领域编排、Worker
 internal/domain/           核心业务规则
 internal/httpapi/          Gin + Huma HTTP 契约
@@ -143,13 +143,17 @@ OPENAI_TRANSCRIPTION_MODEL=<speech-to-text-model>
 ## CLI
 
 ```bash
-go run ./cmd/fasttask serve
+go run ./cmd/fasttask serve            # HTTP + Worker + Scheduler（默认全开）
+go run ./cmd/fasttask worker           # 仅持久化 Agent Worker，可独立扩缩
+go run ./cmd/fasttask scheduler        # 仅维护调度任务，可独立运行
 go run ./cmd/fasttask migrate
 go run ./cmd/fasttask doctor
 go run ./cmd/fasttask harden
 go run ./cmd/fasttask backup --output backups/manual.db
 go run ./cmd/fasttask version
 ```
+
+`serve` 默认随进程启动 Worker 与 Scheduler，可用 `--with-worker=false` / `--with-scheduler=false` 关闭；`worker` 与 `scheduler` 子命令则把这两个角色拆成独立进程（`doc/wiring.md` §3、§8），便于分别扩缩。整个运行时由 fx 组合根装配（`internal/bootstrap`）。
 
 `harden` 会生成新的生产 JWT/Panel Secret 和管理员密码，写入权限为 `0600` 的 `.env`，同步更新数据库管理员密码并撤销旧会话。命令不会把密钥或密码输出到终端；管理员密码可在服务器本机 `.env` 的 `FASTTASK_ADMIN_PASSWORD` 中查看。
 
@@ -278,7 +282,7 @@ bin/fasttask backup --output backups/fasttask.db
 
 ### Schema 版本
 
-当前 `ExpectedSchemaVersion = 4`（migration `000004_task_coords`，新增 `task_coords` 表）。
+当前 `ExpectedSchemaVersion = 5`（migration `000005_agent_runtime`，新增 Agent Run / Message / MessagePart / RunChunk 运行时表；`000004_task_coords` 新增 `task_coords` 表）。
 
 `serve` 启动时会自动执行 Migration。若用旧二进制创建的数据库直接跑新二进制而没有迁移，`/health/ready` 会返回 `503`，此时先执行：
 
@@ -322,15 +326,14 @@ tmux kill-session -t fasttask
 - [`doc/lens-impl.md`](doc/lens-impl.md)：决策透镜的可执行实现规格
 - [`doc/integration/README.md`](doc/integration/README.md)：FastInsight、FastNews、FastRead、FastWrite 对接与协作总览
 
-### 规划中的能力
+### Agent、组合根、前端与 PWA（已实现）
 
-以下文档描述尚未实现的能力，实现前请先读对应的 ADR：
+以下文档描述的能力均已落地并通过测试：
 
-- [`doc/agent.md`](doc/agent.md)：Agent 的产品判断、工具分级与审批边界
-- [`doc/agent-impl.md`](doc/agent-impl.md)：Agent 运行时的可执行实现规格（传输协议、数据模型、循环规则）
-- [`doc/wiring.md`](doc/wiring.md)：fx 组合根与 `application.App` 的拆分规格
-- [`doc/frontend.md`](doc/frontend.md)：前端架构与 mdui/assistant-ui 的交界契约
-- [`doc/pwa.md`](doc/pwa.md)：移动端 PWA 规格
-- [`doc/adr/README.md`](doc/adr/README.md)：架构决策记录索引
+- [`doc/agent.md`](doc/agent.md) / [`doc/agent-impl.md`](doc/agent-impl.md)：Agent 运行时——assistant-transport SSE 传输（`POST /api/v1/agent/{commands,resume,resume-state}`，按 ADR-0002 绕过 Huma）、只读工具循环、提案审批（决定经 `add-tool-result` 回传、HTTP 处理器同步 `ApplyProposal`）、断线续流与启动时中断回收；数据落在 migration `000005_agent_runtime`。
+- [`doc/wiring.md`](doc/wiring.md)：fx 组合根（`internal/bootstrap`）与 `application.App` 的服务拆分，`serve` / `worker` / `scheduler` 三个可独立运行的角色。
+- [`doc/frontend.md`](doc/frontend.md)：`web/src/agent/` 的 assistant-ui 对话区（`AgentChat` 挂载点、纯 converter、`makeAssistantToolUI` 审批卡片、协商录音格式的语音输入）。
+- [`doc/pwa.md`](doc/pwa.md)：可安装 PWA——manifest、injectManifest Service Worker（按用户隔离缓存键的离线只读快照）、access token 内存 + refresh token 持久化的认证模型。
+- [`doc/adr/README.md`](doc/adr/README.md)：架构决策记录索引。
 
-实现中的 HTTP DTO 和 OpenAPI 是字段级事实来源；文档用于解释产品语义、架构边界和演进决策。`doc/agent*.md`、`doc/wiring.md`、`doc/frontend.md` 和 `doc/pwa.md` 描述的是目标状态，与当前代码存在有意的差距。
+实现中的 HTTP DTO 和 OpenAPI 是字段级事实来源；文档用于解释产品语义、架构边界和演进决策。
