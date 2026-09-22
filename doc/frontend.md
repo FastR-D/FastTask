@@ -85,12 +85,15 @@ libfx 的类型一律不出 `harness/`（[`harness.md`](harness.md) §3.1 硬规
 
 ## 4. 运行时接线
 
-> 🟡 **接入多会话后本节的接法要包一层。** `AssistantTransportOptions` 里**没有 threadList**，
-> 多会话须用 `useRemoteThreadListRuntime({ runtimeHook: () => useAssistantTransportRuntime(...) })`，
-> 且 `runtimeHook` 按线程实例化——下方的 `api` / `resumeApi` / `resumeStateApi`
-> **必须改成线程作用域**。见 [`chat-features.md`](chat-features.md) §2.1。
+> 🟢 **多会话已接入，但没有按本节原先设想的方式包一层。** `AssistantTransportOptions` 里确实**没有 threadList**，
+> 而 `useRemoteThreadListRuntime` 的 `runtimeHook` 按线程实例化，会让「谁在驱动这个 run」变成每线程一份状态——
+> 与浏览器宿主的驱动逻辑（挂在 `onResponse` 上、收敛在本文件）冲突。实现改为：**线程目录自己维护**
+> （`web/src/agent/threads.ts`）+ **切换线程时换 key 重挂同一个 transport runtime**，挂载前用
+> `GET /agent/threads/{id}/state` 取服务端状态作为 `initialState`。因此下方的 `api` / `resumeApi` /
+> `resumeStateApi` **保持非线程作用域**，`threadId` 只走请求体一个来源。
+> 取舍与理由见 [`chat-features.md`](chat-features.md) §2.1.1。
 >
-> `adapters.attachments` 则确实在 `AssistantTransportOptions` 里，直接加即可（§4.2 那份文档）。
+> `adapters.attachments` 确实在 `AssistantTransportOptions` 里，已按此接入（🟢，见 [`chat-features.md`](chat-features.md) §4.2）。
 
 ```ts
 const runtime = useAssistantTransportRuntime({

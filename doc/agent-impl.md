@@ -129,7 +129,7 @@ data: [DONE]\n\n
 
 ### 2.7 服务端状态结构
 
-> 🟡 **[`chat-features.md`](chat-features.md) 会给 part 增加 `reasoning`（§3.3）与 `image`（§4.4）两种类型，并给消息加上 `thread_id` 归属（§2.3）。** 下方结构是当前已实现的版本。
+> 🟢 **[`chat-features.md`](chat-features.md) 给 part 增加了 `reasoning`（§3.3）与 `image`（§4.4）两种类型，并给消息加上了 `thread_id` 归属（§2.3）；migration `000006`–`000008` 已落地。** 下方结构是这两项之前的版本，仍适用于其余字段。
 
 
 ```jsonc
@@ -320,7 +320,7 @@ type ChatProvider interface {
 
 ## 6. 循环执行规则
 
-> 🟡 **本节的「谁驱动循环」部分已由 [ADR-0005](adr/0005-libfx-agent-harness.md) 取代。**
+> 🟢 **本节的「谁驱动循环」部分已由 [ADR-0005](adr/0005-libfx-agent-harness.md) 取代，取代方案已实现**（[`harness.md`](harness.md) §1.2、§5）。下方保留的是取代前的描述。
 > 循环驱动改由 libfx 承担，宿主在浏览器 WASM 或 Node sidecar 中运行，见 [`doc/harness.md`](harness.md)。
 >
 > **仍然有效、不因换 harness 而改变的部分：**
@@ -360,7 +360,7 @@ type ChatProvider interface {
 
 ## 7. 审批流
 
-> 🟡 **[ADR-0005](adr/0005-libfx-agent-harness.md) 改变了「审批后如何继续」，但不改变审批的语义与协议。**
+> 🟢 **[ADR-0005](adr/0005-libfx-agent-harness.md) 改变了「审批后如何继续」，但不改变审批的语义与协议；新时序已实现**（同一 turn 内长轮询等待，见 [`harness.md`](harness.md) §7）。
 > 决定仍然只走 `add-tool-result`（§7.1 不变），提案仍然不写业务表，`ApplyProposal` 仍在事务内重校验。
 > 变化是：审批不再「结束流 → `resumeRun` 起新流」，而是**在同一个 turn 内等待**——
 > 提案工具的 `execute` 长轮询到决定后才返回。见 [`doc/harness.md`](harness.md) §7。

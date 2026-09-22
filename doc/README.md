@@ -67,10 +67,10 @@ ADR-0001 与 `wiring.md` 的标题沿用历史写法，其中的「fx」指 uber
 
 | 文档 | 类型 | 首次 | 更新 | 说明 |
 |---|---|---|---|---|
-| [`arch.md`](arch.md) | 🟢🟡 混合 | 2026-08-09 | 2026-09-22 | 架构总纲。§7 领域模块、§8 数据模型、§11 事务与并发、§12 安全边界已实现；§6.1 的目录树是**目标结构，代码未按此排列** |
-| [`tech.md`](tech.md) | 🟢🟡 混合 | 2026-08-09 | 2026-09-22 | 技术选型与工程约定。§2.1 选型表的依赖均已落地（fx、assistant-ui、mdui、vite-plugin-pwa）；§4 目录同样是目标结构 |
+| [`arch.md`](arch.md) | 🟢🟡 混合 | 2026-08-09 | 2026-09-23 | 架构总纲。§7 领域模块、§8 数据模型、§11 事务与并发、§12 安全边界、§21 部署拓扑（含 sidecar 两种托管方式）已实现；§6.1 的目录树是**目标结构，代码未按此排列** |
+| [`tech.md`](tech.md) | 🟢🟡 混合 | 2026-08-09 | 2026-09-23 | 技术选型与工程约定。§2.1 选型表的依赖均已落地（fx、assistant-ui、mdui、vite-plugin-pwa、libfx、`@ai-sdk/*`）；§18.6/§20.1 的 CI 已在 `.github/workflows/ci.yml` 实现；§4 目录同样是目标结构 |
 | [`func.md`](func.md) | 🟢 已实现 | 2026-08-09 | 2026-09-15 | 产品功能语义与业务规则 |
-| [`interface.md`](interface.md) | 🟢 已实现 | 2026-08-09 | 2026-09-22 | HTTP 契约分组与协议约定。字段级以 OpenAPI 为准 |
+| [`interface.md`](interface.md) | 🟢 已实现 | 2026-08-09 | 2026-09-23 | HTTP 契约分组与协议约定，含 §20 的 harness / 线程 / 附件端点。字段级以 OpenAPI 为准 |
 
 ### 2.3 决策透镜（已实现）
 
@@ -88,10 +88,10 @@ ADR-0001 与 `wiring.md` 的标题沿用历史写法，其中的「fx」指 uber
 | 文档 | 类型 | 更新 | 行数 | 说明 |
 |---|---|---|---|---|
 | [`agent.md`](agent.md) | 🟢 已实现 | 2026-09-22 | 169 | Agent 产品判断：不变量、工具三级分类、审批边界 |
-| [`agent-impl.md`](agent-impl.md) | 🟢 已实现 | 2026-09-22 | 355 | 协议契约、数据模型、Run 状态机、循环规则、六阶段交付（phase A–F 全部落地）|
+| [`agent-impl.md`](agent-impl.md) | 🟢 已实现 | 2026-09-23 | 355 | 协议契约、数据模型、Run 状态机、循环规则、六阶段交付（phase A–F 全部落地）。§6「谁驱动循环」与 §7「审批后如何继续」已被 [ADR-0005](adr/0005-libfx-agent-harness.md) 取代，**取代方案亦已实现**，见 [`harness.md`](harness.md) §1.2、§7 |
 | [`wiring.md`](wiring.md) | 🟢 已实现 | 2026-09-22 | 149 | fx 组合根、`App` 拆分、八步迁移 + §9 + 三个独立角色命令 |
 | [`pwa.md`](pwa.md) | 🟢 已实现 | 2026-09-22 | 120 | PWA 规格与五个阻塞项（全部修复）|
-| [`frontend.md`](frontend.md) | 🟢 已实现 | 2026-09-22 | 132 | §1、§6 mdui 实测现状 + §2–§5 assistant-ui 接入（workflow A/B 均落地）|
+| [`frontend.md`](frontend.md) | 🟢 已实现 | 2026-09-23 | 132 | §1、§6 mdui 实测现状 + §2–§5 assistant-ui 接入（workflow A/B 均落地）。§4 的多会话接线按 [`chat-features.md`](chat-features.md) §2.1.1 的取舍实现（未用 `useRemoteThreadListRuntime`）|
 | [`harness.md`](harness.md) | 🟢 已实现 | 2026-09-23 | 964 | libfx 双宿主 harness：模式探测、AI Gateway 适配层、工具导出、审批长轮询、sidecar、八阶段交付。§16.6 是真机端到端验证记录 |
 | [`chat-features.md`](chat-features.md) | 🟢 已实现 | 2026-09-23 | 365 | 多会话持久化、思考过程、图片附件。§2.1.1 记录了多会话的实际接线取舍（未用 `useRemoteThreadListRuntime`）|
 

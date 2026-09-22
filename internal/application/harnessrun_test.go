@@ -745,3 +745,115 @@ func TestUnknownHarnessModeIsRejected(t *testing.T) {
 		t.Fatal("an unknown harness_mode was accepted")
 	}
 }
+
+// TestCancellationStopsAModelCallThatIsAlreadyStreaming is the second of §5.2's three channels, and the
+// one a fixture hides most easily: the cancellation must arrive while the model is still producing text.
+// §14.13 wants the run cancelled within five seconds; what that means here is that the proxy stops
+// forwarding an upstream stream it is halfway through, instead of delivering a completion for a run the
+// user has already withdrawn.
+func TestCancellationStopsAModelCallThatIsAlreadyStreaming(t *testing.T) {
+	upstream := newFakeUpstream(t, scriptedTurn{text: strings.Repeat("一段很长的回答，", 40)})
+	// Slow enough that the stream is still open when the proxy's next cancellation check falls due, and
+	// fast enough that the test does not spend its life waiting: the check interval is 500ms.
+	upstream.chunkDelay = 40 * time.Millisecond
+	f, svc := harnessFixture(t, upstream)
+	runID := submitHarnessRun(t, svc, f.store, f.user.ID, "取消我")
+	host := newTestHost(t, svc, upstream, f.user.ID, runID)
+
+	calls := make(chan error, 1)
+	go func() {
+		_, err := host.modelCall("取消我")
+		calls <- err
+	}()
+
+	// Cancel only once the stream is genuinely in flight, otherwise this tests nothing.
+	deadline := time.Now().Add(5 * time.Second)
+	for upstream.chunksWritten() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := upstream.chunksWritten(); got < 2 {
+		t.Fatalf("the upstream only wrote %d chunks; the stream never got going", got)
+	}
+
+	if err := svc.RequestCancellation(context.Background(), f.user.ID, runID); err != nil {
+		t.Fatalf("RequestCancellation: %v", err)
+	}
+	// The model keeps talking. The proxy has to notice on its own and cut the copy off.
+
+	select {
+	case err := <-calls:
+		if err == nil {
+			t.Fatal("a cancelled run kept forwarding the model's stream to the host")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("§14.13: the stream was still open five seconds after the cancellation")
+	}
+
+	status := host.runStatus().Status
+	if status != persistence.RunCancelling && status != persistence.RunCancelled {
+		t.Fatalf("run status=%q, want cancelling or cancelled", status)
+	}
+	// What the model said before the cancellation is kept rather than thrown away: a partial transcript is
+	// still the record of what happened (agent-impl.md §4.2).
+	if parts := assistantParts(t, svc, f.user.ID, runID); len(parts) == 0 {
+		t.Fatal("the partial transcript was discarded")
+	}
+}
+
+// TestCancellationReleasesAnApprovalWait is the third moment §14.13 names: a run parked on a human
+// decision. The wait is a long poll the host is blocking on, so a cancellation that only wrote a flag
+// would leave that host hanging until its own timeout — and the proposal must survive, because nothing
+// was applied and the user may still want to see what was asked (§7).
+func TestCancellationReleasesAnApprovalWait(t *testing.T) {
+	f := newFixture(t)
+	upstream := newFakeUpstream(t, proposalScript(f.goal.ID, "不会到达")...)
+	clock := newTestClock()
+	svc := NewAgentService(f.app, WithCredentialsResolver(upstream.resolver()), WithClock(clock.At))
+	runID := submitHarnessRun(t, svc, f.store, f.user.ID, "帮我拆解论文下一步")
+	host := newTestHost(t, svc, upstream, f.user.ID, runID)
+
+	if outcomes := host.modelTurn(); len(outcomes) != 1 || outcomes[0].Status != "pending" {
+		t.Fatalf("outcomes=%#v, want one parked proposal", outcomes)
+	}
+	if status := host.runStatus().Status; status != persistence.RunAwaitingApproval {
+		t.Fatalf("run status=%q, want awaiting_approval", status)
+	}
+	proposalID := pendingProposalID(t, f.store, f.user.ID)
+
+	waits := make(chan ApprovalWait, 1)
+	go func() {
+		wait, err := svc.WaitForApproval(context.Background(), host.principal, proposalID, 200*time.Millisecond)
+		if err != nil {
+			waits <- ApprovalWait{Status: "error: " + err.Error()}
+			return
+		}
+		waits <- wait
+	}()
+	// Let the poll start, so the release is observed rather than raced.
+	time.Sleep(300 * time.Millisecond)
+
+	if err := svc.RequestCancellation(context.Background(), f.user.ID, runID); err != nil {
+		t.Fatalf("RequestCancellation: %v", err)
+	}
+
+	select {
+	case wait := <-waits:
+		if wait.Status != "cancelled" {
+			t.Fatalf("approval wait=%#v, want it released as cancelled", wait)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("§14.13: the approval wait was still held five seconds after the cancellation")
+	}
+
+	// The host will not confirm this one, so the reaper finishes it (§5.2).
+	clock.Advance(HarnessCancelGrace * 2)
+	if _, err := svc.ReapHarnessRuns(context.Background()); err != nil {
+		t.Fatalf("ReapHarnessRuns: %v", err)
+	}
+	if status := host.runStatus().Status; status != persistence.RunCancelled {
+		t.Fatalf("run status=%q, want cancelled", status)
+	}
+	if got := countProposalsByStatus(t, f.store, f.user.ID, "pending"); got != 1 {
+		t.Fatalf("pending proposals=%d, want the question kept for the user (§7)", got)
+	}
+}
