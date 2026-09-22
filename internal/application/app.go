@@ -29,17 +29,24 @@ var (
 	ErrForbidden            = errors.New("administrator permission required")
 )
 
+// App is the application aggregate. wiring.md §4 splits it into focused
+// per-aggregate services; step 3 extracts ProviderService and LensService, which
+// App embeds so existing call sites resolve them by promotion while the split
+// proceeds (steps 4-6 extract the remaining aggregates). The embedded services are
+// independently constructible plain structs (wiring.md §2 rule 2), so they can be
+// built and unit-tested without App or fx.
 type App struct {
-	Store     *persistence.Store
-	secretKey []byte
+	Store *persistence.Store
+	*ProviderService
+	*LensService
 }
 
 func New(store *persistence.Store) *App {
-	return &App{Store: store}
+	return &App{Store: store, ProviderService: NewProviderService(store, nil), LensService: NewLensService(store)}
 }
 
 func NewWithSecret(store *persistence.Store, secret string) *App {
-	return &App{Store: store, secretKey: deriveSecretKey(secret)}
+	return &App{Store: store, ProviderService: NewProviderService(store, deriveSecretKey(secret)), LensService: NewLensService(store)}
 }
 
 func (a *App) CreateGoal(ctx context.Context, userID string, goal *persistence.Goal) error {

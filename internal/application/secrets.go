@@ -16,7 +16,7 @@ func deriveSecretKey(secret string) []byte {
 	return key[:]
 }
 
-func (a *App) encryptSecret(value string) (string, error) {
+func (a *ProviderService) encryptSecret(value string) (string, error) {
 	if value == "" {
 		return "", nil
 	}
@@ -35,7 +35,7 @@ func (a *App) encryptSecret(value string) (string, error) {
 	return "aesgcm.v1:" + encoded, nil
 }
 
-func (a *App) decryptSecret(value string) (string, error) {
+func (a *ProviderService) decryptSecret(value string) (string, error) {
 	if value == "" {
 		return "", nil
 	}
@@ -65,7 +65,7 @@ func (a *App) decryptSecret(value string) (string, error) {
 	return string(plain), nil
 }
 
-func (a *App) secretGCM() (cipher.AEAD, error) {
+func (a *ProviderService) secretGCM() (cipher.AEAD, error) {
 	block, err := aes.NewCipher(a.secretKey)
 	if err != nil {
 		return nil, err

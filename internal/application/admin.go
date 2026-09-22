@@ -80,18 +80,7 @@ type AuditView struct {
 }
 
 func (a *App) CurrentAdmin(ctx context.Context) (persistence.User, error) {
-	p, ok := platformauth.PrincipalFromContext(ctx)
-	if !ok || p.UserID == "" || p.Role != "admin" {
-		return persistence.User{}, ErrForbidden
-	}
-	var user persistence.User
-	if err := a.Store.DB.WithContext(ctx).First(&user, "id = ?", p.UserID).Error; err != nil {
-		return persistence.User{}, notFound(err)
-	}
-	if user.Role != "admin" || user.Status != "active" {
-		return persistence.User{}, ErrForbidden
-	}
-	return user, nil
+	return currentAdmin(ctx, a.Store)
 }
 
 func (a *App) ListUsers(ctx context.Context, query, status string) ([]persistence.User, error) {
@@ -262,7 +251,7 @@ func (a *App) RevokeUserSessions(ctx context.Context, actor persistence.User, id
 	})
 }
 
-func (a *App) ListModelProviders(ctx context.Context) ([]persistence.ModelProvider, error) {
+func (a *ProviderService) ListModelProviders(ctx context.Context) ([]persistence.ModelProvider, error) {
 	var providers []persistence.ModelProvider
 	err := a.Store.DB.WithContext(ctx).Order("is_default DESC, updated_at DESC").Find(&providers).Error
 	return providers, err
@@ -309,7 +298,7 @@ func (a *App) ListAuditEvents(ctx context.Context, action string, limit int) ([]
 	return views, nil
 }
 
-func (a *App) CreateModelProvider(ctx context.Context, actor persistence.User, command ModelProviderCommand) (*persistence.ModelProvider, error) {
+func (a *ProviderService) CreateModelProvider(ctx context.Context, actor persistence.User, command ModelProviderCommand) (*persistence.ModelProvider, error) {
 	if err := validateProviderCommand(command); err != nil {
 		return nil, err
 	}
@@ -338,7 +327,7 @@ func (a *App) CreateModelProvider(ctx context.Context, actor persistence.User, c
 	return provider, nil
 }
 
-func (a *App) UpdateModelProvider(ctx context.Context, actor persistence.User, id string, expected int, command UpdateModelProviderCommand) (*persistence.ModelProvider, error) {
+func (a *ProviderService) UpdateModelProvider(ctx context.Context, actor persistence.User, id string, expected int, command UpdateModelProviderCommand) (*persistence.ModelProvider, error) {
 	var provider persistence.ModelProvider
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		if err := tx.First(&provider, "id = ?", id).Error; err != nil {
@@ -423,7 +412,7 @@ func (a *App) UpdateModelProvider(ctx context.Context, actor persistence.User, i
 	return &provider, nil
 }
 
-func (a *App) ActivateModelProvider(ctx context.Context, actor persistence.User, id string) (*persistence.ModelProvider, error) {
+func (a *ProviderService) ActivateModelProvider(ctx context.Context, actor persistence.User, id string) (*persistence.ModelProvider, error) {
 	var provider persistence.ModelProvider
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		if err := tx.First(&provider, "id = ?", id).Error; err != nil {
@@ -450,7 +439,7 @@ func (a *App) ActivateModelProvider(ctx context.Context, actor persistence.User,
 	return &provider, nil
 }
 
-func (a *App) DeleteModelProvider(ctx context.Context, actor persistence.User, id string) error {
+func (a *ProviderService) DeleteModelProvider(ctx context.Context, actor persistence.User, id string) error {
 	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		var provider persistence.ModelProvider
 		if err := tx.First(&provider, "id = ?", id).Error; err != nil {
@@ -466,8 +455,8 @@ func (a *App) DeleteModelProvider(ctx context.Context, actor persistence.User, i
 	})
 }
 
-func (a *App) VerifyModelProvider(ctx context.Context, actor persistence.User, id string) (string, error) {
-	if _, err := a.CurrentAdmin(ctx); err != nil {
+func (a *ProviderService) VerifyModelProvider(ctx context.Context, actor persistence.User, id string) (string, error) {
+	if _, err := currentAdmin(ctx, a.Store); err != nil {
 		return "", err
 	}
 	var provider persistence.ModelProvider
@@ -484,7 +473,7 @@ func (a *App) VerifyModelProvider(ctx context.Context, actor persistence.User, i
 	return provider.Name, nil
 }
 
-func (a *App) ActiveProviderRuntime(ctx context.Context) (*ProviderRuntimeConfig, error) {
+func (a *ProviderService) ActiveProviderRuntime(ctx context.Context) (*ProviderRuntimeConfig, error) {
 	var provider persistence.ModelProvider
 	err := a.Store.DB.WithContext(ctx).Where("status = ?", "active").Order("is_default DESC, updated_at DESC").First(&provider).Error
 	if persistence.IsNotFound(err) {
@@ -505,7 +494,7 @@ func (a *App) ActiveProviderRuntime(ctx context.Context) (*ProviderRuntimeConfig
 	return runtime, nil
 }
 
-func (a *App) encryptProviderKey(key string) (string, string, error) {
+func (a *ProviderService) encryptProviderKey(key string) (string, string, error) {
 	key = strings.TrimSpace(key)
 	if len(key) < 12 {
 		return "", "", ErrValidation
@@ -521,11 +510,11 @@ func (a *App) encryptProviderKey(key string) (string, string, error) {
 	return ciphertext, hint, nil
 }
 
-func (a *App) EncryptProviderKey(key string) (string, string, error) {
+func (a *ProviderService) EncryptProviderKey(key string) (string, string, error) {
 	return a.encryptProviderKey(key)
 }
 
-func (a *App) DecryptProviderKey(ciphertext string) (string, error) {
+func (a *ProviderService) DecryptProviderKey(ciphertext string) (string, error) {
 	return a.decryptSecret(ciphertext)
 }
 

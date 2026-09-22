@@ -20,11 +20,25 @@ const (
 	maxStalledTasks        = 5
 )
 
+// LensService owns the coordinate lens write and the weekly-review / goal-map read
+// models (wiring.md §4, lens.md). It is split from the App facade so the agent
+// readonly tools and the HTTP lens routes depend on a focused service. The
+// constructor is a plain Go function (wiring.md §2 rule 2), callable and testable
+// without fx.
+type LensService struct {
+	Store *persistence.Store
+}
+
+// NewLensService builds the lens read/write-model service.
+func NewLensService(store *persistence.Store) *LensService {
+	return &LensService{Store: store}
+}
+
 // SetTaskCoord 是 (task_id, lens) 上的 upsert，用户写入一律 source=user、pinned=true。
 //
 // expected < 0 表示调用方没有提供 If-Match：无坐标时创建（revision=1），已有坐标返回 ErrPrecondition。
 // expected >= 0 表示提供了 If-Match：必须与现有 revision 相等，坐标不存在返回 ErrNotFound。
-func (a *App) SetTaskCoord(ctx context.Context, userID, taskID, lens string, x, y int, rationale string, expected int) (*persistence.TaskCoord, error) {
+func (a *LensService) SetTaskCoord(ctx context.Context, userID, taskID, lens string, x, y int, rationale string, expected int) (*persistence.TaskCoord, error) {
 	lens = normalizeLens(lens)
 	if !domain.ValidLens(lens) {
 		return nil, domain.ErrLens
@@ -357,7 +371,7 @@ type WeeklyReview struct {
 }
 
 // WeeklyReview 实时聚合一周的确定性指标。只读，不落库，不同步调用 LLM。
-func (a *App) WeeklyReview(ctx context.Context, userID, week, timezone string) (*WeeklyReview, error) {
+func (a *LensService) WeeklyReview(ctx context.Context, userID, week, timezone string) (*WeeklyReview, error) {
 	db := a.Store.DB.WithContext(ctx)
 	var user persistence.User
 	if err := db.Where("id = ?", userID).First(&user).Error; err != nil {
@@ -582,7 +596,7 @@ type GoalMap struct {
 }
 
 // GoalMap 返回一个 goal 的全部叶子任务及其坐标、累计有效专注分钟和距上次实质推进天数。
-func (a *App) GoalMap(ctx context.Context, userID, goalID, lens string) (*GoalMap, error) {
+func (a *LensService) GoalMap(ctx context.Context, userID, goalID, lens string) (*GoalMap, error) {
 	lens = normalizeLens(lens)
 	if !domain.ValidLens(lens) {
 		return nil, domain.ErrLens
