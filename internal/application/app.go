@@ -30,11 +30,12 @@ var (
 )
 
 // App is the application aggregate. wiring.md §4 splits it into focused
-// per-aggregate services; step 3 extracts ProviderService and LensService, which
-// App embeds so existing call sites resolve them by promotion while the split
-// proceeds (steps 4-6 extract the remaining aggregates). The embedded services are
-// independently constructible plain structs (wiring.md §2 rule 2), so they can be
-// built and unit-tested without App or fx.
+// per-aggregate services, which App embeds so existing call sites resolve them by
+// promotion while the split proceeds. Each embedded service is an independently
+// constructible plain struct (wiring.md §2 rule 2), so it can be built and
+// unit-tested without App or fx. After step 6 App declares no domain methods of
+// its own — only the agent readonly-tool adapters remain (§9: no struct >15
+// methods); the cross-aggregate compositions live in the services (§4.1).
 type App struct {
 	Store *persistence.Store
 	*ProviderService
@@ -43,6 +44,9 @@ type App struct {
 	*IntegrationService
 	*AdminService
 	*JobService
+	*GoalService
+	*PlanService
+	*ProgressService
 }
 
 func New(store *persistence.Store) *App {
@@ -59,20 +63,28 @@ func NewWithSecret(store *persistence.Store, secret string, materializers ...Job
 
 // newApp assembles the aggregate with the given (possibly nil) provider key. It
 // preserves the historical New vs NewWithSecret behaviour exactly: New passes a
-// nil key (encryption fails closed), NewWithSecret always derives one.
+// nil key (encryption fails closed), NewWithSecret always derives one. Services
+// with cross-aggregate composition (§4.1) are constructed in dependency order:
+// IntegrationService needs GoalService.createTaskTx, ProgressService needs
+// PlanService.satisfyItemTx.
 func newApp(store *persistence.Store, secretKey []byte, materializers []JobMaterializer) *App {
+	goals := NewGoalService(store)
+	plans := NewPlanService(store)
 	return &App{
 		Store:              store,
 		ProviderService:    NewProviderService(store, secretKey),
 		LensService:        NewLensService(store),
 		DeviceService:      NewDeviceService(store),
-		IntegrationService: NewIntegrationService(store),
+		IntegrationService: NewIntegrationService(store, goals),
 		AdminService:       NewAdminService(store),
 		JobService:         NewJobService(store, materializers),
+		GoalService:        goals,
+		PlanService:        plans,
+		ProgressService:    NewProgressService(store, plans),
 	}
 }
 
-func (a *App) CreateGoal(ctx context.Context, userID string, goal *persistence.Goal) error {
+func (a *GoalService) CreateGoal(ctx context.Context, userID string, goal *persistence.Goal) error {
 	now := persistence.Now()
 	goal.ID, goal.UserID, goal.Status, goal.Revision = persistence.NewID("goal"), userID, "active", 1
 	goal.CreatedAt, goal.UpdatedAt = now, now
@@ -84,7 +96,7 @@ func (a *App) CreateGoal(ctx context.Context, userID string, goal *persistence.G
 	})
 }
 
-func (a *App) UpdateGoal(ctx context.Context, userID, id string, expected int, changes map[string]any) (*persistence.Goal, error) {
+func (a *GoalService) UpdateGoal(ctx context.Context, userID, id string, expected int, changes map[string]any) (*persistence.Goal, error) {
 	var goal persistence.Goal
 	if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).First(&goal).Error; err != nil {
 		return nil, notFound(err)
@@ -111,9 +123,9 @@ func (a *App) UpdateGoal(ctx context.Context, userID, id string, expected int, c
 	return &goal, nil
 }
 
-func (a *App) CreateTask(ctx context.Context, userID string, task *persistence.Task) error {
+func (a *GoalService) CreateTask(ctx context.Context, userID string, task *persistence.Task) error {
 	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		return createTaskTx(tx, userID, task, "manual task creation", "user")
+		return a.createTaskTx(tx, userID, task, "manual task creation", "user")
 	})
 }
 
@@ -212,7 +224,9 @@ func (a *IntegrationService) ConvertExternalImport(ctx context.Context, userID, 
 				command.Description = item.Description
 			}
 			task = persistence.Task{GoalID: command.GoalID, ParentID: command.ParentID, Type: command.Type, Title: command.Title, Description: command.Description, SuccessCriteria: command.SuccessCriteria, MinimumAction: command.MinimumAction, Priority: command.Priority, EstimateMinutes: command.EstimateMinutes, Position: command.Position}
-			if err := createTaskTx(tx, userID, &task, "external import converted", "external_import"); err != nil {
+			// §4.1: Integration reads the import, Goal writes the task — composed in
+			// this transaction by calling GoalService's tx-taking domain function.
+			if err := a.Goals.createTaskTx(tx, userID, &task, "external import converted", "external_import"); err != nil {
 				return err
 			}
 		}
@@ -266,7 +280,7 @@ func (a *IntegrationService) RejectExternalImport(ctx context.Context, userID, i
 	return &item, nil
 }
 
-func (a *App) UpdateTask(ctx context.Context, userID, id string, expected int, changes map[string]any) (*persistence.Task, error) {
+func (a *GoalService) UpdateTask(ctx context.Context, userID, id string, expected int, changes map[string]any) (*persistence.Task, error) {
 	var task persistence.Task
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&task).Error; err != nil {
@@ -305,7 +319,7 @@ func (a *App) UpdateTask(ctx context.Context, userID, id string, expected int, c
 		if result.RowsAffected != 1 {
 			return ErrRevision
 		}
-		return snapshotTaskTree(tx, userID, task.GoalID, "manual task update", "user")
+		return a.snapshotTaskTree(tx, userID, task.GoalID, "manual task update", "user")
 	})
 	if err != nil {
 		return nil, err
@@ -316,7 +330,7 @@ func (a *App) UpdateTask(ctx context.Context, userID, id string, expected int, c
 	return &task, nil
 }
 
-func (a *App) ReplanDailyPlan(ctx context.Context, userID, localDate, timezone string, taskIDs []string, available, expected int) (*persistence.DailyPlan, []persistence.DailyPlanItem, error) {
+func (a *PlanService) ReplanDailyPlan(ctx context.Context, userID, localDate, timezone string, taskIDs []string, available, expected int) (*persistence.DailyPlan, []persistence.DailyPlanItem, error) {
 	var plan persistence.DailyPlan
 	var resultItems []persistence.DailyPlanItem
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
@@ -414,7 +428,7 @@ func (a *App) ReplanDailyPlan(ctx context.Context, userID, localDate, timezone s
 	return &plan, resultItems, nil
 }
 
-func (a *App) CloseDailyPlan(ctx context.Context, userID, planID string, expected int, status string) (*persistence.DailyPlan, error) {
+func (a *PlanService) CloseDailyPlan(ctx context.Context, userID, planID string, expected int, status string) (*persistence.DailyPlan, error) {
 	var plan persistence.DailyPlan
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		if err := tx.Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
@@ -450,7 +464,7 @@ func (a *App) CloseDailyPlan(ctx context.Context, userID, planID string, expecte
 	return &plan, nil
 }
 
-func (a *App) CompleteTask(ctx context.Context, userID, id string, expected int, eventType, summary string, reopen bool) (*persistence.Task, error) {
+func (a *GoalService) CompleteTask(ctx context.Context, userID, id string, expected int, eventType, summary string, reopen bool) (*persistence.Task, error) {
 	var task persistence.Task
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&task).Error; err != nil {
@@ -479,7 +493,7 @@ func (a *App) CompleteTask(ctx context.Context, userID, id string, expected int,
 		if err := tx.Create(&event).Error; err != nil {
 			return err
 		}
-		if err := snapshotTaskTree(tx, userID, task.GoalID, eventType, "user"); err != nil {
+		if err := a.snapshotTaskTree(tx, userID, task.GoalID, eventType, "user"); err != nil {
 			return err
 		}
 		return createOutbox(tx, userID, "task.status_changed", map[string]any{"task_id": id, "status": status})
@@ -493,7 +507,7 @@ func (a *App) CompleteTask(ctx context.Context, userID, id string, expected int,
 	return &task, nil
 }
 
-func (a *App) CreateDailyPlan(ctx context.Context, userID, localDate, timezone string, taskIDs []string, available int) (*persistence.DailyPlan, []persistence.DailyPlanItem, error) {
+func (a *PlanService) CreateDailyPlan(ctx context.Context, userID, localDate, timezone string, taskIDs []string, available int) (*persistence.DailyPlan, []persistence.DailyPlanItem, error) {
 	var tasks []persistence.Task
 	query := a.Store.DB.WithContext(ctx).Table("tasks").Select("tasks.*").Joins("JOIN goals ON goals.id = tasks.goal_id").Where("tasks.user_id = ? AND goals.status = 'active'", userID)
 	if len(taskIDs) > 0 {
@@ -543,7 +557,7 @@ func (a *App) CreateDailyPlan(ctx context.Context, userID, localDate, timezone s
 	return &plan, items, nil
 }
 
-func (a *App) AddPlanItem(ctx context.Context, userID, planID string, expectedPlan int, item *persistence.DailyPlanItem) error {
+func (a *PlanService) AddPlanItem(ctx context.Context, userID, planID string, expectedPlan int, item *persistence.DailyPlanItem) error {
 	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		var plan persistence.DailyPlan
 		if err := tx.Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
@@ -603,9 +617,24 @@ func (a *App) AddPlanItem(ctx context.Context, userID, planID string, expectedPl
 	})
 }
 
-func (a *App) CompletePlanItem(ctx context.Context, userID, itemID string, expected int, completionType, summary string, sessionIDs []string) (*persistence.DailyPlanItem, error) {
+// satisfyItemTx marks a plan item satisfied inside the caller's transaction. It is
+// the PlanService domain function that ProgressService.CompletePlanItem composes
+// through the TxManager port (wiring.md §4.1: Progress writes the event, Plan
+// changes the item status, and both commit in one transaction).
+func (a *PlanService) satisfyItemTx(tx *gorm.DB, itemID string, expected int, completionType, summary string, now time.Time) error {
+	result := tx.Model(&persistence.DailyPlanItem{}).Where("id = ? AND revision = ?", itemID, expected).Updates(map[string]any{"status": "satisfied", "completion_type": completionType, "completion_summary": summary, "revision": expected + 1, "updated_at": now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrRevision
+	}
+	return nil
+}
+
+func (a *ProgressService) CompletePlanItem(ctx context.Context, userID, itemID string, expected int, completionType, summary string, sessionIDs []string) (*persistence.DailyPlanItem, error) {
 	var item persistence.DailyPlanItem
-	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+	err := a.Store.WithTx(ctx, func(tx *gorm.DB) error {
 		if err := tx.Where("id = ? AND user_id = ?", itemID, userID).First(&item).Error; err != nil {
 			return notFound(err)
 		}
@@ -634,12 +663,11 @@ func (a *App) CompletePlanItem(ctx context.Context, userID, itemID string, expec
 			return ErrValidation
 		}
 		now := persistence.Now()
-		result := tx.Model(&persistence.DailyPlanItem{}).Where("id = ? AND revision = ?", itemID, expected).Updates(map[string]any{"status": "satisfied", "completion_type": completionType, "completion_summary": summary, "revision": expected + 1, "updated_at": now})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return ErrRevision
+		// §4.1: the plan-item status change is a PlanService domain function; this
+		// ProgressService use case composes it inside the SAME transaction (opened
+		// via the TxManager port) so the event write and the status change are atomic.
+		if err := a.Plans.satisfyItemTx(tx, itemID, expected, completionType, summary, now); err != nil {
+			return err
 		}
 		event := persistence.ProgressEvent{ID: persistence.NewID("progress"), UserID: userID, TaskID: item.TaskID, PlanItemID: &item.ID, Type: completionType, Summary: summary, EvidenceJSON: "[]", OccurredAt: now, CreatedAt: now}
 		if err := tx.Create(&event).Error; err != nil {
@@ -656,7 +684,7 @@ func (a *App) CompletePlanItem(ctx context.Context, userID, itemID string, expec
 	return &item, nil
 }
 
-func (a *App) UpdatePlanItem(ctx context.Context, userID, planID, itemID string, expected int, changes map[string]any) (*persistence.DailyPlanItem, error) {
+func (a *PlanService) UpdatePlanItem(ctx context.Context, userID, planID, itemID string, expected int, changes map[string]any) (*persistence.DailyPlanItem, error) {
 	var item persistence.DailyPlanItem
 	if status, exists := changes["status"].(string); exists && status != "skipped" {
 		return nil, ErrValidation
@@ -675,7 +703,7 @@ func (a *App) UpdatePlanItem(ctx context.Context, userID, planID, itemID string,
 	return &item, nil
 }
 
-func (a *App) StartSession(ctx context.Context, userID string, session *persistence.WorkSession) error {
+func (a *ProgressService) StartSession(ctx context.Context, userID string, session *persistence.WorkSession) error {
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		var task persistence.Task
 		if err := tx.Where("id = ? AND user_id = ?", session.TaskID, userID).First(&task).Error; err != nil {
@@ -713,7 +741,7 @@ func (a *App) StartSession(ctx context.Context, userID string, session *persiste
 	return nil
 }
 
-func (a *App) TransitionSession(ctx context.Context, userID, id string, expected int, action, outcome, note string, at time.Time) (*persistence.WorkSession, error) {
+func (a *ProgressService) TransitionSession(ctx context.Context, userID, id string, expected int, action, outcome, note string, at time.Time) (*persistence.WorkSession, error) {
 	var session persistence.WorkSession
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&session).Error; err != nil {
@@ -779,7 +807,7 @@ func (a *App) TransitionSession(ctx context.Context, userID, id string, expected
 	return &session, nil
 }
 
-func (a *App) RejectProposal(ctx context.Context, userID, goalID, proposalID string, expected int) (*persistence.Proposal, error) {
+func (a *GoalService) RejectProposal(ctx context.Context, userID, goalID, proposalID string, expected int) (*persistence.Proposal, error) {
 	var proposal persistence.Proposal
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		if err := tx.Where("id = ? AND goal_id = ? AND user_id = ? AND status = 'pending'", proposalID, goalID, userID).First(&proposal).Error; err != nil {
@@ -866,7 +894,7 @@ func (a *DeviceService) DeviceByToken(ctx context.Context, token string) (*persi
 	return &device, nil
 }
 
-func (a *App) ApplyProposal(ctx context.Context, userID string, proposal *persistence.Proposal, patches []map[string]any, expectedTreeRevision ...int) (int, error) {
+func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal *persistence.Proposal, patches []map[string]any, expectedTreeRevision ...int) (int, error) {
 	created := 0
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		var current persistence.Proposal
@@ -1012,7 +1040,7 @@ func (a *App) ApplyProposal(ctx context.Context, userID string, proposal *persis
 				return ErrValidation
 			}
 		}
-		if err := snapshotTaskTree(tx, userID, current.GoalID, "agent proposal applied", "agent"); err != nil {
+		if err := a.snapshotTaskTree(tx, userID, current.GoalID, "agent proposal applied", "agent"); err != nil {
 			return err
 		}
 		result := tx.Model(&persistence.Proposal{}).Where("id = ? AND revision = ? AND status = 'pending'", current.ID, current.Revision).Updates(map[string]any{"status": "applied", "revision": current.Revision + 1, "updated_at": now})
@@ -1054,7 +1082,7 @@ func intValue(value any) int {
 	}
 }
 
-func snapshotTaskTree(tx *gorm.DB, userID, goalID, reason, source string) error {
+func (a *GoalService) snapshotTaskTree(tx *gorm.DB, userID, goalID, reason, source string) error {
 	var tasks []persistence.Task
 	if err := tx.Where("goal_id = ? AND user_id = ?", goalID, userID).Order("position, id").Find(&tasks).Error; err != nil {
 		return err
@@ -1068,7 +1096,7 @@ func snapshotTaskTree(tx *gorm.DB, userID, goalID, reason, source string) error 
 	return tx.Create(&record).Error
 }
 
-func createTaskTx(tx *gorm.DB, userID string, task *persistence.Task, reason, source string) error {
+func (a *GoalService) createTaskTx(tx *gorm.DB, userID string, task *persistence.Task, reason, source string) error {
 	var goal persistence.Goal
 	if err := tx.Where("id = ? AND user_id = ?", task.GoalID, userID).First(&goal).Error; err != nil {
 		return notFound(err)
@@ -1104,7 +1132,7 @@ func createTaskTx(tx *gorm.DB, userID string, task *persistence.Task, reason, so
 	if err := tx.Create(task).Error; err != nil {
 		return err
 	}
-	return snapshotTaskTree(tx, userID, task.GoalID, reason, source)
+	return a.snapshotTaskTree(tx, userID, task.GoalID, reason, source)
 }
 
 func createOutbox(tx *gorm.DB, userID, eventType string, payload any) error {
