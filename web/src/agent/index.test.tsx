@@ -85,3 +85,38 @@ describe('AgentChat restore', () => {
     expect(screen.queryByText('正在载入对话…')).not.toBeInTheDocument()
   })
 })
+
+// Phase G's exit criterion (doc/harness.md §9.3): offline, the conversation entry is greyed out and says
+// why, instead of accepting a message that cannot reach a model.
+describe('AgentChat offline', () => {
+  const setOnline = (value: boolean) => Object.defineProperty(navigator, 'onLine', { value, configurable: true })
+
+  it('disables the composer and says that a new conversation needs a network', async () => {
+    setOnline(false)
+    try {
+      requestMock.mockResolvedValue({ data: { state: restored('离线之前的问题') }, etag: null })
+      const { container } = render(<AgentChat goalId={null} />)
+      // The cached conversation is still readable — that is the point of the PWA snapshot.
+      expect(await screen.findByText('离线之前的问题')).toBeInTheDocument()
+
+      const composer = container.querySelector('.agent-composer')
+      expect(composer).toHaveClass('offline')
+      const input = container.querySelector('.agent-input') as HTMLTextAreaElement | null
+      expect(input).not.toBeNull()
+      expect(input?.disabled).toBe(true)
+      expect(input?.placeholder).toBe('离线中，联网后才能继续对话')
+    } finally {
+      setOnline(true)
+    }
+  })
+
+  it('takes the entry back once the device is online again', async () => {
+    setOnline(true)
+    requestMock.mockResolvedValue({ data: { state: restored('在线的问题') }, etag: null })
+    const { container } = render(<AgentChat goalId={null} />)
+    await screen.findByText('在线的问题')
+    const input = container.querySelector('.agent-input') as HTMLTextAreaElement | null
+    expect(input?.disabled).toBe(false)
+    expect(container.querySelector('.agent-composer')).not.toHaveClass('offline')
+  })
+})
