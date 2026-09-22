@@ -509,7 +509,7 @@ func TestDeterministicFallbackWhenNoProvider(t *testing.T) {
 	if runStatus(t, svc, f.user.ID, job.SubjectID).Status != persistence.RunSucceeded {
 		t.Fatal("deterministic run did not succeed")
 	}
-	if !strings.Contains(concatText(assistantParts(t, svc, f.user.ID, job.SubjectID)), "回声") {
+	if !strings.Contains(concatText(assistantParts(t, svc, f.user.ID, job.SubjectID)), "未配置模型") {
 		t.Fatal("deterministic reply not produced")
 	}
 }

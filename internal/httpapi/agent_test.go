@@ -256,8 +256,8 @@ func TestAgentCommandsStreamsEchoAndRendersMessage(t *testing.T) {
 		t.Fatalf("message 1 role=%v, want assistant", role)
 	}
 	echo := messageText(t, state, 1)
-	if !strings.Contains(echo, "回声") || !strings.Contains(echo, "帮我拆解论文任务") {
-		t.Fatalf("assistant echo text=%q, want it to contain the echo marker and the user text", echo)
+	if !strings.Contains(echo, "未配置模型") || !strings.Contains(echo, "帮我拆解论文任务") {
+		t.Fatalf("assistant fallback text=%q, want it to identify the missing model and contain the user text", echo)
 	}
 	// The assistant message must finish with a complete status (§2.7.1).
 	if status, _ := getAt(state, []string{"messages", "1", "status", "type"}); status != "complete" {

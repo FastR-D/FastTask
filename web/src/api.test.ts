@@ -95,6 +95,16 @@ describe('api session storage (pwa.md §4 / frontend.md §5)', () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({}, 401)))
     await expect(ensureFreshAccessToken()).resolves.toBeNull()
     expect(token.get()).toBeNull()
+    expect(hasRefreshToken()).toBe(false)
+    expect(cacheNames).toEqual([])
+  })
+
+  it('retains the session and offline snapshots during a refresh network failure', async () => {
+    localStorage.setItem('fasttask_refresh', 'rt-offline')
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch') }))
+    await expect(ensureFreshAccessToken()).resolves.toBeNull()
+    expect(localStorage.getItem('fasttask_refresh')).toBe('rt-offline')
+    expect(cacheNames).toEqual(['workbox-precache', 'ft-api-user'])
   })
 
   it('logout clears the local session even when the server call fails', async () => {

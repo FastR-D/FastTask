@@ -31,7 +31,7 @@ const defaultSystemPrompt = `你是 FastTask 的科研推进助手，服务于�
 - 跨用户数据不可达；身份来自认证上下文，绝不在工具参数里出现 user_id 之类的身份字段。
 - 用中文、简洁作答。先识别进展或阻碍，再给一个马上能开始的最小行动。
 
-当前阶段：只读工具可用；提案工具尚未开放，若需要结构变更，先用文字说明你建议的拆法。`
+需要结构变更时调用提案工具，并等待用户审批；审批前不要声称变更已生效。`
 
 // sessionStream carries the streaming + persistence state for one run execution:
 // the chunk sink, the in-memory protocol.State (saved as the resume snapshot), and

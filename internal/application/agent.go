@@ -505,15 +505,14 @@ func lastUserText(messages []protocol.Message) string {
 	return ""
 }
 
-// echoReply is the phase B fake assistant message (agent-impl.md §11: "先用回声
-// 实现验证协议理解是否正确"). It is intentionally labelled so no one mistakes it
-// for a real model reply.
+// echoReply is the deterministic fallback used when no model is configured.
+// It is intentionally labelled so no one mistakes it for a model reply.
 func echoReply(userText string) string {
 	if userText == "" {
 		userText = "(空消息)"
 	}
-	return "【阶段 B 回声】我已收到：" + userText +
-		"。Agent 运行时已连通，但尚未接入模型与工具（阶段 C 起接入真实循环）。" +
+	return "【未配置模型】我已收到：" + userText +
+		"。请配置支持工具调用的模型，以获得完整的 Agent 建议。" +
 		"现在先挑一个 5–15 分钟能开始的最小行动推进它。"
 }
 
