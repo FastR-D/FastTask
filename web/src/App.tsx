@@ -1,4 +1,4 @@
-import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react'
+import { CSSProperties, FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, request, token } from './api'
 import type { Device, Goal, Job, Plan, PlanItem, Proposal, Task, TaskTree, User, WorkSession } from './types'
 import { fieldValue, useMduiEvent } from './mdui-react'
@@ -6,6 +6,7 @@ import { Admin } from './Admin'
 import { GoalMapView, Review } from './Lens'
 import { PwaUpdate } from './PwaUpdate'
 import { AgentChat } from './agent'
+import { localDateInTimezone } from './date'
 
 type Tab = 'today' | 'goals' | 'dialogue' | 'jobs' | 'review' | 'devices' | 'admin'
 
@@ -32,11 +33,12 @@ export function App() {
     })
     return () => { alive = false }
   }, [restoring])
+  const handleLogout = useCallback(async () => { await logout(); setAuthenticated(false) }, [])
   if (restoring) return null
   return (
     <>
       {authenticated
-        ? <Workspace onLogout={async () => { await logout(); setAuthenticated(false) }} />
+        ? <Workspace onLogout={handleLogout} />
         : <Login onLogin={() => setAuthenticated(true)} />}
       <PwaUpdate />
     </>
@@ -122,12 +124,12 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
     </mdui-top-app-bar>
     <mdui-layout-main className="app-main">
       <div className={tab==='dialogue' ? 'page page-dialogue' : 'page'}>
-        {tab==='today' && <Today onNotice={setNotice}/>}
+        {tab==='today' && <Today onNotice={setNotice} timezone={user?.timezone}/>}
         {tab==='goals' && <Goals onNotice={setNotice}/>}
         {tab==='dialogue' && <AgentChat goalId={null} onNotice={setNotice}/>}
         {tab==='jobs' && <JobQueue onNotice={setNotice}/>}
         {tab==='review' && <Review onNotice={setNotice}/>}
-        {tab==='devices' && <Devices onNotice={setNotice}/>}
+        {tab==='devices' && <Devices onNotice={setNotice} timezone={user?.timezone}/>}
         {tab==='admin' && user?.role==='admin' && <Admin user={user} onNotice={setNotice}/>}
       </div>
     </mdui-layout-main>
@@ -144,7 +146,7 @@ function navItems(user: User | null): [Tab,string][] {
   return items
 }
 
-function Today({ onNotice }: { onNotice: (s:string)=>void }) {
+function Today({ onNotice, timezone }: { onNotice: (s:string)=>void; timezone?: string }) {
   const [plan, setPlan] = useState<Plan | null>(null)
   const [items, setItems] = useState<PlanItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -160,17 +162,17 @@ function Today({ onNotice }: { onNotice: (s:string)=>void }) {
   }
   useEffect(()=>{load()},[])
   useEffect(()=>{if(!session||session.status!=='running')return;const startedAt=new Date(session.started_at).getTime();const tick=()=>setElapsed(Math.max(0,Math.floor((Date.now()-startedAt)/1000)));tick();const timer=setInterval(tick,1000);return()=>clearInterval(timer)},[session])
-	async function generate(replace=false) { const now=new Date(); const localDate=now.toLocaleDateString('en-CA',{timeZone:'Asia/Shanghai'}); try { const {data}=await request<Job>('/daily-plans/generation-jobs',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({local_date:localDate,timezone:'Asia/Shanghai',available_minutes:120,replace_existing:replace,base_revision:replace?plan?.revision:undefined})}); onNotice(`计划作业已创建：${data.id}`); const job=await waitJob(data.id);if(job.status!=='succeeded')throw new Error(job.error_message||'计划作业失败');load() } catch(e){onNotice(errorText(e))} }
+	async function generate(replace=false) { if (!timezone) { onNotice('正在加载用户时区，请稍后重试'); return } const localDate=localDateInTimezone(new Date(),timezone); try { const {data}=await request<Job>('/daily-plans/generation-jobs',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({local_date:localDate,timezone,available_minutes:120,replace_existing:replace,base_revision:replace?plan?.revision:undefined})}); onNotice(`计划作业已创建：${data.id}`); const job=await waitJob(data.id);if(job.status!=='succeeded')throw new Error(job.error_message||'计划作业失败');load() } catch(e){onNotice(errorText(e))} }
   async function satisfy(item:PlanItem,type='minimum_action'){try{await request(`/daily-plans/${item.daily_plan_id}/items/${item.id}/completions`,{method:'POST',headers:{'If-Match':etag('dpi',item.id,item.revision),'Idempotency-Key':idem()},body:JSON.stringify({type,summary:type==='minimum_action'?'已完成今天的最小行动':'已获得可验证推进'})});onNotice('已记录推进证据，底层任务仍保持开放');load()}catch(e){onNotice(errorText(e))}}
   async function start(item:PlanItem){if(!item.task_id)return;try{const {data}=await request<WorkSession>('/work-sessions',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({task_id:item.task_id,daily_plan_item_id:item.id,session_type:'pomodoro',target_minutes:25,started_at:new Date().toISOString()})});setSession(data);onNotice('专注计时开始')}catch(e){onNotice(errorText(e))}}
   async function finish(){if(!session)return;try{await request(`/work-sessions/${session.id}/completions`,{method:'POST',headers:{'If-Match':etag('work',session.id,session.revision),'Idempotency-Key':idem()},body:JSON.stringify({ended_at:new Date().toISOString(),outcome:'progressed',note:'从今日工作台完成'})});setSession(null);onNotice('专注记录已保存')}catch(e){onNotice(errorText(e))}}
   const coreItems = items.filter(i=>i.kind==='core')
   const done = coreItems.filter(i=>i.status==='satisfied').length
-  const total = coreItems.length || 3
+  const total = coreItems.length
   return <section className="today-page">
     <header className="page-head">
-      <div><p className="eyebrow">TODAY / {new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'long'})}</p><h1>今天只推进<br/><em>真正重要</em>的事。</h1></div>
-      <div className="progress-orbit" style={{'--done':`${Math.round((done/total)*100)}%`} as CSSProperties}><strong>{done}<small>/{total}</small></strong><span>核心信号</span></div>
+      <div><p className="eyebrow">TODAY / {new Date().toLocaleDateString('zh-CN',{timeZone:timezone,month:'long',day:'numeric',weekday:'long'})}</p><h1>今天只推进<br/><em>真正重要</em>的事。</h1></div>
+      <div className="progress-orbit" style={{'--done':`${total ? Math.round((done/total)*100) : 0}%`} as CSSProperties}><strong>{done}<small>/{total}</small></strong><span>核心信号</span></div>
     </header>
     {session && <div className="focus-strip">
       <div className="focus-info"><span className="pulse"/><b>专注进行中</b><span className="focus-timer">{Math.floor(elapsed/60).toString().padStart(2,'0')}:{(elapsed%60).toString().padStart(2,'0')}</span></div>
@@ -286,10 +288,10 @@ function subjectType(type:string){return ({goal:'目标',conversation:'对话',d
 function shortID(id?:string){return id?id.length>18?id.slice(0,10)+'…'+id.slice(-6):id:'—'}
 function formatDuration(seconds:number){const minutes=Math.floor(seconds/60);const rest=seconds%60;return minutes?`${minutes}分${rest.toString().padStart(2,'0')}秒`:`${rest}秒`}
 
-function Devices({ onNotice }: { onNotice:(s:string)=>void }) {
+function Devices({ onNotice, timezone }: { onNotice:(s:string)=>void; timezone?: string }) {
   const [devices,setDevices]=useState<Device[]>([]);const [shownToken,setShownToken]=useState('');const [deviceName,setDeviceName]=useState('')
   async function load(){const {data}=await request<{items:Device[]}>('/devices');setDevices(data.items)}useEffect(()=>{load().catch(e=>onNotice(errorText(e)))},[])
-  async function create(){if(!deviceName.trim())return;try{const {data}=await request<{device:Device;device_token:string}>('/devices',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({name:deviceName,kind:'eink_panel',timezone:'Asia/Shanghai',capabilities:{width:800,height:480,color_mode:'monochrome'}})});setShownToken(data.device_token);setDeviceName('');load()}catch(e){onNotice(errorText(e))}}
+  async function create(){if(!deviceName.trim())return;if(!timezone){onNotice('正在加载用户时区，请稍后重试');return}try{const {data}=await request<{device:Device;device_token:string}>('/devices',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({name:deviceName,kind:'eink_panel',timezone,capabilities:{width:800,height:480,color_mode:'monochrome'}})});setShownToken(data.device_token);setDeviceName('');load()}catch(e){onNotice(errorText(e))}}
   return <section className="devices-page"><header className="page-head compact"><div><p className="eyebrow">QUIET DISPLAY</p><h1>把注意力留在桌面，<br/>而不是<em>通知中心</em>。</h1></div></header>
     {shownToken&&<div className="token-box"><div><b>设备 Token 仅显示一次</b><code>{shownToken}</code></div><mdui-button variant="tonal" icon="content_copy" onClick={()=>navigator.clipboard.writeText(shownToken)}>复制</mdui-button></div>}
     <div className="device-grid">

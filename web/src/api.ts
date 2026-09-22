@@ -16,7 +16,8 @@ let accessExpiry = 0 // epoch ms of the access token's exp claim; 0 = unknown/ex
 
 // Single-flight guard so concurrent 401 retries and proactive authHeaders calls
 // rotate the refresh token exactly once (frontend.md §5: shared with refreshInFlight).
-let refreshInFlight: Promise<boolean> | null = null
+type RefreshResult = 'refreshed' | 'rejected' | 'unavailable'
+let refreshInFlight: Promise<RefreshResult> | null = null
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message) }
@@ -80,29 +81,33 @@ export async function clearSession(): Promise<void> {
   }
 }
 
-// refreshAccess rotates the refresh token. Returns false when there is no session
-// or the server rejects the token (expired, reused, revoked).
-async function refreshAccess(): Promise<boolean> {
+// A rejected refresh token ends the session. Network and server failures are
+// temporary; clearing the session for those would also erase offline snapshots.
+async function refreshAccess(): Promise<RefreshResult> {
   const refreshToken = readRefresh()
-  if (!refreshToken) return false
+  if (!refreshToken) return 'rejected'
   try {
     const refreshed = await fetch(`${API}/auth/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `browser-${refreshToken.slice(-12)}` },
       body: JSON.stringify({ refresh_token: refreshToken }),
     })
-    if (!refreshed.ok) return false
+    if (refreshed.status === 401 || refreshed.status === 403) {
+      await clearSession()
+      return 'rejected'
+    }
+    if (!refreshed.ok) return 'unavailable'
     const credentials = await refreshed.json()
     storeAccess(credentials.access_token)
     writeRefresh(credentials.refresh_token)
-    return true
+    return 'refreshed'
   } catch {
-    return false
+    return 'unavailable'
   }
 }
 
 // singleFlightRefresh dedupes concurrent refreshes through refreshInFlight.
-function singleFlightRefresh(): Promise<boolean> {
+function singleFlightRefresh(): Promise<RefreshResult> {
   refreshInFlight ??= refreshAccess().finally(() => { refreshInFlight = null })
   return refreshInFlight
 }
@@ -114,7 +119,7 @@ function singleFlightRefresh(): Promise<boolean> {
 // Returns null when there is no session to refresh.
 export async function ensureFreshAccessToken(): Promise<string | null> {
   if (accessToken && Date.now() < accessExpiry - EXPIRY_SKEW_MS) return accessToken
-  if (await singleFlightRefresh()) return accessToken
+  if (await singleFlightRefresh() === 'refreshed') return accessToken
   return null
 }
 
@@ -125,8 +130,7 @@ async function execute<T>(path: string, init: RequestInit, retry: boolean): Prom
   if (access) headers.set('Authorization', `Bearer ${access}`)
   const response = await fetch(`${API}${path}`, { ...init, headers })
   if (response.status === 401 && retry && path !== '/auth/login' && path !== '/auth/refresh') {
-    if (await singleFlightRefresh()) return execute<T>(path, init, false)
-    await clearSession()
+    if (await singleFlightRefresh() === 'refreshed') return execute<T>(path, init, false)
   }
   if (!response.ok) {
     const problem = await response.json().catch(() => ({ detail: response.statusText }))
