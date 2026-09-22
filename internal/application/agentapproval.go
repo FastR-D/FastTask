@@ -21,6 +21,18 @@ var (
 	ErrApprovalNotAwaiting = errors.New("run is not awaiting approval")
 )
 
+// approvalService implements the §7 approval-receipt flow: resolve a decision,
+// apply or reject the staged proposal synchronously, record the outcome on the
+// tool-call part, and re-queue the same run. It is split out of AgentService
+// (wiring.md §9: no struct declares >15 methods) as a cohesive unit and embedded
+// back, so AgentService.ResolveApproval resolves by promotion and SubmitCommands
+// routes add-tool-result receipts to it unchanged.
+type approvalService struct {
+	app   *App
+	repo  *persistence.AgentRepository
+	store *persistence.Store
+}
+
 // approvalDecision is the add-tool-result payload for a proposal (§7.1): the
 // frontend sends {"decision":"approve"} or {"decision":"reject","reason":"..."}
 // via addToolResult, never via assistant-ui's approval API (ADR-0002 §3.1).
@@ -48,7 +60,7 @@ func firstToolResult(commands []Command) (Command, bool) {
 //
 // Ordering (§7.3): auth (done by the caller) → apply/reject → record tool result
 // → wake Worker. On apply failure the run is NOT resumed and the error is returned.
-func (s *AgentService) ResolveApproval(ctx context.Context, userID string, cmd Command) (SubmitResult, error) {
+func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cmd Command) (SubmitResult, error) {
 	toolCallID := strings.TrimSpace(cmd.ToolCallID)
 	if toolCallID == "" {
 		return SubmitResult{}, ErrEmptyCommand
@@ -180,7 +192,7 @@ func (s *AgentService) ResolveApproval(ctx context.Context, userID string, cmd C
 
 // recordApproval writes the decision onto the tool-call part so the resumed run
 // feeds it back to the model and the client renders the resolved approval.
-func (s *AgentService) recordApproval(ctx context.Context, userID, partID, status, resultJSON string) error {
+func (s *approvalService) recordApproval(ctx context.Context, userID, partID, status, resultJSON string) error {
 	if err := s.repo.UpdatePartResult(ctx, userID, partID, resultJSON, false); err != nil {
 		return err
 	}
@@ -189,7 +201,7 @@ func (s *AgentService) recordApproval(ctx context.Context, userID, partID, statu
 
 // markProposalConflict flags a proposal whose base revision moved, so it can no
 // longer be applied and never silently overwrites newer data (§7.4).
-func (s *AgentService) markProposalConflict(ctx context.Context, proposalID string) {
+func (s *approvalService) markProposalConflict(ctx context.Context, proposalID string) {
 	s.store.DB.WithContext(ctx).Model(&persistence.Proposal{}).
 		Where("id = ? AND status = 'pending'", proposalID).
 		Updates(map[string]any{"status": "conflict", "revision": gorm.Expr("revision + 1"), "updated_at": persistence.Now()})
@@ -198,7 +210,7 @@ func (s *AgentService) markProposalConflict(ctx context.Context, proposalID stri
 // requeueRun wakes the Worker to continue the SAME run under a NEW job (§7.2):
 // awaiting_approval holds no lease, so approval creates a fresh AgentJob while
 // reusing the run, assistant message and message index.
-func (s *AgentService) requeueRun(ctx context.Context, userID string, run *persistence.AgentRun) error {
+func (s *approvalService) requeueRun(ctx context.Context, userID string, run *persistence.AgentRun) error {
 	return s.store.Transaction(ctx, func(tx *gorm.DB) error {
 		now := persistence.Now()
 		job := persistence.AgentJob{
