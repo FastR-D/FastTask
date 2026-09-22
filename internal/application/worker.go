@@ -22,6 +22,7 @@ type Worker struct {
 	transcriber      agent.Transcriber
 	providerResolver func(ctx context.Context) (agent.Provider, agent.Transcriber, error)
 	agentRunner      *AgentService
+	handlers         map[string]JobHandler
 }
 
 // WithAgentRunner attaches the agent runtime so the worker can execute
@@ -29,6 +30,16 @@ type Worker struct {
 // state, messages and chunk log, so MaterializeJobResult is a no-op for it.
 func (w *Worker) WithAgentRunner(runner *AgentService) *Worker {
 	w.agentRunner = runner
+	return w
+}
+
+// WithJobHandlers replaces the job-type dispatch table with the fx
+// "job_handlers" value group (wiring.md §5). Tests that construct a Worker
+// directly keep the builtins installed by NewWorker (§2 rule 4).
+func (w *Worker) WithJobHandlers(handlers []JobHandler) *Worker {
+	if len(handlers) > 0 {
+		w.handlers = handlerMap(handlers)
+	}
 	return w
 }
 
@@ -47,7 +58,7 @@ func (w *Worker) ActiveProviderRuntime(ctx context.Context) (*ProviderRuntimeCon
 }
 
 func NewWorker(app *App, interval time.Duration, providers ...agent.Provider) *Worker {
-	worker := &Worker{app: app, identity: persistence.NewID("worker"), interval: interval}
+	worker := &Worker{app: app, identity: persistence.NewID("worker"), interval: interval, handlers: handlerMap(BuiltinJobHandlers())}
 	if len(providers) > 0 {
 		worker.provider = providers[0]
 	}
@@ -127,102 +138,15 @@ func (w *Worker) execute(ctx context.Context, job persistence.AgentJob) (any, er
 			transcriber = resolvedTranscriber
 		}
 	}
-	switch job.Type {
-	case "agent_run":
-		if w.agentRunner == nil {
-			return nil, fmt.Errorf("agent runtime is not configured")
-		}
-		return w.agentRunner.ExecuteRun(ctx, job)
-	case "task_tree_generation", "task_tree_revision":
-		var goal persistence.Goal
-		if err := w.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", job.SubjectID, job.UserID).First(&goal).Error; err != nil {
-			return nil, err
-		}
-		var current int
-		w.app.Store.DB.WithContext(ctx).Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", goal.ID).Select("COALESCE(MAX(revision),0)").Scan(&current)
-		if job.BaseRevision > 0 && current != job.BaseRevision {
-			return nil, ErrRevision
-		}
-		patch := []map[string]any{
-			{"op": "create", "type": "milestone", "title": "明确验收路径", "success_criteria": "形成可验证的阶段成果", "minimum_action": "列出三个可验证成果", "priority": 90, "estimate_minutes": 50, "uncertainty": 40, "contribution": 90},
-			{"op": "create", "type": "task", "title": "完成第一个可验证推进", "success_criteria": goal.SuccessCriteria, "minimum_action": "打开工作材料并写下第一步", "priority": 80, "estimate_minutes": 50, "uncertainty": 70, "contribution": 85},
-			{"op": "create", "type": "task", "title": "复盘结果并调整路线", "success_criteria": "记录结果、阻碍和下一步", "minimum_action": "写下当前最大阻碍", "priority": 60, "estimate_minutes": 25, "uncertainty": 30, "contribution": 60},
-		}
-		providerName := "local-deterministic"
-		if provider != nil {
-			var input map[string]any
-			_ = json.Unmarshal([]byte(job.InputJSON), &input)
-			instruction := fmt.Sprint(input["instruction"])
-			if job.Type == "task_tree_revision" {
-				var tasks []persistence.Task
-				_ = w.app.Store.DB.WithContext(ctx).Where("goal_id = ? AND user_id = ?", goal.ID, job.UserID).Order("position, id").Find(&tasks).Error
-				tree, _ := json.Marshal(tasks)
-				instruction += "\n现有任务（修订时可使用 update/move/supersede，target_id 必须来自这里）：" + string(tree)
-			}
-			generated, err := provider.TaskProposal(ctx, goal.Title, goal.SuccessCriteria, instruction)
-			if err != nil {
-				return nil, err
-			}
-			patch, providerName = generated, provider.Name()
-		}
-		return map[string]any{"provider": providerName, "proposal": patch, "assumptions": []string{"结构变更应用前需用户确认"}}, nil
-	case "daily_plan_generation":
-		var input struct {
-			LocalDate, Timezone string
-			AvailableMinutes    int  `json:"available_minutes"`
-			ReplaceExisting     bool `json:"replace_existing"`
-			BaseRevision        int  `json:"base_revision"`
-		}
-		_ = json.Unmarshal([]byte(job.InputJSON), &input)
-		if input.LocalDate == "" {
-			input.LocalDate = time.Now().Format("2006-01-02")
-		}
-		if input.Timezone == "" {
-			input.Timezone = "Asia/Shanghai"
-		}
-		var plan *persistence.DailyPlan
-		var items []persistence.DailyPlanItem
-		var err error
-		if input.ReplaceExisting {
-			plan, items, err = w.app.ReplanDailyPlan(ctx, job.UserID, input.LocalDate, input.Timezone, nil, input.AvailableMinutes, input.BaseRevision)
-		} else {
-			plan, items, err = w.app.CreateDailyPlan(ctx, job.UserID, input.LocalDate, input.Timezone, nil, input.AvailableMinutes)
-		}
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"plan": plan, "items": items}, nil
-	case "conversation":
-		var input map[string]any
-		_ = json.Unmarshal([]byte(job.InputJSON), &input)
-		content := fmt.Sprint(input["content"])
-		reply := "已分析你的输入。建议先执行一个 5-15 分钟的最小行动，再根据结果调整任务树。"
-		providerName := "local-deterministic"
-		if provider != nil {
-			generated, err := provider.ConversationReply(ctx, content)
-			if err != nil {
-				return nil, err
-			}
-			reply, providerName = generated, provider.Name()
-		}
-		return map[string]any{"reply": reply, "echo": content, "provider": providerName}, nil
-	case "voice_transcription":
-		var input map[string]any
-		_ = json.Unmarshal([]byte(job.InputJSON), &input)
-		path, name := textValue(input["path"]), textValue(input["filename"])
-		if transcriber != nil {
-			transcript, err := transcriber.Transcribe(ctx, path)
-			if err != nil {
-				return nil, err
-			}
-			return map[string]any{"transcript": transcript, "provider": transcriber.Name()}, nil
-		}
-		return map[string]any{"transcript": "[演示转写，未配置 STT] 音频文件：" + name, "provider": "local-demo-no-stt"}, nil
-	case "support_generation":
-		return map[string]any{"suggestions": []map[string]any{{"kind": "input", "title": "阅读与当前阻碍直接相关的资料", "commitment": "限定范围阅读并记录三条与当前阻碍直接相关的信息", "minimum_action": "打开一份相关资料并定位摘要", "minutes": 25}}}, nil
-	default:
+	// Dispatch through the job_handlers registry (wiring.md §5) instead of a
+	// central switch: each domain registers its handler, so a new job type never
+	// edits this file. The resolved provider/transcriber and the agent runner are
+	// handed to the handler via JobRuntime.
+	handler, ok := w.handlers[job.Type]
+	if !ok {
 		return nil, fmt.Errorf("unknown job type %q", job.Type)
 	}
+	return handler.HandleJob(ctx, job, JobRuntime{App: w.app, Provider: provider, Transcriber: transcriber, AgentRunner: w.agentRunner})
 }
 
 func (w *Worker) finish(ctx context.Context, claimed persistence.AgentJob, rawToken string, output any, runErr error) error {
