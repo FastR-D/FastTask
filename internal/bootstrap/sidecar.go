@@ -33,6 +33,9 @@ const (
 	sidecarRestartBackoffMax = 30 * time.Second
 	sidecarFailureThreshold  = 5
 	sidecarStopGrace         = 5 * time.Second
+	// sidecarProbeInterval is how often an externally managed host is checked. It is a fallback path, so
+	// the interval trades a little staleness for not polling a process this one does not own.
+	sidecarProbeInterval = 5 * time.Second
 )
 
 // SidecarModule provides the supervisor and its lifecycle. It is registered before HTTPModule so that it
@@ -58,12 +61,21 @@ type SidecarSupervisor struct {
 	failures    int
 	unavailable bool
 	started     bool
+
+	// probeInterval and failureThreshold are fields rather than constants so a test can watch availability
+	// flip without waiting out production timings. Their defaults are the §8.4 behaviour. Both are written
+	// once at construction and read afterwards, so they need no lock of their own.
+	probeInterval    time.Duration
+	failureThreshold int
 }
 
 // NewSidecar builds the supervisor. When the sidecar is disabled it returns a supervisor that reports
 // itself unavailable, so the rest of the graph does not have to branch on a nil dependency.
 func NewSidecar(cfg config.Config) (*SidecarSupervisor, error) {
-	supervisor := &SidecarSupervisor{cfg: cfg, unavailable: !cfg.SidecarEnabled}
+	supervisor := &SidecarSupervisor{
+		cfg: cfg, unavailable: !cfg.SidecarEnabled,
+		probeInterval: sidecarProbeInterval, failureThreshold: sidecarFailureThreshold,
+	}
 	if !cfg.SidecarEnabled {
 		return supervisor, nil
 	}
@@ -72,9 +84,15 @@ func NewSidecar(cfg config.Config) (*SidecarSupervisor, error) {
 	if socket == "" {
 		socket = filepath.Join(filepath.Dir(cfg.DatabasePath), "sidecar.sock")
 	}
-	secret, err := newSidecarSecret()
-	if err != nil {
-		return nil, err
+	// A deployment that starts the sidecar itself (doc/tech.md §21.4) supplies the secret both sides read;
+	// otherwise one is generated for this process lifetime and handed to the child (§8.2).
+	secret := strings.TrimSpace(cfg.SidecarSecret)
+	if secret == "" {
+		generated, err := newSidecarSecret()
+		if err != nil {
+			return nil, err
+		}
+		secret = generated
 	}
 	client, err := application.NewSidecarClient("unix://"+socket, secret, 10*time.Minute)
 	if err != nil {
@@ -167,8 +185,10 @@ func (s *SidecarSupervisor) Start(ctx context.Context) error {
 	s.done = make(chan struct{})
 	s.mu.Unlock()
 
-	if err := s.spawn(runCtx); err != nil {
-		return err
+	if s.cfg.SidecarSpawn {
+		if err := s.spawn(runCtx); err != nil {
+			return err
+		}
 	}
 	timeout := s.cfg.SidecarStartTimeout
 	if timeout <= 0 {
@@ -184,7 +204,13 @@ func (s *SidecarSupervisor) Start(ctx context.Context) error {
 			s.unavailable = false
 			s.failures = 0
 			s.mu.Unlock()
-			go s.supervise(runCtx)
+			if s.cfg.SidecarSpawn {
+				go s.supervise(runCtx)
+			} else {
+				// Somebody else owns the process, so there is nothing to restart: readiness is still this
+				// module's job (§8.4), and a host that disappears must stop being offered to runs.
+				go s.probe(runCtx)
+			}
 			return nil
 		}
 		select {
@@ -208,13 +234,21 @@ func (s *SidecarSupervisor) webRoot() string {
 	return root
 }
 
+// threshold is how many consecutive failures make the sidecar unavailable.
+func (s *SidecarSupervisor) threshold() int {
+	if s.failureThreshold > 0 {
+		return s.failureThreshold
+	}
+	return sidecarFailureThreshold
+}
+
 // recordFailure counts one crash and flips the supervisor to unavailable at the threshold (§8.4). It
 // returns the failure count so the supervisor loop can log it.
 func (s *SidecarSupervisor) recordFailure() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failures++
-	if s.failures >= sidecarFailureThreshold {
+	if s.failures >= s.threshold() {
 		s.unavailable = true
 	}
 	return s.failures
@@ -278,7 +312,7 @@ func (s *SidecarSupervisor) supervise(ctx context.Context) {
 			return // a planned stop, not a crash
 		}
 		failures := s.recordFailure()
-		if failures >= sidecarFailureThreshold {
+		if failures >= s.threshold() {
 			fmt.Fprintf(os.Stderr, "sidecar exited %d times in a row (%v); marking sidecar mode unavailable — WASM mode is unaffected\n", failures, err)
 			return
 		}
@@ -301,7 +335,45 @@ func (s *SidecarSupervisor) supervise(ctx context.Context) {
 	}
 }
 
-// Stop ends the process politely and then firmly (§8.4: SIGTERM, a grace period, SIGKILL).
+// probe watches an externally managed sidecar. It owns no process, so all it can do is keep the
+// availability flag honest: unavailable after the same threshold of consecutive failures the supervisor
+// uses, and available again as soon as the host answers, which is what a systemd restart looks like from
+// here (doc/tech.md §21.4).
+func (s *SidecarSupervisor) probe(ctx context.Context) {
+	interval := s.probeInterval
+	if interval <= 0 {
+		interval = sidecarProbeInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		healthy := s.client.Healthy(probeCtx)
+		cancel()
+		s.mu.Lock()
+		if healthy {
+			s.failures = 0
+			s.unavailable = false
+		} else {
+			s.failures++
+			if s.failures >= s.threshold() {
+				if !s.unavailable {
+					fmt.Fprintf(os.Stderr, "sidecar stopped answering %d probes in a row; marking sidecar mode unavailable — WASM mode is unaffected\n", s.failures)
+				}
+				s.unavailable = true
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+// Stop ends the process politely and then firmly (§8.4: SIGTERM, a grace period, SIGKILL). An externally
+// managed sidecar is not this process's to signal: its own unit stops it, so only the probe ends here.
 func (s *SidecarSupervisor) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	command := s.cmd
@@ -330,7 +402,10 @@ func (s *SidecarSupervisor) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 	}
-	_ = os.Remove(s.socket)
+	if s.cfg.SidecarSpawn {
+		// The socket file belongs to the process this one started; an external unit manages its own.
+		_ = os.Remove(s.socket)
+	}
 	return nil
 }
 
