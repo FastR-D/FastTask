@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/FastR-D/FastTask/internal/config"
@@ -54,5 +55,20 @@ func Doctor(ctx context.Context, cfg config.Config) (string, error) {
 	if _, err := time.LoadLocation("Asia/Shanghai"); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("ok database=%s listen=%s web=%s", cfg.DatabasePath, cfg.Address(), cfg.WebDist), nil
+	summary := fmt.Sprintf("ok database=%s listen=%s web=%s", cfg.DatabasePath, cfg.Address(), cfg.WebDist)
+	// The sidecar is optional; its checks are reported but only a disabled one is silent (§8.4).
+	if cfg.SidecarEnabled {
+		supervisor, err := NewSidecar(cfg)
+		if err != nil {
+			return "", err
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		lines, err := supervisor.Doctor(checkCtx)
+		summary += " " + strings.Join(lines, " ")
+		if err != nil {
+			return summary, err
+		}
+	}
+	return summary, nil
 }

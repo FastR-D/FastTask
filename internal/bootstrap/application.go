@@ -45,13 +45,19 @@ func NewApp(p appParams) *application.App {
 
 // NewAgentService builds the agent runtime over the App. It is shared by the HTTP endpoints
 // (submit/stream/proxy) and the Worker (sidecar runs) so both see the same run lifecycle.
-func NewAgentService(app *application.App, cfg config.Config) *application.AgentService {
-	return application.NewAgentService(app,
+func NewAgentService(app *application.App, cfg config.Config, sidecar *SidecarSupervisor) *application.AgentService {
+	options := []application.AgentOption{
 		application.WithCredentialsResolver(ModelCredentialsResolver(app, cfg)),
 		application.WithReasoningLevel(cfg.AgentReasoning),
 		application.WithReasoningPersistence(cfg.AgentReasoningPersist),
 		application.WithAttachmentDir(cfg.AttachmentDir),
-	)
+	}
+	// A sidecar that is not configured leaves the driver nil, and SubmitCommands then refuses sidecar mode
+	// with HARNESS_UNAVAILABLE instead of queueing a job nobody will run (§1.2).
+	if driver := sidecar.Driver(); driver != nil {
+		options = append(options, application.WithSidecarDriver(driver))
+	}
+	return application.NewAgentService(app, options...)
 }
 
 // ModelCredentialsResolver resolves the upstream model the harness proxy injects

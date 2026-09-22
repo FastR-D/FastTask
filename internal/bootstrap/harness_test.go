@@ -29,7 +29,7 @@ func TestSchedulerReapsLostHarnessHosts(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := application.NewWithSecret(store, cfg.ProviderEncryptionKey)
-	agent := NewAgentService(app, cfg)
+	agent := NewAgentService(app, cfg, nil)
 
 	now := persistence.Now()
 	user := persistence.User{ID: persistence.NewID("user"), Identifier: "reaped", PasswordHash: "hash", DisplayName: "Reaped", Timezone: "Asia/Shanghai", Locale: "zh-CN", Role: "member", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
