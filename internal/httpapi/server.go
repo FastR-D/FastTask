@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -1541,16 +1542,43 @@ func (s importRoutes) RegisterRoutes(api huma.API) {
 }
 
 func (s *Server) static() {
-	index := filepath.Join(s.cfg.WebDist, "index.html")
+	dist := s.cfg.WebDist
+	index := filepath.Join(dist, "index.html")
 	if _, err := os.Stat(index); err != nil {
 		return
 	}
-	s.Engine.Static("/assets", filepath.Join(s.cfg.WebDist, "assets"))
+	s.Engine.Static("/assets", filepath.Join(dist, "assets"))
 	s.Engine.NoRoute(func(c *gin.Context) {
-		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+		urlPath := c.Request.URL.Path
+		if strings.HasPrefix(urlPath, "/api/") {
 			c.JSON(404, gin.H{"title": "Not Found", "status": 404})
 			return
 		}
+		// Serve a real file from the web dist when one exists. sw.js,
+		// manifest.webmanifest, registerSW.js, the hashed workbox-*.js chunks and
+		// the icons all live at the dist root; if they fell through to index.html
+		// the browser would receive HTML for them, so Service Worker registration
+		// and the manifest parse would fail (pwa.md §2 #1, §7). path.Clean("/"+..)
+		// anchors the path so a ".." segment cannot escape dist. Content-Type is
+		// pinned for the two types whose correctness the spec calls out; other
+		// extensions are detected by http.ServeFile (which preserves a header set
+		// here). The no-store / immutable Cache-Control rules are already applied
+		// by the header middleware in New.
+		rel := strings.TrimPrefix(path.Clean("/"+urlPath), "/")
+		if rel != "" {
+			candidate := filepath.Join(dist, rel)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				switch filepath.Ext(candidate) {
+				case ".webmanifest":
+					c.Header("Content-Type", "application/manifest+json")
+				case ".js", ".mjs":
+					c.Header("Content-Type", "text/javascript; charset=utf-8")
+				}
+				c.File(candidate)
+				return
+			}
+		}
+		// SPA fallback: unknown non-API paths render the client-side router.
 		c.File(index)
 	})
 }
