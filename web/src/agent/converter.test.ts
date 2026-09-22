@@ -96,3 +96,80 @@ describe('normalizeStatus', () => {
     expect(normalizeStatus({ type: 'bogus' } as any)).toEqual({ type: 'complete', reason: 'unknown' })
   })
 })
+
+describe('convertState reasoning and image parts (chat-features.md §3.3, §4.4)', () => {
+  it('maps a reasoning part onto assistant-ui’s own reasoning content', () => {
+    const out = convertState(state({
+      messages: [{
+        id: 'm1',
+        role: 'assistant',
+        parts: [
+          { type: 'reasoning', id: 'reasoning_1', text: '先看看有没有活跃目标' },
+          { type: 'text', text: '你有一个目标。' },
+        ],
+        status: { type: 'complete', reason: 'stop' },
+      }],
+    }), idleMeta)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parts = (out.messages[0] as any).content
+    expect(parts[0]).toMatchObject({ type: 'reasoning', text: '先看看有没有活跃目标' })
+    expect(parts[1]).toMatchObject({ type: 'text', text: '你有一个目标。' })
+  })
+
+  it('keeps two reasoning segments separate instead of merging them (§3.3)', () => {
+    const out = convertState(state({
+      messages: [{
+        id: 'm1',
+        role: 'assistant',
+        parts: [
+          { type: 'reasoning', id: 'r1', text: '第一段推理' },
+          { type: 'text', text: '中间的回答' },
+          { type: 'reasoning', id: 'r2', text: '第二段推理' },
+        ],
+        status: { type: 'complete', reason: 'stop' },
+      }],
+    }), idleMeta)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const reasoning = (out.messages[0] as any).content.filter((part: { type: string }) => part.type === 'reasoning')
+    expect(reasoning).toHaveLength(2)
+    expect(reasoning[0].text).toBe('第一段推理')
+    expect(reasoning[1].text).toBe('第二段推理')
+  })
+
+  it('maps an image reference, and never expects bytes in the part', () => {
+    const out = convertState(state({
+      messages: [{
+        id: 'm1',
+        role: 'user',
+        parts: [
+          { type: 'text', text: '看看这张图' },
+          { type: 'image', image: '/api/v1/agent/attachments/att_1' },
+        ],
+      }],
+    }), idleMeta)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parts = (out.messages[0] as any).content
+    expect(parts[1]).toMatchObject({ type: 'image', image: '/api/v1/agent/attachments/att_1' })
+    expect(JSON.stringify(parts)).not.toContain('base64')
+  })
+
+  it('tolerates a half-streamed reasoning part and renders no empty block (§2.6, §3.4)', () => {
+    const out = convertState(state({
+      messages: [{
+        id: 'm1',
+        role: 'assistant',
+        // A part established by `set` before any append-text arrived has no text yet. The converter is
+        // called repeatedly mid-stream, so this shape is normal rather than an error.
+        parts: [{ type: 'reasoning', id: 'r1' } as never],
+        status: { type: 'running' },
+      }],
+      isRunning: true,
+    }), idleMeta)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const content = (out.messages[0] as any).content as Array<{ type: string; text?: string }>
+    // An empty trace produces nothing to render: with persistence switched off on the server, the UI must
+    // not show a row of empty "思考过程" headers (§3.4).
+    expect(content.filter(part => part.type === 'reasoning' && (part.text ?? '').trim() === '')).toHaveLength(0)
+    expect(out.messages).toHaveLength(1)
+  })
+})

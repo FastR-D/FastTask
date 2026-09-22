@@ -56,6 +56,16 @@ function partToContent(part: ServerMessagePart) {
   if (part?.type === 'text') {
     return { type: 'text' as const, text: part.text ?? '' }
   }
+  // A chain of thought becomes assistant-ui's own reasoning part, which the UI folds away by default
+  // (doc/chat-features.md §3.4). It is passed through verbatim: nothing reads it for meaning.
+  if (part?.type === 'reasoning') {
+    return { type: 'reasoning' as const, text: part.text ?? '' }
+  }
+  // An attachment reference becomes an image part; the browser fetches the bytes through the
+  // owner-scoped endpoint (§4.4).
+  if (part?.type === 'image') {
+    return { type: 'image' as const, image: part.image ?? '' }
+  }
   return {
     type: 'tool-call' as const,
     toolCallId: part.toolCallId,
