@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FastR-D/FastTask/internal/application"
 	"github.com/FastR-D/FastTask/internal/config"
 	"github.com/FastR-D/FastTask/internal/persistence"
 	"go.uber.org/fx"
@@ -286,4 +287,93 @@ func TestWorkerStartupReapsInterruptedRuns(t *testing.T) {
 	if status != persistence.RunInterrupted {
 		t.Fatalf("stale run status=%q, want interrupted (worker OnStart must reap before claiming jobs)", status)
 	}
+}
+
+// TestWorkerRoleProcessesJobStandalone proves the `fasttask worker` role boots on
+// its own (Core + WorkerModule, no HTTP listener) and actually processes a queued
+// job (wiring.md §8/§9: "各自能独立启动并处理作业"). A voice_transcription job is
+// used because it needs no model, transcriber or seed subject: with no transcriber
+// configured the handler returns a demo transcript and it has no materializer, so
+// it completes deterministically.
+func TestWorkerRoleProcessesJobStandalone(t *testing.T) {
+	defer goleak.VerifyNone(t,
+		goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"),
+		goleak.IgnoreAnyFunction("os/signal.signal_recv"),
+	)
+
+	cfg := testConfig(t)
+	ctx := context.Background()
+
+	// Seed a user and a queued job through the real CreateJob path.
+	seedStore, err := persistence.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedStore.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := persistence.Now()
+	user := persistence.User{ID: persistence.NewID("user"), Identifier: "worker-role", PasswordHash: "h", DisplayName: "W", Timezone: "UTC", Locale: "en", Role: "member", Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := seedStore.DB.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	job, err := application.New(seedStore).CreateJob(ctx, user.ID, "voice_transcription", "voice", "", 0, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := job.ID
+	if err := seedStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run the worker role standalone; cancel once the job is processed.
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunWorker(runCtx, cfg) }()
+
+	checkStore, err := persistence.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checkStore.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	var status string
+	for time.Now().Before(deadline) {
+		var j persistence.AgentJob
+		// Tolerate transient SQLITE_BUSY while the worker holds the write lock.
+		if err := checkStore.DB.First(&j, "id = ?", jobID).Error; err == nil {
+			status = j.Status
+			if status == "succeeded" {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunWorker returned error: %v", err)
+	}
+	if status != "succeeded" {
+		t.Fatalf("standalone worker left job status=%q, want succeeded (§8: worker role processes jobs independently)", status)
+	}
+}
+
+// TestSchedulerRoleStartsAndStopsStandalone proves the scheduler role graph boots
+// and shuts down cleanly on its own (wiring.md §8/§9: "fasttask scheduler ...
+// 可独立运行"). fxtest runs every OnStart (store migrate, gocron Start) then every
+// OnStop (gocron Shutdown) deterministically — no signal/timing race — and goleak
+// asserts the cron goroutine is released. RunScheduler wraps this same
+// SchedulerRole graph in the shared runRole lifecycle that the Serve and
+// RunWorker tests exercise directly.
+func TestSchedulerRoleStartsAndStopsStandalone(t *testing.T) {
+	defer goleak.VerifyNone(t,
+		goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"),
+		goleak.IgnoreAnyFunction("os/signal.signal_recv"),
+	)
+
+	cfg := testConfig(t)
+	app := fxtest.New(t, SchedulerRole, fx.Supply(cfg), fx.NopLogger)
+	app.RequireStart()
+	app.RequireStop()
 }

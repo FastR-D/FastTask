@@ -65,7 +65,29 @@ func serveOptions(cfg config.Config, opts ServeOptions) []fx.Option {
 // Serve assembles the full runtime and blocks until the context is cancelled or
 // a SIGINT/SIGTERM is received, then shuts down gracefully within serveTimeout.
 func Serve(ctx context.Context, cfg config.Config, opts ServeOptions) error {
-	app := fx.New(append(serveOptions(cfg, opts),
+	return runRole(ctx, serveOptions(cfg, opts))
+}
+
+// RunWorker runs the worker role on its own — Core + WorkerModule, no HTTP
+// listener and no scheduler — so a deployment can scale job execution separately
+// from the API (wiring.md §3, §8: "fasttask worker ... 可独立运行"). It blocks
+// until the context is cancelled or a signal arrives, then drains gracefully.
+func RunWorker(ctx context.Context, cfg config.Config) error {
+	return runRole(ctx, []fx.Option{fx.Supply(cfg), WorkerRole})
+}
+
+// RunScheduler runs the maintenance scheduler role on its own — Core +
+// SchedulerModule (wiring.md §3, §8: "fasttask scheduler ... 可独立运行").
+func RunScheduler(ctx context.Context, cfg config.Config) error {
+	return runRole(ctx, []fx.Option{fx.Supply(cfg), SchedulerRole})
+}
+
+// runRole is the shared body of the serve/worker/scheduler commands: build the fx
+// app from the role's options, start it within serveTimeout, block until the
+// caller's context is done, a signal arrives, or a component requests shutdown,
+// then stop gracefully (wiring.md §6: preserve the 15 second shutdown budget).
+func runRole(ctx context.Context, options []fx.Option) error {
+	app := fx.New(append(options,
 		fx.StartTimeout(serveTimeout),
 		fx.StopTimeout(serveTimeout),
 		fx.NopLogger,
@@ -80,6 +102,15 @@ func Serve(ctx context.Context, cfg config.Config, opts ServeOptions) error {
 	startCtx, cancelStart := context.WithTimeout(ctx, serveTimeout)
 	defer cancelStart()
 	if err := app.Start(startCtx); err != nil {
+		// Startup was interrupted (e.g. SIGTERM during boot) or a hook failed.
+		// Always Stop so hooks that did start release their goroutines, then treat
+		// a caller cancellation as a clean abort rather than an error.
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), serveTimeout)
+		defer cancelStop()
+		_ = app.Stop(stopCtx)
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 

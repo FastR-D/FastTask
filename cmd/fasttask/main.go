@@ -18,7 +18,7 @@ var (
 
 func main() {
 	root := &cobra.Command{Use: "fasttask", Short: "Long-term goal and daily focus system"}
-	root.AddCommand(serveCommand(), migrateCommand(), backupCommand(), doctorCommand(), hardenCommand(), versionCommand())
+	root.AddCommand(serveCommand(), workerCommand(), schedulerCommand(), migrateCommand(), backupCommand(), doctorCommand(), hardenCommand(), versionCommand())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -37,6 +37,31 @@ func serveCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&withWorker, "with-worker", true, "run persistent agent worker")
 	cmd.Flags().BoolVar(&withScheduler, "with-scheduler", true, "run maintenance scheduler")
 	return cmd
+}
+
+// workerCommand runs the persistent agent worker on its own, with no HTTP
+// listener, so job execution can be scaled independently of the API (wiring.md
+// §3, §8, §9: fasttask worker runs independently).
+func workerCommand() *cobra.Command {
+	return &cobra.Command{Use: "worker", Short: "Run the persistent agent worker", RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		return bootstrap.RunWorker(cmd.Context(), cfg)
+	}}
+}
+
+// schedulerCommand runs the maintenance scheduler on its own (wiring.md §3, §8,
+// §9: fasttask scheduler runs independently).
+func schedulerCommand() *cobra.Command {
+	return &cobra.Command{Use: "scheduler", Short: "Run the maintenance scheduler", RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		return bootstrap.RunScheduler(cmd.Context(), cfg)
+	}}
 }
 
 func migrateCommand() *cobra.Command {
