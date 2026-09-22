@@ -13,12 +13,16 @@ import (
 // proposalTool is the shared shape for proposal-level tools: they validate the
 // model's intent, create a pending Proposal, and write NOTHING to business
 // tables (§5.2, invariant 1). The user-approved apply happens later, in the HTTP
-// receipt handler, via ApplyProposal (§7.3).
+// receipt handler (§7.3), routed by tool name to the right apply path.
+//
+// build returns the opaque payload stored as Proposal.PatchJSON (a task-tree op
+// array, or a daily-plan envelope object), plus the client-facing ref. Each tool
+// owns its own Diff/Summary so the approval card renders correctly.
 type proposalTool struct {
 	app   *App
 	def   agent.ToolDefinition
 	kind  string
-	build func(ctx context.Context, app *App, tc ToolContext, args map[string]any) (PendingProposalRef, []map[string]any, string, error)
+	build func(ctx context.Context, app *App, tc ToolContext, args map[string]any) (PendingProposalRef, any, string, error)
 }
 
 func (p proposalTool) Definition() agent.ToolDefinition { return p.def }
@@ -28,7 +32,7 @@ func (p proposalTool) Level() ToolLevel                 { return ToolProposal }
 // loop can transition the run to awaiting_approval (§6, §7). It never touches
 // goals/tasks/coords/plans — only the proposals staging table.
 func (p proposalTool) Execute(ctx context.Context, tc ToolContext, args map[string]any) (ToolResult, error) {
-	ref, patch, instruction, err := p.build(ctx, p.app, tc, args)
+	ref, payload, instruction, err := p.build(ctx, p.app, tc, args)
 	if err != nil {
 		if _, ok := err.(patchValidationError); ok {
 			return ToolResult{IsError: true, Text: err.Error()}, nil
@@ -38,7 +42,7 @@ func (p proposalTool) Execute(ctx context.Context, tc ToolContext, args map[stri
 	if ref.GoalID == "" {
 		return ToolResult{IsError: true, Text: "goal_id is required and must be one of the user's goals"}, nil
 	}
-	encoded, err := json.Marshal(patch)
+	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return ToolResult{}, err
 	}
@@ -53,22 +57,20 @@ func (p proposalTool) Execute(ctx context.Context, tc ToolContext, args map[stri
 	}
 	ref.ProposalID = proposal.ID
 	ref.Kind = p.kind
-	ref.Diff = patch
-	ref.Summary = summarizePatch(patch)
 	return ToolResult{
 		Proposal: &ref,
 		Result: map[string]any{
 			"proposal_id": proposal.ID, "status": "pending", "base_revision": proposal.BaseRevision,
-			"summary": ref.Summary, "note": "结构变更需用户确认后才会落库",
+			"summary": ref.Summary, "note": "需用户确认后才会落库",
 		},
 	}, nil
 }
 
-// NewProposalTools returns the proposal-level tools (agent.md §5.2). Phase D
-// ships propose_task_tree_patch, the ApplyProposal-backed structural change tool.
-// propose_task_coords needs a distinct non-structural apply path and
-// propose_daily_plan is phase E; both are deferred rather than mis-routed through
-// ApplyProposal (which snapshots the tree and bumps task revisions).
+// NewProposalTools returns the proposal-level tools (agent.md §5.2): the two
+// that change the user's plan. propose_task_tree_patch is backed by ApplyProposal
+// (structural tree change); propose_daily_plan is backed by ApplyDailyPlanProposal
+// (deterministic top-3 selection, §6). propose_task_coords is deferred — it needs
+// a distinct non-structural apply path and must not be mis-routed through either.
 func NewProposalTools(app *App) []Tool {
 	return []Tool{
 		proposalTool{
@@ -90,14 +92,42 @@ func NewProposalTools(app *App) []Tool {
 			},
 			build: buildTaskTreePatchProposal(app),
 		},
+		proposalTool{
+			app:  app,
+			kind: "daily_plan",
+			def: agent.ToolDefinition{
+				Name:        "propose_daily_plan",
+				Description: "Propose today's core plan (0..3 tasks) from the user's executable candidates. Each candidate MUST carry a concrete 5-15 minute minimum_action; candidates without one are invalid. The program — not you — does the final filter, sort, dedup and top-3 cap, so proposing more than three is allowed but only the deterministic selection lands. Creates a pending proposal the user must approve.",
+				Parameters: objectSchema(map[string]any{
+					"local_date":        stringProp("Plan date YYYY-MM-DD; omit for today in the user's timezone."),
+					"available_minutes": integerProp("Focus minutes available that day (0..1440); omit to use the goal's default or 0.", 0, 1440),
+					"instruction":       stringProp("Short human-readable rationale for the plan."),
+					"candidates": map[string]any{
+						"type":        "array",
+						"description": "Candidate tasks to consider, in the order you recommend. Each: {task_id (from list_goals/get_task_tree), minimum_action (required, 5-15 min concrete next step), reason?}. The deterministic rule re-filters, re-sorts by priority and caps at 3.",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"task_id":        stringProp("The candidate task id."),
+								"minimum_action": stringProp("Concrete 5-15 minute first step for this candidate."),
+								"reason":         stringProp("Why this candidate belongs in today's plan."),
+							},
+							"required":             []string{"task_id", "minimum_action"},
+							"additionalProperties": false,
+						},
+					},
+				}, "candidates"),
+			},
+			build: buildDailyPlanProposal(app),
+		},
 	}
 }
 
 // buildTaskTreePatchProposal validates the patch shape and resolves the base
 // revision. Deep field/cycle/ownership validation is deferred to ApplyProposal,
 // which re-validates inside the apply transaction (§7.3, invariant 4).
-func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContext, map[string]any) (PendingProposalRef, []map[string]any, string, error) {
-	return func(ctx context.Context, a *App, tc ToolContext, args map[string]any) (PendingProposalRef, []map[string]any, string, error) {
+func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContext, map[string]any) (PendingProposalRef, any, string, error) {
+	return func(ctx context.Context, a *App, tc ToolContext, args map[string]any) (PendingProposalRef, any, string, error) {
 		goalID := stringArg(args, "goal_id")
 		if goalID == "" {
 			return PendingProposalRef{}, nil, "", nil
@@ -120,8 +150,63 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 		if provided, ok := args["base_revision"].(float64); ok && provided > 0 {
 			base = int(provided)
 		}
-		ref := PendingProposalRef{GoalID: goalID, BaseRevision: base}
+		ref := PendingProposalRef{
+			GoalID: goalID, BaseRevision: base,
+			Diff: patch, Summary: summarizePatch(patch),
+		}
 		return ref, patch, strings.TrimSpace(stringArg(args, "instruction")), nil
+	}
+}
+
+// buildDailyPlanProposal validates the candidate list and stages a daily-plan
+// proposal. It performs NO deterministic selection here — that happens at apply
+// time in ApplyDailyPlanProposal so the program (not the model) owns the top-3
+// cap (§6, arch.md §9.2). goal_id is derived from the first candidate's task to
+// satisfy the proposals table's goal scoping; the plan itself is per user+date.
+func buildDailyPlanProposal(app *App) func(context.Context, *App, ToolContext, map[string]any) (PendingProposalRef, any, string, error) {
+	return func(ctx context.Context, a *App, tc ToolContext, args map[string]any) (PendingProposalRef, any, string, error) {
+		candidates, problem := normalizeCandidates(args["candidates"])
+		if problem != "" {
+			return PendingProposalRef{}, nil, "", patchError(problem)
+		}
+		// Derive the goal from the first candidate's task (ownership-checked).
+		var task persistence.Task
+		if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", candidates[0].TaskID, tc.UserID).First(&task).Error; err != nil {
+			if persistence.IsNotFound(err) {
+				return PendingProposalRef{}, nil, "", patchError(fmt.Sprintf("candidate task %q not found", candidates[0].TaskID))
+			}
+			return PendingProposalRef{}, nil, "", err
+		}
+		// Resolve the plan timezone from the user's profile (daily plans are keyed by
+		// user+date+timezone). resolveZone falls back to the default when unset.
+		var user persistence.User
+		if err := a.Store.DB.WithContext(ctx).Where("id = ?", tc.UserID).First(&user).Error; err != nil {
+			if persistence.IsNotFound(err) {
+				return PendingProposalRef{}, nil, "", patchError("user profile not found")
+			}
+			return PendingProposalRef{}, nil, "", err
+		}
+		location, zone := resolveZone(user.Timezone)
+		localDate := strings.TrimSpace(stringArg(args, "local_date"))
+		if localDate == "" {
+			localDate = persistence.Now().In(location).Format("2006-01-02")
+		}
+		available := 0
+		if v, ok := args["available_minutes"].(float64); ok && v > 0 {
+			available = int(v)
+		}
+		payload := dailyPlanPayload{
+			LocalDate:        localDate,
+			Timezone:         zone,
+			AvailableMinutes: available,
+			Candidates:       candidates,
+		}
+		ref := PendingProposalRef{
+			GoalID:  task.GoalID,
+			Diff:    candidatesDiff(candidates),
+			Summary: fmt.Sprintf("今日计划提案：%d 项候选（程序确定性取前三）", len(candidates)),
+		}
+		return ref, payload, strings.TrimSpace(stringArg(args, "instruction")), nil
 	}
 }
 
@@ -184,6 +269,61 @@ func normalizePatch(raw any) ([]map[string]any, string) {
 		patch = append(patch, op)
 	}
 	return patch, ""
+}
+
+// normalizeCandidates coerces the model's candidate list into []PlanCandidate,
+// enforcing the §6 constraint that every candidate carries a concrete minimum
+// action ("缺失则该候选无效"). Duplicate task_ids are dropped (dedup is also
+// re-applied deterministically at selection time).
+func normalizeCandidates(raw any) ([]PlanCandidate, string) {
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, "candidates must be an array"
+	}
+	if len(list) == 0 {
+		return nil, "candidates must contain at least one task"
+	}
+	if len(list) > 20 {
+		return nil, "too many candidates (max 20)"
+	}
+	out := make([]PlanCandidate, 0, len(list))
+	seen := map[string]bool{}
+	for i, item := range list {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Sprintf("candidates[%d] must be an object", i)
+		}
+		taskID := strings.TrimSpace(textValue(m["task_id"]))
+		minAction := strings.TrimSpace(textValue(m["minimum_action"]))
+		if taskID == "" {
+			return nil, fmt.Sprintf("candidates[%d] requires task_id", i)
+		}
+		if minAction == "" {
+			return nil, fmt.Sprintf("candidates[%d] (%s) requires a concrete minimum_action", i, taskID)
+		}
+		if seen[taskID] {
+			continue
+		}
+		seen[taskID] = true
+		out = append(out, PlanCandidate{TaskID: taskID, MinimumAction: minAction, Reason: strings.TrimSpace(textValue(m["reason"]))})
+	}
+	if len(out) == 0 {
+		return nil, "candidates must contain at least one valid task"
+	}
+	return out, ""
+}
+
+// candidatesDiff renders the candidate list as the approval-card diff array.
+func candidatesDiff(candidates []PlanCandidate) []map[string]any {
+	diff := make([]map[string]any, 0, len(candidates))
+	for _, c := range candidates {
+		entry := map[string]any{"task_id": c.TaskID, "minimum_action": c.MinimumAction}
+		if c.Reason != "" {
+			entry["reason"] = c.Reason
+		}
+		diff = append(diff, entry)
+	}
+	return diff
 }
 
 // summarizePatch renders a one-line human summary for the approval card.

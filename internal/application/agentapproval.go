@@ -107,24 +107,50 @@ func (s *AgentService) ResolveApproval(ctx context.Context, userID string, cmd C
 			}
 			return SubmitResult{}, err
 		}
-		var patches []map[string]any
-		if err := json.Unmarshal([]byte(proposal.PatchJSON), &patches); err != nil {
-			return SubmitResult{}, err
-		}
-		// ApplyProposal re-validates ownership, base revision, parent/child and
-		// cycles inside its transaction (invariant 4). A moved base revision yields
-		// ErrRevision → 412, and the proposal is marked conflict, never overwritten.
-		created, applyErr := s.app.ApplyProposal(ctx, userID, &proposal, patches, proposal.BaseRevision)
-		if applyErr != nil {
-			if errors.Is(applyErr, ErrRevision) {
+		// Route by the tool that staged the proposal: the task-tree patch applies via
+		// ApplyProposal (structural, base-revision guarded); the daily plan applies
+		// via ApplyDailyPlanProposal (deterministic top-3 selection, §6).
+		var resultJSON []byte
+		if part.ToolName == "propose_daily_plan" {
+			var payload dailyPlanPayload
+			if err := json.Unmarshal([]byte(proposal.PatchJSON), &payload); err != nil {
 				s.markProposalConflict(ctx, proposal.ID)
-				return SubmitResult{}, ErrRevision
+				return SubmitResult{}, fmt.Errorf("%w: malformed daily plan proposal", ErrValidation)
 			}
-			return SubmitResult{}, applyErr
+			plan, items, applyErr := s.app.ApplyDailyPlanProposal(ctx, userID, &proposal, payload)
+			if applyErr != nil {
+				s.markProposalConflict(ctx, proposal.ID)
+				if errors.Is(applyErr, ErrRevision) {
+					return SubmitResult{}, ErrRevision
+				}
+				return SubmitResult{}, applyErr
+			}
+			resultJSON, _ = json.Marshal(map[string]any{
+				"decision": "approve", "applied": true, "kind": "daily_plan",
+				"plan_id": plan.ID, "revision": plan.CurrentRevision,
+				"item_count": len(items), "proposal_id": proposal.ID,
+			})
+		} else {
+			var patches []map[string]any
+			if err := json.Unmarshal([]byte(proposal.PatchJSON), &patches); err != nil {
+				return SubmitResult{}, err
+			}
+			// ApplyProposal re-validates ownership, base revision, parent/child and
+			// cycles inside its transaction (invariant 4). A moved base revision yields
+			// ErrRevision → 412, and the proposal is marked conflict, never overwritten.
+			newRevision, applyErr := s.app.ApplyProposal(ctx, userID, &proposal, patches, proposal.BaseRevision)
+			if applyErr != nil {
+				if errors.Is(applyErr, ErrRevision) {
+					s.markProposalConflict(ctx, proposal.ID)
+					return SubmitResult{}, ErrRevision
+				}
+				return SubmitResult{}, applyErr
+			}
+			resultJSON, _ = json.Marshal(map[string]any{
+				"decision": "approve", "applied": true, "kind": "task_tree_patch",
+				"tree_revision": newRevision, "proposal_id": proposal.ID,
+			})
 		}
-		resultJSON, _ := json.Marshal(map[string]any{
-			"decision": "approve", "applied": true, "created_tasks": created, "proposal_id": proposal.ID,
-		})
 		if err := s.recordApproval(ctx, userID, part.ID, protocol.ApprovalApproved, string(resultJSON)); err != nil {
 			return SubmitResult{}, err
 		}
