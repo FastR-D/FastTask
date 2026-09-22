@@ -50,6 +50,7 @@ func NewAgentService(app *application.App, cfg config.Config) *application.Agent
 		application.WithCredentialsResolver(ModelCredentialsResolver(app, cfg)),
 		application.WithReasoningLevel(cfg.AgentReasoning),
 		application.WithReasoningPersistence(cfg.AgentReasoningPersist),
+		application.WithAttachmentDir(cfg.AttachmentDir),
 	)
 }
 

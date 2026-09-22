@@ -128,6 +128,11 @@ type PartType string
 const (
 	PartText     PartType = "text"
 	PartToolCall PartType = "tool-call"
+	// PartImage is an attachment reference (doc/chat-features.md §4.4). It carries a URL on our own
+	// API, never image bytes: the reference is what keeps a photo out of the transcript, the chunk log
+	// and the checkpoint.
+	PartImage PartType = "image"
+
 	// PartReasoning carries a model's chain of thought (doc/chat-features.md §3.3).
 	// It is display-only: nothing may parse or act on its text (agent.md §4
 	// invariant 4). ID separates the multiple reasoning segments one message can
@@ -148,6 +153,9 @@ type Part struct {
 	// Reasoning part identity (§3.3). Empty for every other part type.
 	ID string `json:"-"`
 
+	// Image part reference (§4.4): a URL on our own attachment endpoint.
+	Image string `json:"-"`
+
 	// Tool-call part.
 	ToolCallID string         `json:"-"`
 	ToolName   string         `json:"-"`
@@ -162,6 +170,9 @@ type Part struct {
 // TextPart builds a text part. An empty text is valid and required as the
 // append-text target before streaming begins (§2.7.1).
 func TextPart(text string) Part { return Part{Type: PartText, Text: text} }
+
+// ImagePart builds an attachment-reference part.
+func ImagePart(reference string) Part { return Part{Type: PartImage, Image: reference} }
 
 // ReasoningPart builds a reasoning part. An empty text is valid: like a text part
 // it is the append-text target established before the deltas arrive.
@@ -202,6 +213,11 @@ func (p Part) MarshalJSON() ([]byte, error) {
 			ID   string   `json:"id,omitempty"`
 			Text string   `json:"text"`
 		}{Type: p.Type, ID: p.ID, Text: p.Text})
+	case PartImage:
+		return json.Marshal(struct {
+			Type  PartType `json:"type"`
+			Image string   `json:"image"`
+		}{Type: p.Type, Image: p.Image})
 	case PartToolCall:
 		args := p.Args
 		if args == nil {
@@ -245,6 +261,14 @@ func (p *Part) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		p.ID, p.Text = wire.ID, wire.Text
+	case PartImage:
+		var wire struct {
+			Image string `json:"image"`
+		}
+		if err := json.Unmarshal(data, &wire); err != nil {
+			return err
+		}
+		p.Image = wire.Image
 	default:
 		var wire struct {
 			Text string `json:"text"`

@@ -11,24 +11,28 @@ import (
 )
 
 type Config struct {
-	Listen                string
-	Port                  int
-	PublicURL             string
-	DatabasePath          string
-	JWTSecret             string
-	AccessTTL             time.Duration
-	RefreshTTL            time.Duration
-	AdminIdentifier       string
-	AdminPassword         string
-	AdminName             string
-	WorkerInterval        time.Duration
-	WebDist               string
-	Environment           string
-	OpenAIBaseURL         string
-	OpenAIModel           string
-	OpenAIAPIKey          string
-	TranscriptionModel    string
-	AudioDir              string
+	Listen             string
+	Port               int
+	PublicURL          string
+	DatabasePath       string
+	JWTSecret          string
+	AccessTTL          time.Duration
+	RefreshTTL         time.Duration
+	AdminIdentifier    string
+	AdminPassword      string
+	AdminName          string
+	WorkerInterval     time.Duration
+	WebDist            string
+	Environment        string
+	OpenAIBaseURL      string
+	OpenAIModel        string
+	OpenAIAPIKey       string
+	TranscriptionModel string
+	AudioDir           string
+	// AttachmentDir is where agent image attachments are stored
+	// (doc/chat-features.md §4.3). Local disk, like the audio directory: the deployment is one binary
+	// plus its data directory, and no object store is introduced for bytes that never leave it.
+	AttachmentDir         string
 	PanelJWTSecret        string
 	ProviderEncryptionKey string
 	TrustedProxies        []string
@@ -82,6 +86,7 @@ func Load() (Config, error) {
 		OpenAIAPIKey:          env("OPENAI_API_KEY", ""),
 		TranscriptionModel:    env("OPENAI_TRANSCRIPTION_MODEL", ""),
 		AudioDir:              env("FASTTASK_AUDIO_DIR", "data/audio"),
+		AttachmentDir:         env("FASTTASK_ATTACHMENT_DIR", "data/attachments"),
 		PanelJWTSecret:        env("FASTTASK_PANEL_JWT_SECRET", env("FASTTASK_JWT_SECRET", "local-development-secret-change-me")),
 		ProviderEncryptionKey: strings.TrimSpace(env("FASTTASK_PROVIDER_ENCRYPTION_KEY", "")),
 		TrustedProxies:        envList("FASTTASK_TRUSTED_PROXIES", "10.22.33.0/24"),

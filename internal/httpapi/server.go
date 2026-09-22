@@ -226,6 +226,10 @@ func operationStatus(id string) int {
 		return http.StatusCreated
 	case "create-admin-user", "create-model-provider":
 		return http.StatusCreated
+	case "create-agent-thread", "create-agent-attachment":
+		return http.StatusCreated
+	case "delete-agent-thread", "delete-agent-attachment":
+		return http.StatusNoContent
 	case "generate-task-tree", "revise-task-tree", "generate-daily-plan", "generate-support-items", "create-conversation-message", "create-voice-transcription", "retry-agent-job":
 		return http.StatusAccepted
 	case "auth-logout":

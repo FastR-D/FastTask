@@ -327,6 +327,13 @@ func (h *testHost) beat() {
 	h.beats++
 }
 
+// threadID is the thread the run belongs to, read from the run row: the server owns the thread identity,
+// and a host learns it from the grant.
+func (h *testHost) threadID() string {
+	h.t.Helper()
+	return h.runStatus().ThreadID
+}
+
 func (h *testHost) runStatus() persistence.AgentRun {
 	h.t.Helper()
 	run, err := h.svc.Repository().GetRun(context.Background(), h.userID, h.runID)

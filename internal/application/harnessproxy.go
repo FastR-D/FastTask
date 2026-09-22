@@ -206,8 +206,10 @@ func (s *harnessProxy) rewriteRequest(ctx context.Context, body []byte, creds *M
 	// invisible to it. libfx always streams (§4.2).
 	payload["stream"] = true
 
-	// 2. System prompt and tools are the server's, not the host's (§4.3, agent-impl.md §6).
-	payload["messages"] = sanitizeMessages(payload["messages"], instructions)
+	// 2. System prompt and tools are the server's, not the host's (§4.3, agent-impl.md §6). Images are
+	//    expanded here rather than in the host, so every one of them passes an ownership check
+	//    (doc/chat-features.md §4.4).
+	payload["messages"] = s.sanitizeMessages(ctx, run.UserID, payload["messages"], instructions)
 	payload["tools"] = agent.WireTools(s.svc.tools.Definitions(ToolReadonly, ToolProposal))
 	payload["tool_choice"] = "auto"
 
@@ -230,7 +232,7 @@ func (s *harnessProxy) rewriteRequest(ctx context.Context, body []byte, creds *M
 // Dropping host-supplied system messages is what makes a prompt injection through the request
 // body impossible; the history itself is still forwarded, because that is what lets a run
 // continue across turns. It is never written to the database (§4.4.1 item 3).
-func sanitizeMessages(raw any, instructions string) []any {
+func (s *harnessProxy) sanitizeMessages(ctx context.Context, userID string, raw any, instructions string) []any {
 	list, _ := raw.([]any)
 	out := make([]any, 0, len(list)+1)
 	out = append(out, map[string]any{"role": "system", "content": instructions})
@@ -246,7 +248,7 @@ func sanitizeMessages(raw any, instructions string) []any {
 		cleaned := make(map[string]any, len(message))
 		for key, value := range message {
 			if key == "content" {
-				cleaned[key] = sanitizeContent(value)
+				cleaned[key] = s.sanitizeContent(ctx, userID, value)
 				continue
 			}
 			cleaned[key] = value
@@ -260,7 +262,7 @@ func sanitizeMessages(raw any, instructions string) []any {
 // model only as attachment references, expanded server-side after an ownership check
 // (doc/chat-features.md §4.4); base64 a host sent directly is dropped, so there is no path
 // into the provider that skips that check.
-func sanitizeContent(content any) any {
+func (s *harnessProxy) sanitizeContent(ctx context.Context, userID string, content any) any {
 	parts, ok := content.([]any)
 	if !ok {
 		return content
@@ -271,33 +273,46 @@ func sanitizeContent(content any) any {
 		if !ok {
 			continue
 		}
-		if kind, _ := part["type"].(string); kind == "image_url" || kind == "image" || kind == "input_image" {
-			if !isAttachmentReference(part) {
-				continue
-			}
+		kind, _ := part["type"].(string)
+		if kind != "image_url" && kind != "image" && kind != "input_image" {
+			out = append(out, part)
+			continue
 		}
-		out = append(out, part)
+		reference := imageReference(part)
+		attachmentID, ok := AttachmentIDFromRef(reference)
+		if !ok {
+			// Inline data, a foreign URL, or nothing at all: dropped. An image reaches the model only as
+			// a reference this server issued and can ownership-check (§4.4).
+			continue
+		}
+		dataURI, ok := s.svc.attachments.DataURI(ctx, userID, attachmentID)
+		if !ok {
+			continue
+		}
+		expanded := map[string]any{
+			"type":      "image_url",
+			"image_url": map[string]any{"url": dataURI},
+		}
+		out = append(out, expanded)
 	}
 	return out
 }
 
-// isAttachmentReference reports whether an image part points at one of our own attachments
-// rather than carrying data. Only those survive sanitization.
-func isAttachmentReference(part map[string]any) bool {
-	url := ""
+// imageReference pulls the URL out of whichever shape an SDK used for an image part.
+func imageReference(part map[string]any) string {
 	switch value := part["image_url"].(type) {
 	case string:
-		url = value
+		return value
 	case map[string]any:
-		url, _ = value["url"].(string)
+		if url, _ := value["url"].(string); url != "" {
+			return url
+		}
 	}
-	if url == "" {
-		url, _ = part["image"].(string)
+	if url, _ := part["image"].(string); url != "" {
+		return url
 	}
-	if url == "" || strings.HasPrefix(url, "data:") {
-		return false
-	}
-	return strings.Contains(url, "/agent/attachments/")
+	url, _ := part["url"].(string)
+	return url
 }
 
 // emitTurnLimitNotice tells the user the run stopped because the turn budget ran out, then
