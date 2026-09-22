@@ -1269,9 +1269,14 @@ CI 必须：
 
 | 主体 | 用于 | 说明 |
 |---|---|---|
-| 用户主 JWT | 线程 CRUD、附件、**取消** | 常规用户操作 |
-| **harness token** | 模型代理、工具执行、checkpoint、审批长轮询、心跳 | 见 [`harness.md`](harness.md) §10 |
+| 用户主 JWT | 线程 CRUD、附件、**取消**、工具清单 | 常规用户操作 |
+| **harness token** | 模型代理、工具执行、checkpoint、审批长轮询、心跳、**工具清单** | 见 [`harness.md`](harness.md) §10 |
 | 服务 Token | 无 | 本组不开放服务间调用 |
+
+> 🟢 `GET /agent/tools` 是**唯一**同时接受两种主体的端点：浏览器宿主用用户 JWT 拉清单，
+> 而 Node sidecar 手里只有服务端刚发的 run capability（[`harness.md`](harness.md) §8.1）。
+> 清单只是名字与 schema，不含凭据与用户数据，而它描述的每次调用在执行时都会再鉴权一次（§5.3），
+> 所以 capability 并没有因此多拿到任何权力。
 
 > ⚠️ **`harness_token` 与 §13 的 `run_token` 是两个不同的东西。**
 > §13 的 `run_token` 是独立 Worker 的 Job 租约令牌；本组的 `harness_token` 是 agent 运行能力令牌。
@@ -1281,16 +1286,21 @@ CI 必须：
 
 | 方法 | 路径 | 认证 | 说明 |
 |---|---|---|---|
-| GET | `/agent/tools` | 用户 | 工具清单投影，响应带 `ETag`（[`harness.md`](harness.md) §3.4、§10.3） |
+| GET | `/agent/tools` | 用户 **或 harness token** | 工具清单投影，响应带 `ETag`（[`harness.md`](harness.md) §3.4、§10.3） |
 | POST | `/agent/runs` | 用户 | 签发 harness token，下发 `model` / `instructions` / `tools_etag` / `heartbeat_interval_s` |
 | POST | `/agent/runs/{run_id}/openai/chat/completions` | **harness token** | **OpenAI 兼容**代理，SSE。Go 注入凭据、覆盖 system/tools、展开附件。**绕过 Huma**（§20.5） |
-| POST | `/agent/runs/{run_id}/tools/{name}` | **harness token** | 工具执行，body 带 `tool_call_id` |
+| POST | `/agent/runs/{run_id}/tools/{name}` | **harness token** | 工具执行。body 的 `tool_call_id` 与 `input` **均可选**：libfx 只给宿主入参与 abort signal，拿不到 id，缺失时按 `(run, 工具名, 最近一个尚无结果的 part)` 关联；关联不到返回结构化错误（[`harness.md`](harness.md) §4.4.1） |
 | GET | `/agent/runs/{run_id}/approvals/{proposal_id}` | **harness token** | 审批长轮询，分段 30 秒。**绕过 Huma**（§20.5） |
 | POST | `/agent/runs/{run_id}/heartbeat` | **harness token** | 10 秒一次；45 秒未收到则 run 置 `interrupted` |
 | POST | `/agent/runs/{run_id}/cancellation` | **用户 JWT** | 取消运行。**故意不接受 harness token**：取消是用户的权力 |
 
 `POST /agent/commands`（§13 之外的既有流式端点）请求体新增 `harness_mode: "wasm" \| "sidecar"`，
 响应头新增 `X-Harness-Run: <run_id>`。见 [`harness.md`](harness.md) §1.2。
+
+> 🟢 **Node sidecar 自己的 HTTP 面不在本表内**，因为它不是对外 API：只听 loopback（优先 unix socket），
+> 每条路由都要启动密钥，契约见 [`harness.md`](harness.md) §8.3。它与本组的唯一关系是
+> **它用 harness token 调本组的端点**，且 `POST /run` 的请求体额外携带 `model` / `instructions` /
+> `thread_id`——那是 grant 里的内容，因为这个进程没有凭据也没有自己的 system prompt。
 
 ### 20.3 对话线程
 

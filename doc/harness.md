@@ -1,7 +1,7 @@
 # FastTask Agent Harness 实现规格（libfx 双宿主）
 
-> 文档状态：🟡 待实现
-> 更新：2026-09-22
+> 文档状态：🟢 已实现（§1–§15 全部落地；§16 是 spike 记录）
+> 更新：2026-09-23
 > 上位决策：[ADR-0005](adr/0005-libfx-agent-harness.md)
 > 相关：[`agent.md`](agent.md)（不变量与工具分级，未变）、[`agent-impl.md`](agent-impl.md)（传输协议与数据模型，未变）、
 > [`chat-features.md`](chat-features.md)（多会话 / 思考过程 / 图片附件）、[`wiring.md`](wiring.md)（新增 `SidecarModule`）
@@ -268,22 +268,28 @@ libfx 打的是 `https://ai-gateway.vercel.sh/v4/ai/language-model`，请求体�
 ### 4.2 shim（宿主侧，两种模式共用同一份）
 
 ```ts
-// web/src/harness/shim.ts —— 约 80 行
+// web/src/harness/shim.ts（🟢 实现；下面是骨架，真实文件还处理目录请求与未知端点）
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 
-export function createGatewayFetch(runId: string, harnessToken: string): typeof fetch {
+export function createGatewayFetch(options): typeof fetch {
   // libfx 发往 ai-gateway.vercel.sh 的请求在这里被截下
   return async (input, init) => {
-    const opts = JSON.parse(String(init?.body))        // LanguageModelV4CallOptions
+    const path = gatewayPathOf(input)
+    if (path === null) return globalThis.fetch(input, init)   // 不是网关请求，原样放行
+    if (path === GATEWAY_MODELS_PATH) return modelCatalogResponse(options.model)
+    if (!GATEWAY_CHAT_PATHS.includes(path)) return errorResponseOf(...)   // 未知端点：不放行、只报告
+    // ⚠️ body 不一定是字符串：Node 交过来的是字节。用 Response 自己的读取器解码，
+    //    才能同时吃下 string / Uint8Array / ReadableStream。（真机实测踩过这个坑）
+    const opts = await parseCallOptions(init?.body)      // LanguageModelV4CallOptions
     const model = createOpenAICompatible({
       name: 'fasttask',
       // ⚠️ baseURL 必须是绝对 URL —— SDK 内部对它做 new URL()。
       //    同源的绝对 URL 仍是同源，不触发 CORS。（spike 实测踩过这个坑）
-      baseURL: `${globalThis.location?.origin ?? serverOrigin}/api/v1/agent/runs/${runId}/openai`,
-      apiKey: harnessToken,                            // 占位；真实凭据由 Go 注入
-    }).languageModel(opts.model ?? 'server-decides')
+      baseURL: gatewayBaseURL(options.runId, options.serverOrigin),
+      apiKey: currentToken(options.harnessToken),        // 占位；真实凭据由 Go 注入
+    }).languageModel(opts.model ?? options.model ?? 'server-decides')
     const { stream } = await model.doStream(opts)
-    return sseResponseOf(stream)                       // 编码回 V4 分片给 libfx
+    return streamResponseOf(stream)                      // 编码回 V4 分片给 libfx
   }
 }
 ```
@@ -292,7 +298,23 @@ export function createGatewayFetch(runId: string, harnessToken: string): typeof 
 
 - **`baseURL` 必须绝对。** 传相对路径会抛 `TypeError: Failed to construct 'URL': Invalid URL`。
 - shim 不碰凭据。`apiKey` 传 harness token 占位，Go 用真实凭据替换（§4.3）。
+  token 可以是 getter，这样心跳轮换 token 时不必重建 agent（§10.4）。
 - 浏览器与 sidecar 用**同一份文件**，差别只是 `location.origin` 与注入的 `serverOrigin`。
+- **请求体不是字符串。** `JSON.parse(String(init.body))` 在浏览器测试里能过、在 Node 里必然失败
+  （字节 → `"[object Uint8Array]"`），后果是每次补全都被 shim 自己 502 掉，libfx 无限重试直到
+  turn 预算耗尽——**外部看起来就是"模型不回答"**。用 `new Response(body).text()` 解码，
+  它接受所有 `BodyInit` 形态。
+- **libfx 在补全之前会先拉模型目录**（`GET /coding-agent/v1/models`），且**目录失败对 turn 是致命的**：
+  它会一直等，不报错。shim 因此必须**就地应答**目录请求（用服务端下发的 model 造一条目录），
+  而不是把它当"非补全请求"放行——放行等于让运行时访问 Vercel，违反 ADR-0005 §3.3。
+  同理，**未知的网关端点一律不放行**，只回错误并上报 `shim.unhandled`：libfx 升级新增调用时，
+  这会表现为一条日志而不是一个挂死的 run。
+- **`stopReason` 用的是 libfx 自己的词表**（真机实测为 `end_turn`，取消为 `cancelled`），不是 AI SDK 的
+  `stop`。Go 侧只区分 `cancelled` / `error`，其余映射为协议的 `stop`，所以对外词表不随 libfx 变化。
+
+以上四条都由 `web/src/harness/integration.test.ts` 守着：它加载**真实的 `libfx/node`**（原生插件），
+对一个脚本化的 OpenAI 兼容端点跑完整 turn，断言目录被就地应答、补全打到代理路径、
+bearer 是 capability 而非 provider key、工具真的被宿主执行。
 
 ### 4.3 Go 侧：一个普通的 OpenAI 兼容代理
 
@@ -348,6 +370,8 @@ Go 要认的 delta 字段只有四类：`content`、`reasoning_content`、`tool_
 
 1. **模型代理写"调用"**：`tool_calls` 完成时创建 tool-call part，写入 `tool_call_id` / `name` / `args`。
 2. **工具执行面写"结果"**：按 `tool_call_id` **更新同一个 part**，写入 result 或 `approval.status`。**不创建新 part。**
+   宿主拿不到 id 时（见下）按 `(run, 工具名, 最近一个尚无结果的 part)` 关联——宿主对**同名工具串行执行**，
+   所以这个关联唯一。
 3. **下一轮请求 `messages` 中的历史一律不写库。** 代理只从**响应流**取权威内容，
    **从不从请求体取**。这条同时封死了客户端伪造历史的路径。
 4. 去重键是 `(run_id, tool_call_id)`，数据库加唯一索引兜底。
@@ -356,6 +380,10 @@ Go 要认的 delta 字段只有四类：`content`、`reasoning_content`、`tool_
 
 - `tool-call` 分片**确实携带 `toolCallId`**，实测值 `{ type:'tool-call', toolCallId:'call_abc123',
   toolName:'list_goals', input:'{"status":"active"}' }`。代理侧按 id 关联的主方案成立。
+- **但宿主执行工具时拿不到这个 id**：libfx 调 `HostTool.execute(input, { signal })`，只给入参与一个
+  abort signal（`web/node_modules/libfx/fx-sdk.js` 的 `executeHostTool`）。所以「宿主把 id 带回来」这条
+  路走不通，§5 的请求体里 `tool_call_id` 是**可选**字段，缺失时按上面第 2 条的名字关联。
+  分片里的 id 仍然照写，因为**去重键与下一轮历史比对都要用它**。
 - **分片是交错的，不是严格嵌套。** 实测顺序：
 
   ```text
@@ -413,11 +441,15 @@ Body: { "input": { ... } }
 
 单次工具执行超时沿用 10 秒（`agent-impl.md` §6），**审批等待不计入**（§7）。
 
-请求体必须带 `tool_call_id`（见 §4.4.1 的可得性说明）：
+请求体（🟢 两个字段都可选，见 §4.4.1 的可得性说明）：
 
 ```jsonc
 { "tool_call_id": "call_...", "input": { ... } }
 ```
+
+`tool_call_id` 缺失时按 `(run, 工具名, 最近一个尚无结果的 part)` 关联；**关联不到就返回结构化错误**
+（`no pending "<name>" call in this run`），让模型自己纠正，而不是凭空造一个 part——
+否则 transcript 里会出现一次模型从未发起的调用。
 
 ### 5.1 一个 run = 一个用户消息 = 一次 `prompt()` = 一个 turn
 
@@ -539,36 +571,75 @@ Go `/openai` 端点（§4.3）。
 **没有 sidecar 时 agent 仍然可用**，只是缺 JSPI 的浏览器（旧版 Chromium 内核、
 iOS 27 以前的 Safari、flag 未开的 Firefox）用不了。部署方可以按自己的用户构成选择是否部署。
 
-### 8.2 形态
+### 8.2 形态（🟢 已实现）
 
-- 独立 Node 进程，入口 `sidecar/`，复用 `web/src/harness/` 的编译产物。
-- **仅监听 loopback**，优先 unix socket；TCP 时必须绑 `127.0.0.1`。
-- 与 Go 之间用启动时生成的共享密钥鉴权。
+- 独立 Node 进程。源码 `sidecar/src/main.ts`，构建命令 **`npm run build:sidecar`（在 `web/` 下执行）**，
+  产物 `sidecar/dist/host.mjs`。构建放在 `web/` 而不是 `sidecar/`，是因为 sidecar **复用**
+  `web/src/harness/` 的 shim 与工具投影，依赖必须按 `web/node_modules` 解析。
+- 产物是自包含 bundle，**只有 `libfx` 保持 external**：它的原生插件要在运行时从磁盘加载，无法内联。
+  sidecar 通过 `FASTTASK_WEB_ROOT` 从 web 工作区的 `node_modules` 解析 `libfx/node`，
+  **不安装第二份 6 MB 原生插件**。
+- **仅监听 loopback**，优先 unix socket；TCP 时必须绑 `127.0.0.1`/`::1`/`localhost` 且带端口，
+  其余一律拒绝启动（`parseEndpoint`）。
+- **每一条路由都要密钥**，`/healthz` 也不例外：一个未认证的探测不该知道这里有没有宿主。
+  密钥默认由 Go 启动时生成并经环境变量交给子进程；外部托管时由部署方提供（§8.4）。
 - 需要 Node.js 20+；原生插件在 Linux 需 glibc 2.34+，不满足时 libfx 回落到 Node 的 WASM 后端，
-  而**某些 Node 版本需要 `--experimental-wasm-jspi`**，属已知坑，`doctor` 要检出。
+  而**某些 Node 版本需要 `--experimental-wasm-jspi`**，属已知坑，`doctor` 要检出，
+  `/healthz` 的 `native_addon: false` 与 `detail` 也会说明。
+- **诊断走 stderr**，由父进程转发进服务日志：manifest 数量、每次工具调用与其拒绝原因、
+  libfx 自己的重试判定（`modelResponseRecovery`）、shim 错误。一个解释不了失败的宿主没法运维（§3.1 规则 3）。
 
-### 8.3 接口
+### 8.3 接口（🟢 已实现）
 
 ```
-POST /run          { run_id, harness_token, prompt, checkpoint? }
-                   → { stop_reason, usage, checkpoint }
+POST /run          { run_id, harness_token, thread_id, prompt, checkpoint?, libfx_version?,
+                     model, instructions }
+                   → { stop_reason, usage?, checkpoint?, libfx_version?, error_message? }
 POST /run/{run_id}/cancel                  ← §5.2 的取消通道
-GET  /healthz      → { ok, node_version, native_addon: bool, libfx_version }
+GET  /healthz      → { ok, node_version, native_addon: bool, libfx_version, detail }
 ```
 
 `/run` **不向 Go 回流任何对话内容**——文本与工具调用已由 §4.4 的代理写入。
 
-### 8.4 生命周期由 uber-fx 管
+两条与浏览器宿主的差异，都是「这个进程手里只有 run capability」推出来的：
 
-新增 `internal/bootstrap/sidecar.go`，按 [`wiring.md`](wiring.md) §6 的规则：
+- **`model` / `instructions` / `thread_id` 随请求下发。** sidecar 不保存凭据、也没有自己的 system prompt，
+  浏览器宿主从 `POST /agent/runs` 的 grant 里读到的东西，它只能从这里读到。代理仍然不信这些值：
+  每次调用照旧强制自己的 model 与 system（§4.2）。
+- **checkpoint 写入不带 `stop_reason`。** 带 `stop_reason` 的 checkpoint 写入就是 run 的终态信号（§5.1），
+  浏览器宿主必须发，因为没有别人看见它的 turn 结束；sidecar 的 turn 结束在一次 Go 正阻塞等待的调用里，
+  所以**由 Go 依据 `/run` 的返回记录终态**。两边都写就会有两个进程完成同一个 run。
+
+`stop_reason` 用的是 libfx 自己的词表（实测为 `end_turn`、`cancelled`），Go 侧只区分
+`cancelled` / `error`，其余一律映射为协议里的 `stop`（`internal/application/harnesslifecycle.go`），
+因此对外词表不随 libfx 变化。
+
+工具调用侧同样有一处必要差异：libfx 交给 `HostTool.execute()` 的只有入参与一个 abort signal，
+**没有 tool call id**，所以 `POST /agent/runs/{id}/tools/{name}` 的 `tool_call_id` 是可选字段，
+缺失时按 `(run, 工具名, 最近一个没有结果的 part)` 关联——宿主对同名工具串行执行，因此这个关联是唯一的（§4.4.1）。
+同理 `GET /agent/tools` 接受 run capability：manifest 只是名字与 schema，不含凭据与用户数据，
+而它描述的每次调用在执行时还会再鉴权一次（§5.3）。
+
+### 8.4 生命周期（🟢 已实现）
+
+`internal/bootstrap/sidecar.go`，按 [`wiring.md`](wiring.md) §6 的规则，支持两种托管方式，
+由 `FASTTASK_SIDECAR_SPAWN` 选择（**默认 `true`**）：
+
+| | `spawn=true`（默认，本节原文） | `spawn=false`（[`tech.md`](tech.md) §21.4 的 systemd 单元） |
+|---|---|---|
+| 谁启动进程 | Go 的 `OnStart` | `fasttask-sidecar.service`（`PartOf=fasttask.service`） |
+| 密钥 | Go 启动时生成，经环境变量交给子进程 | 部署方提供，`FASTTASK_SIDECAR_SECRET` 两侧同值；**缺失则拒绝启动** |
+| 崩溃处理 | 自动重启 + 退避；连续失败达阈值标记不可用 | 由 systemd 重启；Go 侧只做**就绪探测**，连续失败达阈值标记不可用，恢复后自动可用 |
+| `OnStop` | SIGTERM → 宽限 → SIGKILL，并删除自己的 socket 文件 | 不发信号、不删 socket（不归它管），只停探测 |
+
+两种方式共同的部分：
 
 - 配置项 `sidecar.enabled`（**默认 `off`**，因为它是兜底而非必需）、`sidecar.node_path`、
-  `sidecar.socket`、`sidecar.start_timeout`。
-- 启用时 `OnStart` 启动进程并等 `/healthz`；**就绪超时应失败启动**，不带病运行。
-- `OnStop` 先 SIGTERM，宽限期后 SIGKILL；注册位置早于 `HTTPModule`，使其晚于 HTTP 停止。
-- 进程意外退出自动重启并带退避；连续失败达阈值则把「sidecar 模式」标记为不可用，
-  **但不影响 WASM 模式**。
-- `doctor` 新增：Node 版本、glibc、`/healthz`、原生插件可用性。
+  `sidecar.socket`、`sidecar.start_timeout`、`sidecar.spawn`、`sidecar.secret`。
+- 启用时 `OnStart` 等 `/healthz`；**就绪超时应失败启动**，不带病运行。
+- 注册位置早于 `HTTPModule`，使其晚于 HTTP 停止。
+- 连续失败达阈值只把「sidecar 模式」标记为不可用，**不影响 WASM 模式**（§14.10）。
+- `doctor`：Node 版本、glibc、`/healthz`、原生插件可用性。
 
 ### 8.5 两种模式的用户可感知差异
 
@@ -860,3 +931,34 @@ async function pickFetch(){ return isNode() ? lazyNodeFetch() : globalThis.fetch
 spike 的依赖、`spike-gateway.ts`、`main.tsx` 与 `vite.config.ts` 改动**已全部回滚**，
 `web/` 工作区干净，构建回到 843.04 kB 基线。
 `node_modules` 中仍残留 spike 装过的包，`npm ci` 即可清除。
+
+### 16.6 🟢 真机端到端验证（2026-09-23，实现完成后）
+
+§16.1–§16.5 验证的是 **shim 能否在产物里跑通一次补全**。实现落地后又做了一轮**全链路真机验证**：
+真实 Go 服务 + 真实 Node sidecar（原生插件）+ 真实模型（`qwen3.8-max`，经本地网关），
+并在 Go 与上游之间插一个记录代理，把**每一轮模型请求的 messages 原样落盘**。
+
+跑通的两条链路：
+
+| 场景 | 结果 |
+|---|---|
+| 纯问答（`1 加 1 等于几`） | run `succeeded`，`model_calls=1`，reasoning part + text part 落库 |
+| 工具调用（`调用 list_goals 并报标题`） | run `succeeded`，`model_calls=2`，reasoning → tool-call（含 result）→ reasoning → text 四个 part 按 idx 落库 |
+
+**这一轮查出三个只靠 mock 永远查不出的缺陷**（均已修，见 §4.2、§4.4.1、§8.3）：
+
+1. **shim 读不出请求体。** `init.body` 在 Node 里是字节不是字符串，`JSON.parse(String(...))` 抛错 →
+   shim 自己回 502 → libfx 指数退避重试到 turn 预算耗尽。**外部表现是"模型不回答"，日志里什么都没有。**
+2. **shim 把模型目录请求也当补全处理并失败。** libfx 补全前先 `GET /coding-agent/v1/models`，
+   目录失败对 turn 是致命的：它一直等，不报错、不超时。
+3. **reasoning part 的主键在一个 run 内跨模型调用冲突。** id 只按调用内序号编号，第二次调用撞第一次的键 →
+   插入失败 → 转写副本中途断流 → 宿主看到被截断的响应并重试 → 8 次调用烧光预算，
+   run 最后以"已达到工具调用轮次上限"**成功**收尾，而模型其实第二轮就答对了。
+
+三条的共同点是**失败被吞掉**：宿主只看到"没有输出"，服务端只看到"预算用尽"。
+因此这一轮同时补了两处可观测性（§8.2 的诊断、§4.4 代理提前结束时的一行日志），
+并把 `web/src/harness/integration.test.ts`（加载真实 `libfx/node`）与
+`TestReasoningAcrossModelCallsKeepsItsOwnParts`（去掉修复即失败）留作回归。
+
+> **教训值得写进文档**：`createFxAgent` 被 mock 掉的测试只能证明"我们的代码自洽"，
+> 证明不了"我们的代码和 libfx 说得上话"。任何适配层都必须有一条**加载真实依赖**的测试。

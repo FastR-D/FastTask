@@ -1,7 +1,7 @@
 # FastTask 对话能力扩展：多会话 / 思考过程 / 图片附件
 
-> 文档状态：🟡 待实现
-> 更新：2026-09-22
+> 文档状态：🟢 已实现（多会话 / 思考过程 / 图片附件三项均已落地）
+> 更新：2026-09-23
 > 上位决策：[ADR-0002](adr/0002-assistant-transport.md)（协议未变）、[ADR-0005](adr/0005-libfx-agent-harness.md)（网关链路）
 > 相关：[`agent-impl.md`](agent-impl.md)（服务端状态结构）、[`frontend.md`](frontend.md)（运行时接线）、[`harness.md`](harness.md) §4（模型网关）
 
@@ -60,6 +60,29 @@ const runtime = useRemoteThreadListRuntime({
 > **注意**：`useRemoteThreadListRuntime` 在 `@assistant-ui/react` 里的实现路径是
 > `legacy-runtime/runtime-cores/remote-thread-list/`。它是从 `@assistant-ui/core/react` 重导出的当前公开 API，
 > 但 `legacy-runtime` 这个路径名值得留意——**升级 assistant-ui 时把这条接线列为重点回归项**。
+
+#### 2.1.1 🟢 实现取舍：没有用 `useRemoteThreadListRuntime`
+
+上面的接法是本文档的推荐，**实现走了另一条路**，理由是这条路径与本项目已有的两处约束冲突：
+
+1. `runtimeHook` 按线程实例化意味着每个线程各有一个 transport runtime，而本项目的一次 run 可能
+   **交给浏览器宿主驱动**（[`harness.md`](harness.md) §1.2）：驱动逻辑挂在 `onResponse` 上，
+   由 `web/src/agent/runtime.ts` 这一个文件收敛（ADR-0002 §4）。按线程实例化会把「谁在驱动这个 run」
+   变成每线程一份状态，取消、心跳、审批轮询都要跟着分身。
+2. `legacy-runtime` 路径下的线程列表语义（本地临时 id、乐观合并）与 §2.5 的删除语义、
+   §2.4 的 checkpoint 恢复都要再对一遍，收益只是少写一个列表组件。
+
+实际实现：
+
+- **线程目录自己维护**：`web/src/agent/threads.ts` 直接调 §2.2 的 Go 端点（列表分页、创建、重命名、
+  归档、删除、标题生成），`web/src/agent/index.tsx` 渲染列表并持有当前线程。
+- **切换线程 = 换 key 重挂 transport runtime**，挂载前 `GET /agent/threads/{id}/state` 取服务端状态作为
+  `initialState`。同一时刻只有一个 runtime 实例，因此「谁在驱动」始终唯一。
+- **`threadId` 走请求体**（`prepareAgentCommand` 从服务端状态里取），端点保持非线程作用域。
+  本文档 §2.1 说「两者取其一」，实现取的是后者（body）。原因：assistant-ui 在首条命令前会先赋一个
+  `__LOCALID_...` 的临时 remoteId，路径携带会让第一条消息打到不存在的线程上；body 携带则由
+  `prepareAgentCommand` 把临时 id 归一为 `null`，服务端据此建线程并回填真实 id。
+  **服务端只有一个 threadId 来源**这条要求仍然成立：路径里没有 threadId。
 
 ### 2.2 `RemoteThreadListAdapter` → Go 端点
 
@@ -227,6 +250,12 @@ Go 代理**不覆盖**它（与 `system` / `tools` 不同——档位不影响�
    同时提供管理员开关，关闭后 Go 代理**丢弃 reasoning 分片不落库**——
    有些部署不希望思考链留在数据库里。
 
+   🟢 **实现形态**：开关是**部署级配置** `FASTTASK_AGENT_REASONING_PERSIST`（默认 `true`），
+   经 uber-fx 注入 `AgentService`，代理在 `ReasoningDelta` 里直接丢弃分片——**既不落库也不进 chunk 流**，
+   所以关闭后前端连实时思考过程都看不到（这正是「不希望思考链留下」的部署想要的）。
+   没有做成数据库里的管理员 UI 项：它是一个「数据是否落地」的合规决定，属于部署方而不是使用者，
+   放进 UI 反而会让一次误点改变既有数据的留存策略。
+
 ---
 
 ## 4. 图片附件
@@ -330,7 +359,7 @@ GET    /api/v1/agent/attachments/{id}   ← 仅所有者可读，用于 UI 回�
 
 | 事项 | 默认取值 | 何时重新评估 |
 |---|---|---|
-| 线程标题生成 | 确定性截断，不调模型（§2.4） | 用户反馈标题质量差时 |
-| 思考内容默认是否持久化 | 是，可由管理员关闭 | 数据库体积成为问题时 |
+| 线程标题生成 | 🟢 确定性截断，不调模型（§2.4）；另有 `POST /agent/threads/{id}/title` 显式重算 | 用户反馈标题质量差时 |
+| 思考内容默认是否持久化 | 🟢 是，部署级 `FASTTASK_AGENT_REASONING_PERSIST` 可关（§3.4 规则 3） | 数据库体积成为问题时 |
 | 附件是否支持 PDF | 否，仅图片 | 走 `integration/` 的 FastRead 边界，不由 agent 直接解析 |
 | 线程数量上限 | 不设限，只分页 | 出现性能问题时 |
