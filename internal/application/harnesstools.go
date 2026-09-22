@@ -36,12 +36,17 @@ const approvalPollInterval = 250 * time.Millisecond
 // unit so the harness stays inside the wiring.md §9 method budget per struct.
 type harnessTools struct{ harnessBase }
 
-// HarnessToolCall is the body of POST /agent/runs/{run_id}/tools/{name} (§5). The
-// tool_call_id ties the execution back to the part the model proxy already wrote, so a
-// result can never attach itself to the wrong call (§4.4.1).
+// HarnessToolCall is the body of POST /agent/runs/{run_id}/tools/{name} (§5).
+//
+// tool_call_id ties the execution back to the part the model proxy already wrote, so a result can never
+// attach itself to the wrong call (§4.4.1) — but it is OPTIONAL, because a libfx host cannot send one:
+// HostTool.execute() receives the input and an abort signal and no call id. With it absent the call is
+// matched on (run, tool name) instead, which is unambiguous because a host runs same-name calls one at a
+// time. Both fields are marked not-required so the schema says what the server actually accepts; a
+// required tool_call_id made every host tool call fail validation before it reached that logic.
 type HarnessToolCall struct {
-	ToolCallID string         `json:"tool_call_id"`
-	Input      map[string]any `json:"input"`
+	ToolCallID string         `json:"tool_call_id" required:"false"`
+	Input      map[string]any `json:"input" required:"false"`
 }
 
 // HarnessToolOutcome is what a host's execute() resolves with. A tool failure is a
@@ -107,8 +112,24 @@ func (s *harnessTools) ExecuteHarnessTool(ctx context.Context, p HarnessPrincipa
 	if !ok {
 		return s.recordToolFailure(ctx, sess, run, toolCallID, name, args, toolError("unknown tool %q", name)), nil
 	}
+	var correlated *persistence.AgentMessagePart
 	if toolCallID == "" {
-		return s.recordToolFailure(ctx, sess, run, toolCallID, name, args, toolError("tool_call_id is required")), nil
+		// A libfx HostTool is called with its input and an abort signal, and no call id, so a host has
+		// nothing to echo back (§4.4.1). The call is matched to the part the model proxy already wrote
+		// for it; refusing here instead would fail every tool call a browser or sidecar host makes.
+		part, err := s.correlateToolCall(ctx, run, sess, name)
+		if err != nil {
+			return HarnessToolOutcome{}, err
+		}
+		if part == nil {
+			// Nothing is waiting for a result under that name. Saying so reaches the model as a tool
+			// error, which is a recoverable turn; inventing a part would put a call in the transcript
+			// that no model ever made.
+			return s.recordToolFailure(ctx, sess, run, "", name, args,
+				toolError("no pending %q call in this run", name)), nil
+		}
+		correlated = part
+		toolCallID = derefString(part.ToolCallID)
 	}
 	if problems := s.svc.tools.ValidateArgs(name, args); len(problems) > 0 {
 		return s.recordToolFailure(ctx, sess, run, toolCallID, name, args,
@@ -121,9 +142,12 @@ func (s *harnessTools) ExecuteHarnessTool(ctx context.Context, p HarnessPrincipa
 	}
 	tc := ToolContext{UserID: p.UserID, ThreadID: p.ThreadID, RunID: p.RunID, ActiveGoalID: derefString(thread.GoalID)}
 
-	part, err := s.ensureToolCallPart(ctx, sess, run, toolCallID, name, args)
-	if err != nil {
-		return HarnessToolOutcome{}, err
+	part := correlated
+	if part == nil {
+		part, err = s.ensureToolCallPart(ctx, sess, run, toolCallID, name, args)
+		if err != nil {
+			return HarnessToolOutcome{}, err
+		}
 	}
 
 	// Both levels execute OUTSIDE any business transaction with the §6 per-call timeout.
@@ -154,6 +178,33 @@ func (s *harnessTools) toolTimeout() time.Duration {
 		return s.svc.limits.ToolTimeout
 	}
 	return DefaultLoopLimits().ToolTimeout
+}
+
+// correlateToolCall finds the part an id-less tool call belongs to (§4.4.1), or nil when there is none.
+//
+// The name is enough because a host runs same-name calls sequentially (web/src/harness/tools.ts), so at
+// most one part of that name is waiting for a result at a time. The wait is short and bounded: the proxy
+// writes the part while it reads the model's stream, and a host cannot know about the call until that
+// stream reached it, so a miss means the model never made one rather than that the row is still on its way.
+func (s *harnessTools) correlateToolCall(ctx context.Context, run *persistence.AgentRun, sess *runSession, name string) (*persistence.AgentMessagePart, error) {
+	for attempt := 0; attempt < 5; attempt++ {
+		part, err := s.repo().LatestUnfinishedToolPart(ctx, run.UserID, sess.assistantID, name)
+		if err == nil {
+			return part, nil
+		}
+		if !persistence.IsNotFound(err) {
+			return nil, err
+		}
+		if attempt == 4 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return nil, nil
 }
 
 // ensureToolCallPart returns the part carrying this tool call, creating it when the model

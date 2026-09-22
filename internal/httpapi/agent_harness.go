@@ -3,8 +3,10 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -105,6 +107,12 @@ func (s *Server) handleAgentModelProxy(c *gin.Context) {
 			c.Writer.Flush()
 		}
 		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, context.Canceled) {
+				// The transcribing copy gave up: either the transcript could not be written or the run was
+				// cancelled under it. Both end the stream the host is reading, and neither is visible
+				// anywhere else — a host just sees a response that stopped early and retries it.
+				fmt.Fprintf(os.Stderr, "agent model proxy: run %s ended early: %v\n", principal.RunID, readErr)
+			}
 			return
 		}
 	}

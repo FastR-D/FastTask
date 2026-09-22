@@ -90,10 +90,10 @@ type StreamSink interface {
 // assembled result.
 type nopSink struct{}
 
-func (nopSink) TextDelta(context.Context, string) error         { return nil }
-func (nopSink) ReasoningDelta(context.Context, string) error    { return nil }
+func (nopSink) TextDelta(context.Context, string) error            { return nil }
+func (nopSink) ReasoningDelta(context.Context, string) error       { return nil }
 func (nopSink) ToolCallDelta(context.Context, ToolCallDelta) error { return nil }
-func (nopSink) Finish(context.Context, string) error            { return nil }
+func (nopSink) Finish(context.Context, string) error               { return nil }
 
 // StreamParser turns the bytes of an OpenAI-compatible SSE response into sink calls, one
 // buffer at a time. It is incremental because the proxy forwards bytes it has already
@@ -300,9 +300,9 @@ type streamChunk struct {
 	Choices []struct {
 		Index int `json:"index"`
 		Delta struct {
-			Content         string `json:"content"`
+			Content          string `json:"content"`
 			ReasoningContent string `json:"reasoning_content"`
-			ToolCalls       []struct {
+			ToolCalls        []struct {
 				Index    *int   `json:"index"`
 				ID       string `json:"id"`
 				Type     string `json:"type"`

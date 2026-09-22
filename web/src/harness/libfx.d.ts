@@ -13,6 +13,12 @@ declare module 'libfx/wasm' {
   export * from 'libfx'
 }
 
+// The Node entry the sidecar loads (doc/harness.md §8.2). Same API, different backend: it prefers the
+// native addon and falls back to WASM, which is why the sidecar reports which one it got.
+declare module 'libfx/node' {
+  export * from 'libfx'
+}
+
 declare module 'libfx' {
   /** What libfx hands a host tool besides its input. It carries an abort signal and NOTHING else —
    *  in particular no tool call id, which is why the server correlates a result by
