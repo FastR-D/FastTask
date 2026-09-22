@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { clearSession, ensureFreshAccessToken, hasRefreshToken, login, logout, token } from './api'
+import { clearSession, ensureFreshAccessToken, hasRefreshToken, login, logout, offlineSessionAvailable, request, token } from './api'
 
 // jsonResponse builds the minimal Response shape execute()/refreshAccess() read.
 function jsonResponse(body: unknown, status = 200): Response {
@@ -59,6 +59,7 @@ describe('api session storage (pwa.md §4 / frontend.md §5)', () => {
     expect(token.get()).toBeNull()
     expect(hasRefreshToken()).toBe(false)
     expect(cacheNames).toEqual([])
+    expect(offlineSessionAvailable()).toBe(false)
   })
 
   it('ensureFreshAccessToken reuses a valid in-memory token without a network call', async () => {
@@ -105,6 +106,25 @@ describe('api session storage (pwa.md §4 / frontend.md §5)', () => {
     await expect(ensureFreshAccessToken()).resolves.toBeNull()
     expect(localStorage.getItem('fasttask_refresh')).toBe('rt-offline')
     expect(cacheNames).toEqual(['workbox-precache', 'ft-api-user'])
+  })
+
+  it('reads only the signed-in user’s cached plan after an offline cold start', async () => {
+    localStorage.setItem('fasttask_refresh', 'rt-offline')
+    localStorage.setItem('fasttask_offline_user', JSON.stringify({ id: 'user-1', timezone: 'Asia/Singapore' }))
+    const matched: string[] = []
+    vi.stubGlobal('caches', {
+      keys: async () => ['ft-api-snapshots'], delete: async () => true,
+      open: async () => ({ match: async (key: string) => {
+        matched.push(key)
+        return key.includes('_u=user-1') ? jsonResponse({ plan: { id: 'cached-plan' }, items: [] }) : undefined
+      } }),
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch') }))
+    await expect(ensureFreshAccessToken()).resolves.toBeNull()
+    expect(offlineSessionAvailable()).toBe(true)
+    await expect(request<{plan:{id:string}}>('/daily-plans/current')).resolves.toMatchObject({ data: { plan: { id: 'cached-plan' } } })
+    expect(matched).toHaveLength(1)
+    await expect(request('/tasks')).rejects.toThrow('需要联网')
   })
 
   it('logout clears the local session even when the server call fails', async () => {

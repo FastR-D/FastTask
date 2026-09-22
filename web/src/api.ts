@@ -1,5 +1,8 @@
+import type { User } from './types'
+
 const API = '/api/v1'
 const REFRESH_KEY = 'fasttask_refresh'
+const OFFLINE_USER_KEY = 'fasttask_offline_user'
 // Refresh this far ahead of the real expiry so a token never lapses mid-request.
 const EXPIRY_SKEW_MS = 60_000
 
@@ -18,6 +21,27 @@ let accessExpiry = 0 // epoch ms of the access token's exp claim; 0 = unknown/ex
 // rotate the refresh token exactly once (frontend.md §5: shared with refreshInFlight).
 type RefreshResult = 'refreshed' | 'rejected' | 'unavailable'
 let refreshInFlight: Promise<RefreshResult> | null = null
+let lastRefreshResult: RefreshResult | null = null
+
+export function readOfflineUser(): User | null {
+  try {
+    const raw = localStorage.getItem(OFFLINE_USER_KEY)
+    if (!raw) return null
+    const user = JSON.parse(raw) as User
+    return typeof user.id === 'string' && user.id ? user : null
+  } catch { return null }
+}
+
+export function rememberUser(user: User) {
+  if (!user?.id) return
+  try { localStorage.setItem(OFFLINE_USER_KEY, JSON.stringify(user)) } catch { /* storage unavailable */ }
+}
+
+// Only a failed network refresh permits opening a retained read-only snapshot.
+// A rejected refresh clears the session and must never enter offline mode.
+export function offlineSessionAvailable(): boolean {
+  return lastRefreshResult === 'unavailable' && hasRefreshToken() && readOfflineUser() !== null
+}
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message) }
@@ -72,7 +96,8 @@ export function hasRefreshToken(): boolean {
 export async function clearSession(): Promise<void> {
   accessToken = null
   accessExpiry = 0
-  try { localStorage.removeItem(REFRESH_KEY) } catch { /* ignore */ }
+  lastRefreshResult = null
+  try { localStorage.removeItem(REFRESH_KEY); localStorage.removeItem(OFFLINE_USER_KEY) } catch { /* ignore */ }
   if (typeof caches !== 'undefined') {
     try {
       const keys = await caches.keys()
@@ -100,6 +125,7 @@ async function refreshAccess(): Promise<RefreshResult> {
     const credentials = await refreshed.json()
     storeAccess(credentials.access_token)
     writeRefresh(credentials.refresh_token)
+    rememberUser(credentials.user)
     return 'refreshed'
   } catch {
     return 'unavailable'
@@ -108,7 +134,7 @@ async function refreshAccess(): Promise<RefreshResult> {
 
 // singleFlightRefresh dedupes concurrent refreshes through refreshInFlight.
 function singleFlightRefresh(): Promise<RefreshResult> {
-  refreshInFlight ??= refreshAccess().finally(() => { refreshInFlight = null })
+  refreshInFlight ??= refreshAccess().then(result => { lastRefreshResult = result; return result }).finally(() => { refreshInFlight = null })
   return refreshInFlight
 }
 
@@ -128,7 +154,19 @@ async function execute<T>(path: string, init: RequestInit, retry: boolean): Prom
   if (!(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   const access = token.get()
   if (access) headers.set('Authorization', `Bearer ${access}`)
-  const response = await fetch(`${API}${path}`, { ...init, headers })
+  let response: Response
+  try {
+    response = await fetch(`${API}${path}`, { ...init, headers })
+  } catch (error) {
+    if (offlineSessionAvailable()) {
+      if (!init.method || init.method === 'GET') {
+        const snapshot = await readOfflineSnapshot<T>(path)
+        if (snapshot) return snapshot
+      }
+      throw new ApiError(0, '需要联网')
+    }
+    throw error
+  }
   if (response.status === 401 && retry && path !== '/auth/login' && path !== '/auth/refresh') {
     if (await singleFlightRefresh() === 'refreshed') return execute<T>(path, init, false)
   }
@@ -140,14 +178,29 @@ async function execute<T>(path: string, init: RequestInit, retry: boolean): Prom
   return { data: data as T, etag: response.headers.get('ETag') }
 }
 
+async function readOfflineSnapshot<T>(path: string): Promise<{ data: T; etag: string | null } | null> {
+  if (!/^\/(daily-plans\/current|goals(?:\/[^/]+\/task-tree)?)$/.test(path)) return null
+  const user = readOfflineUser()
+  if (!user || typeof caches === 'undefined') return null
+  try {
+    const key = new URL(`${API}${path}`, location.origin)
+    key.searchParams.set('_u', user.id)
+    const response = await (await caches.open('ft-api-snapshots')).match(key.toString())
+    if (response?.ok) return { data: await response.json() as T, etag: response.headers.get('ETag') }
+  } catch { /* no snapshot available */ }
+  return null
+}
+
 export function request<T>(path: string, init: RequestInit = {}) { return execute<T>(path, init, true) }
 
 export function idem() { return crypto.randomUUID() }
 
 export async function login(identifier: string, password: string) {
-  const { data } = await request<{access_token:string;refresh_token:string;user:unknown}>('/auth/login', { method: 'POST', body: JSON.stringify({ identifier, password }) })
+  const { data } = await request<{access_token:string;refresh_token:string;user:User}>('/auth/login', { method: 'POST', body: JSON.stringify({ identifier, password }) })
   storeAccess(data.access_token)
   writeRefresh(data.refresh_token)
+  rememberUser(data.user)
+  lastRefreshResult = null
   return data
 }
 
