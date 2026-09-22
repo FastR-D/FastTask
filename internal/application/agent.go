@@ -242,12 +242,14 @@ func NewAgentService(app *App, opts ...AgentOption) *AgentService {
 		// against identical state (§7).
 		approvalService:    &approvalService{app: app, repo: repo, store: app.Store},
 		threadStateService: &threadStateService{repo: repo},
+		// svc is filled in below: a rebuilt thread state needs the pending-proposal list.
 	}
 	// The harness reaches its collaborators through the service, so it is built after the
 	// fields exist and before options run: an option may replace the clock or the credentials
 	// resolver the harness reads at request time.
 	s.harnessService = newHarnessService(s)
 	s.approvalService.svc = s
+	s.threadStateService.svc = s
 	s.threadCatalogue = &threadCatalogue{svc: s}
 	s.attachments = NewAttachmentStore("", repo)
 	for _, opt := range opts {

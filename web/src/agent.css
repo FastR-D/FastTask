@@ -297,3 +297,154 @@
 .agent-composer.offline {
   opacity: 0.6;
 }
+
+/* A chain of thought is folded away by default (doc/chat-features.md §3.4). */
+.agent-reasoning {
+  margin: var(--mdui-spacing-small, 4px) 0;
+  border-inline-start: 2px solid var(--mdui-color-outline-variant);
+  padding-inline-start: var(--mdui-spacing-medium, 8px);
+  color: var(--mdui-color-on-surface-variant);
+  font-size: var(--mdui-typescale-body-small-size, 13px);
+}
+
+.agent-reasoning-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--mdui-spacing-small, 4px);
+  cursor: pointer;
+  list-style: none;
+}
+
+.agent-reasoning-body {
+  white-space: pre-wrap;
+  margin-top: var(--mdui-spacing-small, 4px);
+}
+
+/* Attached images in a sent message. */
+.agent-bubble img {
+  max-width: 100%;
+  border-radius: var(--mdui-shape-corner-medium, 12px);
+}
+
+/* Multi-session layout: the conversation list beside the thread (doc/chat-features.md §2). */
+.agent-layout {
+  display: flex;
+  gap: var(--mdui-spacing-medium, 8px);
+  align-items: stretch;
+  min-height: 0;
+  flex: 1;
+}
+
+.agent-threads {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mdui-spacing-small, 4px);
+  inline-size: 15rem;
+  flex: 0 0 auto;
+  border-inline-end: 1px solid var(--mdui-color-outline-variant);
+  padding-inline-end: var(--mdui-spacing-medium, 8px);
+  overflow-y: auto;
+}
+
+.agent-threads-head {
+  display: flex;
+  gap: var(--mdui-spacing-small, 4px);
+  align-items: center;
+}
+
+.agent-threads-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-thread {
+  display: flex;
+  align-items: center;
+  gap: var(--mdui-spacing-small, 4px);
+  border-radius: var(--mdui-shape-corner-small, 8px);
+}
+
+.agent-thread.active {
+  background: var(--mdui-color-secondary-container);
+}
+
+.agent-thread-open {
+  display: flex;
+  align-items: center;
+  gap: var(--mdui-spacing-small, 4px);
+  flex: 1;
+  min-inline-size: 0;
+  padding: var(--mdui-spacing-small, 4px);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.agent-thread-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.agent-thread-when {
+  font-size: var(--mdui-typescale-label-small-size, 11px);
+  color: var(--mdui-color-on-surface-variant);
+}
+
+.agent-thread-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+}
+
+.agent-thread:hover .agent-thread-actions,
+.agent-thread:focus-within .agent-thread-actions {
+  opacity: 1;
+}
+
+.agent-thread-actions mdui-icon {
+  cursor: pointer;
+  font-size: 18px;
+}
+
+.agent-thread-empty {
+  padding: var(--mdui-spacing-medium, 8px);
+  color: var(--mdui-color-on-surface-variant);
+  font-size: var(--mdui-typescale-body-small-size, 13px);
+}
+
+.agent-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-inline-size: 0;
+  min-height: 0;
+}
+
+.agent-attachment {
+  max-inline-size: 100%;
+  border-radius: var(--mdui-shape-corner-medium, 12px);
+}
+
+@media (max-width: 720px) {
+  /* A phone has no room for a permanent list; it collapses above the thread. */
+  .agent-layout {
+    flex-direction: column;
+  }
+
+  .agent-threads {
+    inline-size: auto;
+    border-inline-end: 0;
+    border-block-end: 1px solid var(--mdui-color-outline-variant);
+    padding-inline-end: 0;
+    max-block-size: 30vh;
+  }
+}

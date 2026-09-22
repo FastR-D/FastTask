@@ -1,4 +1,4 @@
-import { useAssistantTransportRuntime, type AssistantRuntime } from '@assistant-ui/react'
+import { useAssistantTransportRuntime, type AssistantRuntime, type AttachmentAdapter } from '@assistant-ui/react'
 import { ensureFreshAccessToken } from '../api'
 import { cancelActiveRun, driveRun, selectMode } from '../harness'
 import { convertState } from './converter'
@@ -62,9 +62,20 @@ export function harnessRunOf(response: Response): string | null {
   return response.headers.get('X-Harness-Run')
 }
 
+export type AgentRuntimeOptions = {
+  /** The image attachment adapter (doc/chat-features.md §4.2). Omitted in tests that do not exercise it. */
+  attachments?: AttachmentAdapter
+  /** Called when a run's stream ends, so the conversation list can re-read titles and recency (§2). */
+  onThreadChanged?: () => void
+}
+
 // useAgentRuntime wires the assistant-transport runtime. ALL transport wiring is
 // converged in this single file (ADR-0002 §4: "前端把运行时接线收敛在单个文件内").
-export function useAgentRuntime(initialState: ServerAgentState, onNotice: (message: string) => void): AssistantRuntime {
+export function useAgentRuntime(
+  initialState: ServerAgentState,
+  onNotice: (message: string) => void,
+  options: AgentRuntimeOptions = {},
+): AssistantRuntime {
   const runtime = useAssistantTransportRuntime<ServerAgentState>({
     // MUST be explicit: the default protocol is "data-stream", and omitting this
     // silently speaks the wrong protocol — the stream looks fine but messages never
@@ -80,6 +91,10 @@ export function useAgentRuntime(initialState: ServerAgentState, onNotice: (messa
     // before the first command. Only the ID returned by FastTask in state is a
     // server thread; sending the temporary ID makes the first message a 404.
     prepareSendCommandsRequest: prepareAgentCommand,
+    // Attachments are in the transport options, and the adapter uploads to our own storage so a message
+    // carries a reference instead of bytes (doc/chat-features.md §4.1, §4.2).
+    ...(options.attachments ? { adapters: { attachments: options.attachments } } : {}),
+    onFinish: () => options.onThreadChanged?.(),
     // A run the server handed to a browser host has to be driven from here: the Worker will not touch
     // it, and nothing else does (doc/harness.md §1.2). The stream keeps rendering from server state
     // while the host works, so the UI needs no change (§13 phase D).

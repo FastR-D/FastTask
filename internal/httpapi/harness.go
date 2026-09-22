@@ -295,6 +295,17 @@ func (s harnessRoutes) registerThreadRoutes(api huma.API) {
 		return &itemResponse[threadBody]{Body: threadBodyOf(view)}, nil
 	})
 
+	// The thread's transcript, in the same shape the SSE stream pushes (doc/agent-impl.md §2.7). A client
+	// that switches conversation — or reloads, or signs in elsewhere — reads the thread it named instead of
+	// whichever one happened to be last (doc/chat-features.md §2).
+	register(api, "get-agent-thread-state", http.MethodGet, "/agent/threads/{thread_id}/state", "Read a thread's conversation state", userSecurity(), func(ctx context.Context, input *threadInput) (*itemResponse[map[string]any], error) {
+		state, err := s.agent.ThreadState(ctx, principal(ctx).UserID, input.ThreadID)
+		if err != nil {
+			return nil, mapHarnessError(err)
+		}
+		return &itemResponse[map[string]any]{Body: map[string]any{"state": state}}, nil
+	})
+
 	type patchInput struct {
 		ThreadID string `path:"thread_id"`
 		IfMatch  string `header:"If-Match"`

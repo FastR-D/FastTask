@@ -18,6 +18,9 @@ import (
 // application declares more than 15 methods).
 type threadStateService struct {
 	repo *persistence.AgentRepository
+	// svc reaches the pieces a rebuilt state needs beyond the rows: the pending-proposal list that the
+	// approval cards render from.
+	svc *AgentService
 }
 
 // toProtocolMessage rebuilds a wire message from persisted rows.
@@ -103,6 +106,68 @@ func (s *threadStateService) LatestThreadState(ctx context.Context, userID strin
 	state.FastTask.ThreadID = run.ThreadID
 	state.IsRunning = run.Status == persistence.RunQueued || run.Status == persistence.RunRunning
 	return state, true, nil
+}
+
+// ThreadState loads one thread's authoritative state — the same shape §2.6 renders from — for a client
+// that named the thread it wants (doc/chat-features.md §2).
+//
+// It is rebuilt from the persisted parts rather than read from a run snapshot, because a thread outlives
+// any run: switching conversations, reloading, or signing in on a second device all land here with no run
+// in flight. When a run IS in flight, its status decides how the last assistant message is marked, so a
+// client that switches into a live thread sees the same thing a client that never left would.
+func (s *threadStateService) ThreadState(ctx context.Context, userID, threadID string) (protocol.State, error) {
+	thread, err := s.repo.GetThread(ctx, userID, threadID)
+	if err != nil {
+		return protocol.State{}, err
+	}
+	state := protocol.NewState()
+	// threadId comes from the row, not from a snapshot: it is what lets the client's next command continue
+	// this thread instead of opening another one (§2.2).
+	state.FastTask.ThreadID = thread.ID
+	state.FastTask.ActiveGoalID = derefString(thread.GoalID)
+	state.FastTask.PendingProposals = s.svc.pendingProposals(ctx, userID, threadID)
+
+	run, runErr := s.repo.GetActiveRunByThread(ctx, userID, threadID)
+	if runErr != nil && !persistence.IsNotFound(runErr) {
+		return protocol.State{}, runErr
+	}
+	if runErr == nil {
+		state.FastTask.RunID = run.ID
+		state.IsRunning = run.Status == persistence.RunQueued || run.Status == persistence.RunRunning ||
+			run.Status == persistence.RunCancelling
+		if strings.TrimSpace(run.StateJSON) != "" && run.StateJSON != "{}" {
+			// A run that has already checkpointed its state carries the exact snapshot its client saw,
+			// including the part indices an append-text depends on.
+			var snapshot protocol.State
+			if err := json.Unmarshal([]byte(run.StateJSON), &snapshot); err == nil && len(snapshot.Messages) > 0 {
+				snapshot.FastTask = state.FastTask
+				snapshot.IsRunning = state.IsRunning
+				return snapshot, nil
+			}
+		}
+	}
+
+	messages, err := s.repo.ListThreadMessages(ctx, userID, threadID)
+	if err != nil {
+		return protocol.State{}, err
+	}
+	for _, message := range messages {
+		status := protocol.CompleteStatus("")
+		if runErr == nil && message.Role == string(protocol.RoleAssistant) && message.RunID == run.ID {
+			switch run.Status {
+			case persistence.RunQueued, persistence.RunRunning, persistence.RunCancelling:
+				status = protocol.RunningStatus()
+			case persistence.RunAwaitingApproval:
+				status = protocol.RequiresActionStatus()
+			}
+		}
+		wire, err := s.toProtocolMessage(ctx, userID, message, status)
+		if err != nil {
+			return protocol.State{}, err
+		}
+		state.Messages = append(state.Messages, wire)
+	}
+	return state, nil
 }
 
 // ResumeCurrentState resolves a browser's temporary local thread ID to the

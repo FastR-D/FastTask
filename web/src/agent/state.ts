@@ -29,7 +29,14 @@ export type ServerToolCallPart = {
   approval?: ServerApproval
 }
 
-export type ServerMessagePart = ServerTextPart | ServerToolCallPart
+// A reasoning part carries a chain of thought (doc/chat-features.md §3.3). It is display-only: nothing may
+// parse it, and the converter must not let it influence a tool call or a status.
+export type ServerReasoningPart = { type: 'reasoning'; id?: string; text: string }
+
+// An image part carries a reference to a server-owned attachment, never bytes (§4.4).
+export type ServerImagePart = { type: 'image'; image: string }
+
+export type ServerMessagePart = ServerTextPart | ServerToolCallPart | ServerReasoningPart | ServerImagePart
 
 export type ServerMessage = {
   id: string
@@ -48,10 +55,12 @@ export type PendingProposal = {
 
 // FasttaskState carries business state alongside the conversation so both share
 // one stream instead of a separate poll (agent-impl.md §2.7). threadId is pushed
-// on a new thread's first run; activeGoalId is server-owned.
+// on a new thread's first run; activeGoalId is server-owned; runId names the run a
+// harness host has to drive (doc/harness.md §10.2).
 export type FasttaskState = {
   threadId?: string
   activeGoalId?: string
+  runId?: string
   pendingProposals?: PendingProposal[]
 }
 
