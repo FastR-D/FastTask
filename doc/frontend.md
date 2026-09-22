@@ -147,6 +147,19 @@ async function authHeaders() {
 
 测试相关的一条要点：`src/mdui.ts` 不在测试中加载，因此 mdui 元素**在 DOM 里但没有行为**。既有测试用 `closest('mdui-button')`、`toBeEnabled()` 做断言并能通过（属性是反射的），但不要断言 mdui 组件的交互行为。
 
+### 模型回复的 markdown 渲染
+
+助手气泡的 Text part 由 `web/src/agent/Markdown.tsx` 渲染（`react-markdown` + `remark-gfm`），通过 `MessagePrimitive.Parts` 的 `components={{ Text: MarkdownText }}` 挂上去。**用户气泡不套用 markdown**——那是用户自己打的纯文本，仍走默认的 `pre-wrap`。
+
+四条必须守住的约束：
+
+- **不引入 `@assistant-ui/react-markdown`**。它会带进 radix primitives，等于绕过 ADR-0004 §4.6 对 assistant-ui 官方组件包的否决；直接用 `react-markdown` 更小也更可控。
+- **不引入 `rehype-raw`**。模型输出里的裸 HTML 必须保持转义状态（`<img onerror=…>` 只能当文本显示），否则 `server.go:66` 的 CSP 挡不住已经进了 React 树的属性。链接一律 `target="_blank" rel="noopener noreferrer"`。
+- **自定义组件要先剥掉 `node` 再展开 props**。`react-markdown` 会把源 hast 节点作为 `node` 传给每个自定义组件，直接 `{...props}` 会在 DOM 上留下 `node="[object Object]"`。
+- **气泡的 `white-space: pre-wrap` 必须在 `.agent-md` 里复位成 `normal`**，否则 markdown 自己的换行会被再翻倍一次。
+
+宽表格在 400px 下的处理见 §7：`.agent-md-table` 是横向滚动容器，单元格关掉 `word-break` 以保持自然宽度；同时 `.agent-chat` / `.agent-viewport` / `.agent-msg` / `.agent-bubble` 都需要 `min-width: 0`，否则 flex/grid 的自动最小尺寸会让整页被表格撑破。
+
 ### 对话页需要改的一处
 
 `.chat-shell` 当前是 `height: calc(100dvh - 20rem)`（`styles.css:233`，移动端 `styles.css:250`）。这个魔数依赖页头的确切高度，而 assistant-ui 的 Thread viewport 需要由 flex/grid 约束、自行管理滚动的容器。接入时改成弹性约束（`minmax(0,1fr)`），**不要继续加魔数**。
