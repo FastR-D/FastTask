@@ -254,9 +254,9 @@ func decodeAgentBody(c *gin.Context, target any) error {
 // revision moved is 412 (§7.4); an empty/invalid command is 422.
 func agentSubmitError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, application.ErrEmptyCommand):
+	case errors.Is(err, application.ErrEmptyCommand), errors.Is(err, application.ErrValidation):
 		agentAbort(c, http.StatusUnprocessableEntity, err.Error())
-	case errors.Is(err, application.ErrApprovalDuplicate), errors.Is(err, application.ErrApprovalNotAwaiting):
+	case errors.Is(err, application.ErrApprovalDuplicate), errors.Is(err, application.ErrApprovalNotAwaiting), errors.Is(err, application.ErrConflict):
 		agentAbort(c, http.StatusConflict, err.Error())
 	case errors.Is(err, application.ErrRevision):
 		agentAbort(c, http.StatusPreconditionFailed, "the task tree changed before this approval; the proposal was marked conflict")

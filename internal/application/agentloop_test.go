@@ -153,19 +153,18 @@ func TestToolLoopNoToolCallsSucceeds(t *testing.T) {
 	if first.Messages[0].Role != "system" || !strings.Contains(first.Messages[0].Content, "最多三个") {
 		t.Fatalf("system prompt not server-owned: %#v", first.Messages[0])
 	}
-	// Readonly + proposal tools are advertised (§6). Phase D adds the proposal
-	// tool, so the loop offers 7 readonly + 1 proposal = 8.
-	if len(first.Tools) != 8 {
-		t.Fatalf("advertised %d tools, want 8 (7 readonly + 1 proposal)", len(first.Tools))
+	// Readonly + proposal tools are advertised (§6). Phase D adds the task-tree
+	// proposal tool and phase E adds the daily-plan proposal tool, so the loop
+	// offers 7 readonly + 2 proposal = 9.
+	if len(first.Tools) != 9 {
+		t.Fatalf("advertised %d tools, want 9 (7 readonly + 2 proposal)", len(first.Tools))
 	}
-	var sawProposal bool
+	advertised := map[string]bool{}
 	for _, tool := range first.Tools {
-		if tool.Name == "propose_task_tree_patch" {
-			sawProposal = true
-		}
+		advertised[tool.Name] = true
 	}
-	if !sawProposal {
-		t.Fatal("proposal tool not advertised to the model")
+	if !advertised["propose_task_tree_patch"] || !advertised["propose_daily_plan"] {
+		t.Fatal("proposal tools not advertised to the model")
 	}
 }
 
