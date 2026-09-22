@@ -125,6 +125,23 @@ func (s *Store) Transaction(ctx context.Context, fn func(*gorm.DB) error) error 
 	return err
 }
 
+// TxManager runs a unit of work inside a single database transaction. It is the
+// narrow port application services use to compose cross-aggregate writes (a
+// ProgressService use case that also mutates a Plan aggregate) without depending
+// on the whole Store (wiring.md §4.1). *Store is the production implementation.
+type TxManager interface {
+	WithTx(ctx context.Context, fn func(tx *gorm.DB) error) error
+}
+
+// WithTx implements TxManager. It aliases Transaction so a service can depend on
+// the narrow interface while reads still go through the concrete Store.
+func (s *Store) WithTx(ctx context.Context, fn func(tx *gorm.DB) error) error {
+	return s.Transaction(ctx, fn)
+}
+
+// compile-time proof that the Store satisfies the TxManager port.
+var _ TxManager = (*Store)(nil)
+
 func isBusy(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "database is locked") || strings.Contains(message, "database is busy")
