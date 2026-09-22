@@ -841,7 +841,7 @@ ReadWritePaths=/var/lib/fasttask
 
 Agent 对 Workspace 的访问需要单独测试，优先让 Agent 使用受限运行用户或沙箱，而不是扩大整个 FastTask 服务权限。
 
-### 21.4 🟡 Node sidecar（可选，ADR-0005）
+### 21.4 🟢 Node sidecar（可选，ADR-0005）
 
 **部署形态仍是单 Go 二进制。** 2026-09-23 的 spike（[`harness.md`](harness.md) §16）确认
 gateway shim 可在浏览器运行，因此 sidecar **不是必需组件**。
@@ -855,18 +855,31 @@ gateway shim 可在浏览器运行，因此 sidecar **不是必需组件**。
 
 选择部署时的约束：
 
-- **进程管理**：独立 systemd unit `fasttask-sidecar.service`，`PartOf=fasttask.service`，
-  由 uber-fx 的 `SidecarModule` 负责**就绪探测与重启判定**（[`harness.md`](harness.md) §8.4），
-  **不由 Go 进程 fork 管理生命周期**——与 §14「不使用应用自制 PID Daemon」一致。
-- **监听**：unix socket 优先（`/run/fasttask/sidecar.sock`），TCP 时必须 `127.0.0.1`。
-  **绝不监听 `0.0.0.0`，绝不经反向代理暴露。**
-- **鉴权**：Go 启动时生成共享密钥，经环境变量传给 sidecar。
+- **进程管理**：两种托管方式，由 `FASTTASK_SIDECAR_SPAWN` 选择，细节见
+  [`harness.md`](harness.md) §8.4 的对照表。
+  - `true`（默认）：Go 的 `OnStart` 启动子进程，崩溃自动重启并带退避，`OnStop` 走
+    SIGTERM → 宽限 → SIGKILL。
+  - `false`：独立 systemd unit `fasttask-sidecar.service`（`PartOf=fasttask.service`，
+    模板见 `deployments/systemd/`），Go 侧**只做就绪探测与可用性判定**，不 fork、不发信号、
+    不删 socket 文件。此时 `FASTTASK_SIDECAR_SECRET` 必须由部署方提供（两侧同值），
+    缺失则 `config.Load` 直接失败——一个认证不上自己兜底宿主的服务器只会把每次 run 都拒掉。
+  两种方式下，连续探测失败达阈值只把 sidecar 模式标记为不可用，**WASM 模式不受影响**。
+- **监听**：unix socket 优先（spawn 模式默认在数据库目录旁，外部托管建议
+  `/run/fasttask-sidecar/sidecar.sock`），TCP 时必须 `127.0.0.1`/`::1`/`localhost` 且带端口。
+  **绝不监听 `0.0.0.0`，绝不经反向代理暴露**；两侧都会在启动时拒绝非 loopback 端点。
+- **鉴权**：bearer 共享密钥，**每条路由都校验**（含 `/healthz`，未认证探测不该知道这里有没有宿主）。
+  默认由 Go 启动时生成并经环境变量传给子进程；外部托管时来自 `FASTTASK_SIDECAR_SECRET`。
+  密钥不落盘、不进日志，重启即轮换（外部托管时轮换等于改部署配置并重启两个单元）。
 - **权限**：与 Go 同一个 `fasttask` 用户，`ReadWritePaths` **不含数据库目录**——它不碰 SQLite。
 - **凭据**：sidecar **完全不接触模型凭据**。它打的是 Go 的 `/openai` 端点，
   真实 key 只在 Go 进程内注入（[`harness.md`](harness.md) §4.5）。
 - **容器部署**：单镜像双进程需用 `tini` 之类的 init 转发信号并回收僵尸进程，
   **不要用 shell `&` 后台起 Node**——那会丢失退出码与信号。
-- **配置默认值**：`sidecar.enabled` 默认 `off`。
+  容器里更简单的做法是 `FASTTASK_SIDECAR_SPAWN=true`：Go 已经把子进程放进独立进程组并按组发信号。
+- **构建**：`npm run build:sidecar`（在 `web/` 下执行）产出 `sidecar/dist/host.mjs`；
+  产物是 bundle，只有 `libfx` 保持 external，运行时经 `FASTTASK_WEB_ROOT` 从 web 工作区的
+  `node_modules` 解析，**不装第二份原生插件**。`sidecar/dist/` 是制品，已 gitignore。
+- **配置默认值**：`sidecar.enabled` 默认 `off`，`sidecar.spawn` 默认 `on`。
 
 ### 21.3 反向代理头
 

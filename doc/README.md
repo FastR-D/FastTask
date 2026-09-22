@@ -83,7 +83,7 @@ ADR-0001 与 `wiring.md` 的标题沿用历史写法，其中的「fx」指 uber
 
 **前五份加上 ADR-0001/0002/0004 描述的能力已全部实现并通过测试（截至 2026-09-22）。** 实现细节以代码与 OpenAPI 为准；这些文档保留为设计意图与验收依据。
 
-**`harness.md` 与 `chat-features.md` 是新增的 🟡 待实现文档**，描述 [ADR-0005](adr/0005-libfx-agent-harness.md) 的落地。它与 `agent.md` / `agent-impl.md` 的关系是：那两份定不变量与协议（**未变**），它定循环驱动与宿主拓扑（**变了**）。
+**`harness.md` 与 `chat-features.md` 描述 [ADR-0005](adr/0005-libfx-agent-harness.md) 的落地，已于 2026-09-23 全部实现并通过测试。** 它们与 `agent.md` / `agent-impl.md` 的关系是：那两份定不变量与协议（**未变**），这两份定循环驱动与宿主拓扑（**变了**）。
 
 | 文档 | 类型 | 更新 | 行数 | 说明 |
 |---|---|---|---|---|
@@ -92,8 +92,8 @@ ADR-0001 与 `wiring.md` 的标题沿用历史写法，其中的「fx」指 uber
 | [`wiring.md`](wiring.md) | 🟢 已实现 | 2026-09-22 | 149 | fx 组合根、`App` 拆分、八步迁移 + §9 + 三个独立角色命令 |
 | [`pwa.md`](pwa.md) | 🟢 已实现 | 2026-09-22 | 120 | PWA 规格与五个阻塞项（全部修复）|
 | [`frontend.md`](frontend.md) | 🟢 已实现 | 2026-09-22 | 132 | §1、§6 mdui 实测现状 + §2–§5 assistant-ui 接入（workflow A/B 均落地）|
-| [`harness.md`](harness.md) | 🟡 **待实现** | 2026-09-23 | 861 | libfx 双宿主 harness：模式探测、AI Gateway 适配层、工具导出、审批长轮询、sidecar、八阶段交付 |
-| [`chat-features.md`](chat-features.md) | 🟡 **待实现** | 2026-09-23 | 336 | 多会话持久化、思考过程、图片附件。三项 assistant-ui 均原生支持，文档定的是**哪一项真接在 assistant-transport 上**与服务端配合 |
+| [`harness.md`](harness.md) | 🟢 已实现 | 2026-09-23 | 964 | libfx 双宿主 harness：模式探测、AI Gateway 适配层、工具导出、审批长轮询、sidecar、八阶段交付。§16.6 是真机端到端验证记录 |
+| [`chat-features.md`](chat-features.md) | 🟢 已实现 | 2026-09-23 | 365 | 多会话持久化、思考过程、图片附件。§2.1.1 记录了多会话的实际接线取舍（未用 `useRemoteThreadListRuntime`）|
 
 ### 2.5 外部工具对接（已实现的部分）
 
@@ -124,10 +124,14 @@ ADR-0001 与 `wiring.md` 的标题沿用历史写法，其中的「fx」指 uber
 - **前端**：mdui 2.1.5 重写 + assistant-ui 0.15.21 对话区已落地（`web/src/agent/`：`AgentChat` 挂载点、纯 converter、`makeAssistantToolUI` 审批卡片、协商录音格式的语音输入）。
 - **PWA**：可安装——manifest、injectManifest Service Worker（按用户隔离缓存键的离线只读快照）、access token 内存 + refresh token 持久化、`static()` 以正确 Content-Type 提供 `sw.js`/`manifest.webmanifest`。五个阻塞项全部修复。
 
-### 3.1 进行中：libfx harness 迁移（🟡 未开始）
+### 3.1 已完成：libfx harness 迁移（🟢 2026-09-23）
 
-[ADR-0005](adr/0005-libfx-agent-harness.md) 已接受，[`harness.md`](harness.md) 与
-[`chat-features.md`](chat-features.md) 已就绪，**代码尚未开始**。
+[ADR-0005](adr/0005-libfx-agent-harness.md) 描述的迁移**已全部落地**：八个阶段（A–H）都进了 `main`，
+`go test ./...`、`go test -race ./...`、`npm test`（含加载真实 `libfx/node` 的集成测试）、
+`npm run build` 与 `npm run build:sidecar` 全绿，CI 见 `.github/workflows/ci.yml`。
+真机端到端验证（真实模型 + 真实 sidecar + 记录代理）见 [`harness.md`](harness.md) §16.6。
+
+下面的内容是迁移**开工前**的决策记录，保留为设计依据；其中"实现前必读"三条已在实现中逐项处置。
 
 #### ✅ 没有阻塞项了
 
@@ -170,21 +174,21 @@ spike 带出三条写进规格的实现约束：`baseURL` 必须绝对、分片�
 
 #### 还剩一个要用代码验证的点
 
-| 何时 | 验证什么 | 失败影响 |
+| 何时 | 验证什么 | 结果 |
 |---|---|---|
 | ~~Phase 0~~ | ~~`@ai-sdk/openai-compatible` 的浏览器可行性~~ | ✅ 已验证通过 |
-| **Phase C 开头** | `HostTool.execute` 第二参数是否带调用 id | [`harness.md`](harness.md) §4.4.1 走主方案还是退化方案。**不阻塞开工**，退化方案已写好 |
+| ~~Phase C 开头~~ | `HostTool.execute` 第二参数是否带调用 id | ✅ **已验证：不带**（`fx-sdk.js` 的 `executeHostTool` 只传 `input` 与 `{ signal }`），因此走 §4.4.1 的退化方案：`tool_call_id` 可选，缺失时按 `(run, 工具名, 最近一个尚无结果的 part)` 关联 |
 
-### 3.2 已知的代码/文档不一致（待修）
+### 3.2 已知的代码/文档不一致（🟢 全部已修，2026-09-23）
 
-| 位置 | 问题 | 处置 |
+| 位置 | 原问题 | 处置结果 |
 |---|---|---|
-| `internal/application/agenttool.go:82` | 注释称工具来自 uber-fx 值组 `agent_tools`，**该值组从未存在**；实际在 `agent.go:89` 内联构造 | 删除该注释，见 [`harness.md`](harness.md) §3.4 |
-| `internal/application/jobdispatch.go:207`、`:287` | `BuiltinJobHandlers()` / `BuiltinJobMaterializers()` 与 `internal/bootstrap` 的 uber-fx 值组是**两份独立清单，无一致性测试** | 补一个断言两侧 `JobTypes()` 集合相等的测试 |
-| `internal/application/agentapproval.go:217` | 审批续跑会再建一个 `agent_run` job | 随 [`harness.md`](harness.md) §7「同一 turn 内审批」一并移除 |
-| `web/vite.config.ts:40` | `globPatterns` 不含 `wasm` | 迁移 phase G 一并修，见 [`harness.md`](harness.md) §9.3 |
-| `web/src/agent/runtime.ts` | agent 端点非线程作用域，接多会话前必须改 | 见 [`chat-features.md`](chat-features.md) §2.1 |
-| CI | 未跑 `npm run build`。`src/mdui.ts` 只被 `main.tsx` 引入，**测试全绿也可能构建失败** | 加进 CI |
+| `internal/application/agenttool.go` | 注释称工具来自 uber-fx 值组 `agent_tools`，**该值组从未存在** | ✅ 注释已改写为实际装配方式（`NewAgentService` 内联，单一 registry，无第二份清单），见 [`harness.md`](harness.md) §3.4 |
+| `internal/application/jobdispatch.go` | `BuiltinJobHandlers()` / `BuiltinJobMaterializers()` 与 `internal/bootstrap` 的值组是两份独立清单，无一致性测试 | ✅ `internal/bootstrap/valuegroups_test.go` 的 `TestJobValueGroupsCoverTheBuiltinJobTypes` 断言两侧集合相等 |
+| `internal/application/agentapproval.go` | 审批续跑会再建一个 `agent_run` job | ✅ harness 模式下同一 turn 内续跑（`continueHarnessRun`），不建 job、不开第二条流；仅"无模型配置"的旧路径仍 requeue，见 [`harness.md`](harness.md) §7 |
+| `web/vite.config.ts` | `globPatterns` 不含 `wasm` | ✅ 已含 `wasm`；CI 另有断言 `dist/fx-core.wasm{,.br,.gz}` 存在且产物里没有 `fx-term.wasm` / `*.node` |
+| `web/src/agent/runtime.ts` | agent 端点非线程作用域，接多会话前必须改 | ✅ 取"body 携带 `threadId`"一侧（路径不带），理由与实现见 [`chat-features.md`](chat-features.md) §2.1.1 |
+| CI | 未跑 `npm run build`，**测试全绿也可能构建失败** | ✅ `.github/workflows/ci.yml`：gofmt/vet/build/test/race + 空库迁移 + HTTP 写入读回烟雾 + typecheck/test/**build**/build:sidecar + sidecar 启动烟雾 |
 
 ## 4. 文档维护约定
 
