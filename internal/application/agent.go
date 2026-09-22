@@ -35,6 +35,10 @@ type AgentService struct {
 	// s.ResolveApproval resolves by promotion (wiring.md §9: AgentService declares
 	// ≤15 methods). Its own app/repo/store fields shadow nothing at depth 0.
 	*approvalService
+	// threadStateService carries the persisted-state readers, embedded for the
+	// same reason: s.toProtocolMessage, s.LatestThreadState and
+	// s.ResumeCurrentState all resolve by promotion.
+	*threadStateService
 }
 
 // ChatResolver resolves the tool-calling model for a run, mirroring the Worker's
@@ -103,7 +107,8 @@ func NewAgentService(app *App, opts ...AgentOption) *AgentService {
 		systemPrompt: defaultSystemPrompt,
 		// The approval flow shares the same repo/store/app so a receipt resolves
 		// against identical state (§7).
-		approvalService: &approvalService{app: app, repo: repo, store: app.Store},
+		approvalService:    &approvalService{app: app, repo: repo, store: app.Store},
+		threadStateService: &threadStateService{repo: repo},
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -428,36 +433,6 @@ func (s *AgentService) existingAssistantMessage(ctx context.Context, userID, run
 		}
 	}
 	return nil, nil
-}
-
-// toProtocolMessage rebuilds a wire message from persisted rows.
-func (s *AgentService) toProtocolMessage(ctx context.Context, userID string, m persistence.AgentMessage, status protocol.MessageStatus) (protocol.Message, error) {
-	parts, err := s.repo.ListMessageParts(ctx, userID, m.ID)
-	if err != nil {
-		return protocol.Message{}, err
-	}
-	wire := protocol.Message{
-		ID: m.ID, Role: protocol.Role(m.Role), Parts: []protocol.Part{},
-		CreatedAt: protocol.RFC3339(m.CreatedAt), Status: status,
-	}
-	for _, p := range parts {
-		switch p.Type {
-		case "tool-call":
-			tp := protocol.ToolCallPart(derefString(p.ToolCallID), p.ToolName, decodeArgsMap(p.ArgsJSON))
-			if p.ResultJSON != "" {
-				var result any
-				if err := json.Unmarshal([]byte(p.ResultJSON), &result); err == nil {
-					tp.Result = result
-				}
-			}
-			tp.IsError = p.IsError
-			tp.Approval = approvalFromStatus(p.ApprovalStatus)
-			wire.Parts = append(wire.Parts, tp)
-		default:
-			wire.Parts = append(wire.Parts, protocol.TextPart(p.Text))
-		}
-	}
-	return wire, nil
 }
 
 // decodeArgsMap parses persisted tool-call args back into a map for the wire part.

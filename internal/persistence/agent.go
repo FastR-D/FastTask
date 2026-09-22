@@ -192,6 +192,33 @@ func (r *AgentRepository) GetActiveRunByThread(ctx context.Context, userID, thre
 	return &run, nil
 }
 
+// LatestRun returns the user's most recently updated run, or
+// gorm.ErrRecordNotFound when the user has never started one. It backs the
+// chat view's restore-on-mount read, where the browser cannot name a thread yet.
+func (r *AgentRepository) LatestRun(ctx context.Context, userID string) (*AgentRun, error) {
+	var run AgentRun
+	if err := r.db(ctx).Where("user_id = ?", userID).Order("updated_at DESC").First(&run).Error; err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
+// GetActiveRunForUser returns the user's in-flight run without naming a thread.
+// assistant-ui's in-memory thread list hands a freshly mounted chat a temporary
+// __LOCALID_... remoteId, so a resuming client has no server thread id to
+// present; the authenticated user is the only stable scope. updated_at ordering
+// keeps the newest run for an account that has more than one thread.
+func (r *AgentRepository) GetActiveRunForUser(ctx context.Context, userID string) (*AgentRun, error) {
+	var run AgentRun
+	err := r.db(ctx).
+		Where("user_id = ? AND status IN ?", userID, activeRunStatuses).
+		Order("updated_at DESC").First(&run).Error
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
 // GetRunByJobID finds the run currently carried by an AgentJob.
 func (r *AgentRepository) GetRunByJobID(ctx context.Context, userID, jobID string) (*AgentRun, error) {
 	var run AgentRun

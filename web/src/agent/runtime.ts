@@ -1,4 +1,3 @@
-import { useMemo } from 'react'
 import { useAssistantTransportRuntime, type AssistantRuntime } from '@assistant-ui/react'
 import { ensureFreshAccessToken } from '../api'
 import { convertState } from './converter'
@@ -21,17 +20,7 @@ export function prepareAgentCommand(body: { state?: unknown; [key: string]: unkn
 
 // useAgentRuntime wires the assistant-transport runtime. ALL transport wiring is
 // converged in this single file (ADR-0002 §4: "前端把运行时接线收敛在单个文件内").
-export function useAgentRuntime(goalId: string | null, onNotice: (message: string) => void): AssistantRuntime {
-  // goalId seeds the optimistic active-goal hint; the server remains the source of
-  // truth and pushes fasttask.activeGoalId back over the same stream (§2.7).
-  const initialState = useMemo<ServerAgentState>(
-    () => ({
-      messages: [],
-      isRunning: false,
-      fasttask: goalId ? { activeGoalId: goalId, pendingProposals: [] } : { pendingProposals: [] },
-    }),
-    [goalId],
-  )
+export function useAgentRuntime(initialState: ServerAgentState, onNotice: (message: string) => void): AssistantRuntime {
   const runtime = useAssistantTransportRuntime<ServerAgentState>({
     // MUST be explicit: the default protocol is "data-stream", and omitting this
     // silently speaks the wrong protocol — the stream looks fine but messages never
