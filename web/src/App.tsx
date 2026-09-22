@@ -1,10 +1,11 @@
 import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react'
 import { ApiError, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, request, token } from './api'
-import type { Conversation, Device, Goal, Job, Message, Plan, PlanItem, Proposal, Task, TaskTree, User, WorkSession } from './types'
+import type { Device, Goal, Job, Plan, PlanItem, Proposal, Task, TaskTree, User, WorkSession } from './types'
 import { fieldValue, useMduiEvent } from './mdui-react'
 import { Admin } from './Admin'
 import { GoalMapView, Review } from './Lens'
 import { PwaUpdate } from './PwaUpdate'
+import { AgentChat } from './agent'
 
 type Tab = 'today' | 'goals' | 'dialogue' | 'jobs' | 'review' | 'devices' | 'admin'
 
@@ -120,10 +121,10 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
       <mdui-button-icon icon="logout" onClick={onLogout}/>
     </mdui-top-app-bar>
     <mdui-layout-main className="app-main">
-      <div className="page">
+      <div className={tab==='dialogue' ? 'page page-dialogue' : 'page'}>
         {tab==='today' && <Today onNotice={setNotice}/>}
         {tab==='goals' && <Goals onNotice={setNotice}/>}
-        {tab==='dialogue' && <Dialogue onNotice={setNotice}/>}
+        {tab==='dialogue' && <AgentChat goalId={null} onNotice={setNotice}/>}
         {tab==='jobs' && <JobQueue onNotice={setNotice}/>}
         {tab==='review' && <Review onNotice={setNotice}/>}
         {tab==='devices' && <Devices onNotice={setNotice}/>}
@@ -253,34 +254,6 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
 }
 
 function ProposalCard({proposal,onApply,onReject}:{proposal:Proposal;onApply:()=>void;onReject:()=>void}){let operations:Record<string,unknown>[]=[];try{operations=JSON.parse(proposal.patch_json)}catch{return null}return <mdui-card variant="outlined" className="proposal-card"><p className="eyebrow">AGENT PROPOSAL · BASE REV {proposal.base_revision}</p><h3 className="ts-title-large">待确认的任务树变更</h3>{operations.map((operation,index)=><div className="proposal-op" key={index}><b>{String(operation.op||'create')}</b><span>{String(operation.title||operation.target_id||'未命名变更')}</span><small>{String(operation.minimum_action||operation.success_criteria||'')}</small></div>)}<div className="actions"><mdui-button variant="outlined" onClick={onReject}>拒绝</mdui-button><mdui-button variant="filled" onClick={onApply}>确认应用</mdui-button></div></mdui-card>}
-
-function Dialogue({ onNotice }: { onNotice:(s:string)=>void }) {
-  const [conversations,setConversations]=useState<Conversation[]>([]);const [current,setCurrent]=useState<Conversation|null>(null);const [messages,setMessages]=useState<Message[]>([]);const [text,setText]=useState('');const [recording,setRecording]=useState(false);const recorder=useRef<MediaRecorder|null>(null);const chunks=useRef<Blob[]>([])
-  async function load(){const {data}=await request<{items:Conversation[]}>('/conversations');setConversations(data.items);const chosen=current||data.items[0];if(chosen){setCurrent(chosen);const m=await request<{items:Message[]}>(`/conversations/${chosen.id}/messages`);setMessages(m.data.items)}}
-  useEffect(()=>{load().catch(e=>onNotice(errorText(e)))},[])
-  async function ensureConversation(){if(current)return current;const {data}=await request<Conversation>('/conversations',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({title:'研究推进对话'})});setCurrent(data);return data}
-  async function send(){if(!text.trim())return;try{const conv=await ensureConversation();await request(`/conversations/${conv.id}/messages`,{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({content:text})});setText('');onNotice('消息已发送，Agent 正在生成结构化建议');setTimeout(load,700)}catch(e){onNotice(errorText(e))}}
-  async function toggleRecord(){if(recording){recorder.current?.stop();setRecording(false);return}try{const stream=await navigator.mediaDevices.getUserMedia({audio:true});const media=new MediaRecorder(stream);chunks.current=[];media.ondataavailable=e=>chunks.current.push(e.data);media.onstop=async()=>{stream.getTracks().forEach(t=>t.stop());const form=new FormData();form.append('audio',new Blob(chunks.current,{type:'audio/webm'}),'voice.webm');try{const {data}=await request<Job>('/voice-transcription-jobs',{method:'POST',headers:{'Idempotency-Key':idem()},body:form});const job=await waitJob(data.id);if(job.output_json){const output=JSON.parse(job.output_json);setText(output.transcript||'')}onNotice('转写完成，请编辑确认后发送')}catch(e){onNotice(errorText(e))}};media.start();recorder.current=media;setRecording(true)}catch{onNotice('浏览器无法访问麦克风，请检查权限') }}
-  return <section className="dialogue-page">
-    <header className="page-head compact"><div><p className="eyebrow">CONVERSATION</p><h1>把阻碍说清楚，<br/>再决定<em>要不要修改地图</em>。</h1></div></header>
-    <div className="chat-shell">
-      <mdui-list className="chat-aside">
-        {conversations.map(c=><mdui-list-item key={c.id} icon="forum" active={current?.id===c.id} onClick={()=>{setCurrent(c);request<{items:Message[]}>(`/conversations/${c.id}/messages`).then(r=>setMessages(r.data.items))}}>{c.title}</mdui-list-item>)}
-      </mdui-list>
-      <div className="chat">
-        <div className="messages">
-          {messages.map(m=><div key={m.id} className={`message ${m.role}`}><span>{m.role==='user'?'你':'Agent'}</span><p>{m.content}</p></div>)}
-          {messages.length===0&&<div className="empty-state"><h2 className="ts-headline-small">从当前阻碍开始</h2><p>例如：这个实验任务太大，请拆成今天能开始的两步。</p></div>}
-        </div>
-        <div className="composer">
-          <mdui-text-field variant="outlined" rows={1} autosize value={text} onChange={e=>setText(fieldValue(e))} placeholder="报告进展、阻碍，或请求调整任务树…"/>
-          <mdui-button-icon className={recording?'recording':''} icon={recording?'stop':'mic'} onClick={toggleRecord}/>
-          <mdui-button variant="filled" icon="send" onClick={send}>发送</mdui-button>
-        </div>
-      </div>
-    </div>
-  </section>
-}
 
 type JobFilter = 'active' | 'queued' | 'running' | 'all' | 'failed' | 'succeeded'
 
