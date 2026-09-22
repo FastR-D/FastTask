@@ -23,14 +23,57 @@ const defaultWriteTimeout = 60 * time.Second
 
 // HTTPModule provides the Gin/Huma server and the net/http server lifecycle.
 var HTTPModule = fx.Module("httpapi",
+	fx.Provide(NewRouteDeps),
 	fx.Provide(NewAPI),
 	fx.Provide(NewHTTPServer),
 	fx.Invoke(registerHTTPLifecycle),
+	// routes value group (wiring.md §5, §7 step 7): each domain provides its own
+	// RouteRegistrar; NewAPI collects the group and iterates it at assembly, so
+	// adding a domain never edits a central dispatcher. huma marshals OpenAPI
+	// paths/schemas as sorted maps, so the group's nondeterministic order does not
+	// perturb the document (asserted byte-identical by TestOpenAPIMatchesGolden).
+	fx.Provide(
+		fx.Annotate(httpapi.NewAuthRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewMeRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewGoalRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewTaskRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewTaskTreeRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewLensRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewPlanRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewSessionRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewConversationRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewJobRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewDeviceRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewPanelRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewImportRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewIntegrationStatusRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewAdminRoutes, fx.ResultTags(`group:"routes"`)),
+	),
 )
 
-// NewAPI builds the HTTP API surface (Gin engine + Huma registry).
-func NewAPI(app *application.App, auth *platformauth.Service, cfg config.Config, agent *application.AgentService) *httpapi.Server {
-	return httpapi.New(app, auth, cfg, agent)
+// NewRouteDeps assembles the shared dependencies every route registrar needs.
+// cfg is supplied by fx from config.Load (or a test config), which already
+// guarantees AudioDir/IntegrationTimeout are set, so registrars read proper
+// values. Production never mutates cfg after construction; the only live-cfg
+// mutation is a test that uses the builtin &server.cfg path inside httpapi.New.
+func NewRouteDeps(app *application.App, auth *platformauth.Service, cfg config.Config) httpapi.RouteDeps {
+	return httpapi.NewRouteDeps(app, auth, &cfg)
+}
+
+// apiParams collects the Server's dependencies, including the routes value group.
+type apiParams struct {
+	fx.In
+	App    *application.App
+	Auth   *platformauth.Service
+	Cfg    config.Config
+	Agent  *application.AgentService
+	Routes []httpapi.RouteRegistrar `group:"routes"`
+}
+
+// NewAPI builds the HTTP API surface (Gin engine + Huma registry), registering the
+// collected route registrars.
+func NewAPI(p apiParams) *httpapi.Server {
+	return httpapi.New(p.App, p.Auth, p.Cfg, p.Agent, p.Routes...)
 }
 
 // NewHTTPServer builds the net/http server. WriteTimeout is deliberately 0: the

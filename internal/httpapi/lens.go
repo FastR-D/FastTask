@@ -8,6 +8,7 @@ import (
 	"github.com/FastR-D/FastTask/internal/application"
 	"github.com/FastR-D/FastTask/internal/domain"
 	"github.com/FastR-D/FastTask/internal/persistence"
+	"github.com/danielgtaylor/huma/v2"
 )
 
 type lensAxis struct {
@@ -54,9 +55,9 @@ func presetLenses() []lensDefinition {
 	}}
 }
 
-func (s *Server) registerLens() {
+func (s lensRoutes) RegisterRoutes(api huma.API) {
 	type emptyInput struct{}
-	register(s.API, "list-lenses", http.MethodGet, "/lenses", "List preset decision lenses", userSecurity(), func(ctx context.Context, input *emptyInput) (*itemResponse[lensListBody], error) {
+	register(api, "list-lenses", http.MethodGet, "/lenses", "List preset decision lenses", userSecurity(), func(ctx context.Context, input *emptyInput) (*itemResponse[lensListBody], error) {
 		return &itemResponse[lensListBody]{Body: lensListBody{Items: presetLenses()}}, nil
 	})
 
@@ -70,7 +71,7 @@ func (s *Server) registerLens() {
 			Rationale string `json:"rationale,omitempty" maxLength:"120"`
 		}
 	}
-	register(s.API, "put-task-coord", http.MethodPut, "/tasks/{task_id}/coords", "Set task coordinates", userSecurity(), func(ctx context.Context, input *putCoordInput) (*resourceResponse[persistence.TaskCoord], error) {
+	register(api, "put-task-coord", http.MethodPut, "/tasks/{task_id}/coords", "Set task coordinates", userSecurity(), func(ctx context.Context, input *putCoordInput) (*resourceResponse[persistence.TaskCoord], error) {
 		expected := -1
 		if strings.TrimSpace(input.IfMatch) != "" {
 			revision, err := revisionFromETag(input.IfMatch)
@@ -90,7 +91,7 @@ func (s *Server) registerLens() {
 		Week     string `query:"week"`
 		Timezone string `query:"timezone"`
 	}
-	register(s.API, "get-weekly-review", http.MethodGet, "/reviews/weekly", "Get weekly review", userSecurity(), func(ctx context.Context, input *reviewInput) (*itemResponse[application.WeeklyReview], error) {
+	register(api, "get-weekly-review", http.MethodGet, "/reviews/weekly", "Get weekly review", userSecurity(), func(ctx context.Context, input *reviewInput) (*itemResponse[application.WeeklyReview], error) {
 		review, err := s.app.WeeklyReview(ctx, principal(ctx).UserID, input.Week, input.Timezone)
 		if err != nil {
 			return nil, mapError(err)
@@ -102,7 +103,7 @@ func (s *Server) registerLens() {
 		GoalID string `path:"goal_id"`
 		Lens   string `query:"lens"`
 	}
-	register(s.API, "get-goal-map", http.MethodGet, "/goals/{goal_id}/map", "Get goal decision map", userSecurity(), func(ctx context.Context, input *mapInput) (*itemResponse[application.GoalMap], error) {
+	register(api, "get-goal-map", http.MethodGet, "/goals/{goal_id}/map", "Get goal decision map", userSecurity(), func(ctx context.Context, input *mapInput) (*itemResponse[application.GoalMap], error) {
 		result, err := s.app.GoalMap(ctx, principal(ctx).UserID, input.GoalID, input.Lens)
 		if err != nil {
 			return nil, mapError(err)

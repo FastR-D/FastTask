@@ -1,8 +1,10 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -116,6 +118,44 @@ func TestServeRoleStartsServesAndStops(t *testing.T) {
 	}
 	if !ready {
 		t.Fatalf("health/ready never returned 200 at %s", url)
+	}
+}
+
+// TestServeRoleServesRegistrarRoutes proves the fx "routes" value group
+// (wiring.md §7 step 7) actually registers domain routes in the assembled
+// server — not merely that the dependency graph resolves. The OpenAPI document
+// served by the fx-built serve role must contain paths contributed by several
+// distinct group registrars. Path keys are config-independent (only the servers
+// URL derives from cfg.PublicURL), so this complements, without duplicating, the
+// byte-identical golden assertion in internal/httpapi (which exercises the
+// builtin registrar path). Together they show both assembly routes — builtin and
+// fx value group — produce the same external contract.
+func TestServeRoleServesRegistrarRoutes(t *testing.T) {
+	cfg := testConfig(t)
+	app := fxtest.New(t, append(serveOptions(cfg, ServeOptions{}), fx.NopLogger)...)
+	app.RequireStart()
+	defer app.RequireStop()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	url := fmt.Sprintf("http://%s/api/v1/openapi.json", cfg.Address())
+	var body []byte
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			body, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	// One path from each of three different registrars collected via group:"routes".
+	for _, path := range []string{`"/auth/login"`, `"/daily-plans"`, `"/integrations/status"`} {
+		if !bytes.Contains(body, []byte(path)) {
+			t.Fatalf("fx-assembled OpenAPI missing registrar path %s; the routes value group did not register it", path)
+		}
 	}
 }
 
