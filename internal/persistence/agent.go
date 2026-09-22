@@ -69,16 +69,21 @@ const (
 	RunQueued           = "queued"
 	RunRunning          = "running"
 	RunAwaitingApproval = "awaiting_approval"
-	RunSucceeded        = "succeeded"
-	RunFailed           = "failed"
-	RunCancelled        = "cancelled"
-	RunInterrupted      = "interrupted"
+	// RunCancelling is the transient state between a cancellation request and the
+	// host confirming it (doc/harness.md §5.2). Cancellation is best effort, so the
+	// reaper finishes the transition when the host never does.
+	RunCancelling  = "cancelling"
+	RunSucceeded   = "succeeded"
+	RunFailed      = "failed"
+	RunCancelled   = "cancelled"
+	RunInterrupted = "interrupted"
 )
 
 // activeRunStatuses are the statuses that count as "a run is in flight" for the
 // one-active-run-per-thread rule. awaiting_approval is included: a thread with a
-// pending approval must not start a second concurrent run.
-var activeRunStatuses = []string{RunQueued, RunRunning, RunAwaitingApproval}
+// pending approval must not start a second concurrent run. cancelling is included
+// too — a run being torn down still owns the thread until it is terminal.
+var activeRunStatuses = []string{RunQueued, RunRunning, RunAwaitingApproval, RunCancelling}
 
 // --- Thread (agent_threads; doc/chat-features.md §2.3) ---
 
@@ -384,11 +389,97 @@ func (r *AgentRepository) GetPartByToolCallID(ctx context.Context, userID, toolC
 	return &part, nil
 }
 
+// GetPart returns one part owned by userID, or gorm.ErrRecordNotFound.
+func (r *AgentRepository) GetPart(ctx context.Context, userID, partID string) (*AgentMessagePart, error) {
+	var part AgentMessagePart
+	if err := r.db(ctx).Where("id = ? AND user_id = ?", partID, userID).First(&part).Error; err != nil {
+		return nil, err
+	}
+	return &part, nil
+}
+
+// GetPartByProposalID locates the tool-call part that staged a proposal. The approval
+// long poll reads the decision off this row (doc/harness.md §7).
+func (r *AgentRepository) GetPartByProposalID(ctx context.Context, userID, proposalID string) (*AgentMessagePart, error) {
+	var part AgentMessagePart
+	err := r.db(ctx).Where("proposal_id = ? AND user_id = ?", proposalID, userID).First(&part).Error
+	if err != nil {
+		return nil, err
+	}
+	return &part, nil
+}
+
 // UpdatePartResult records a tool result (or approval receipt) on a part.
 func (r *AgentRepository) UpdatePartResult(ctx context.Context, userID, partID, resultJSON string, isError bool) error {
 	res := r.db(ctx).Model(&AgentMessagePart{}).
 		Where("id = ? AND user_id = ?", partID, userID).
 		Updates(map[string]any{"result_json": resultJSON, "is_error": isError, "updated_at": Now()})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+// NextPartIdx returns the index a new part of a message must take. The server is
+// the sole allocator of part indices (doc/agent-impl.md §2.7.1); reading it from
+// the database rather than from an in-memory counter keeps two writers — the model
+// proxy and the tool execution surface — from claiming the same index.
+func (r *AgentRepository) NextPartIdx(ctx context.Context, userID, messageID string) (int, error) {
+	var maxIdx *int
+	err := r.db(ctx).Model(&AgentMessagePart{}).
+		Where("message_id = ? AND user_id = ?", messageID, userID).
+		Select("MAX(idx)").Scan(&maxIdx).Error
+	if err != nil {
+		return 0, err
+	}
+	if maxIdx == nil {
+		return 0, nil
+	}
+	return *maxIdx + 1, nil
+}
+
+// CreatePartAtIdx inserts a part with an explicitly allocated index. Callers that
+// allocate through NextPartIdx inside the same transaction use this; CreatePart
+// keeps the historical "caller knows the index" behaviour.
+func (r *AgentRepository) CreatePartAtIdx(ctx context.Context, part *AgentMessagePart) error {
+	now := Now()
+	if part.ID == "" {
+		part.ID = NewID("apart")
+	}
+	if part.ArgsJSON == "" {
+		part.ArgsJSON = "{}"
+	}
+	part.CreatedAt, part.UpdatedAt = now, now
+	return r.db(ctx).Create(part).Error
+}
+
+// UpdatePartText rewrites a streamed part's text once the stream ends. The deltas
+// themselves travel as append-text chunks; the row is created empty when the first
+// delta arrives so its index is claimed before the client can act on the part
+// (doc/harness.md §4.4.1).
+func (r *AgentRepository) UpdatePartText(ctx context.Context, userID, partID, text string) error {
+	res := r.db(ctx).Model(&AgentMessagePart{}).
+		Where("id = ? AND user_id = ?", partID, userID).
+		Updates(map[string]any{"text": text, "updated_at": Now()})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+// UpdatePartArgs records the completed arguments of a tool-call part. The proxy
+// creates the part as soon as the model names it and fills the arguments in when
+// the call is complete, so the part exists before the host can execute the tool.
+func (r *AgentRepository) UpdatePartArgs(ctx context.Context, userID, partID, argsJSON string) error {
+	res := r.db(ctx).Model(&AgentMessagePart{}).
+		Where("id = ? AND user_id = ?", partID, userID).
+		Updates(map[string]any{"args_json": argsJSON, "updated_at": Now()})
 	if res.Error != nil {
 		return res.Error
 	}

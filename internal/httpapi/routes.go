@@ -66,6 +66,12 @@ type (
 	importRoutes            struct{ RouteDeps }
 	integrationStatusRoutes struct{ RouteDeps }
 	adminRoutes             struct{ RouteDeps }
+	// harnessRoutes needs the agent runtime in addition to the shared dependencies: the
+	// harness endpoints are the agent service's HTTP surface (doc/interface.md §20.2).
+	harnessRoutes struct {
+		RouteDeps
+		agent *application.AgentService
+	}
 )
 
 // Constructors returning the interface, one per domain, for the fx "routes" group.
@@ -85,15 +91,20 @@ func NewImportRoutes(d RouteDeps) RouteRegistrar            { return importRoute
 func NewIntegrationStatusRoutes(d RouteDeps) RouteRegistrar { return integrationStatusRoutes{d} }
 func NewAdminRoutes(d RouteDeps) RouteRegistrar             { return adminRoutes{d} }
 
+// NewHarnessRoutes builds the harness registrar (doc/interface.md §20.2).
+func NewHarnessRoutes(d RouteDeps, agent *application.AgentService) RouteRegistrar {
+	return harnessRoutes{RouteDeps: d, agent: agent}
+}
+
 // BuiltinRouteRegistrars returns every domain registrar in the historical
 // registration order. It is the default set used when a Server is built without an
 // injected value group (unit tests construct the Server directly, wiring.md §2
 // rule 4); the fx composition root supplies the same registrars via group:"routes".
-func BuiltinRouteRegistrars(d RouteDeps) []RouteRegistrar {
-	return []RouteRegistrar{
+func BuiltinRouteRegistrars(d RouteDeps, agent *application.AgentService) []RouteRegistrar {
+	return append([]RouteRegistrar{
 		authRoutes{d}, meRoutes{d}, goalRoutes{d}, taskRoutes{d}, taskTreeRoutes{d},
 		lensRoutes{d}, planRoutes{d}, sessionRoutes{d}, conversationRoutes{d},
 		jobRoutes{d}, deviceRoutes{d}, panelRoutes{d}, importRoutes{d},
 		integrationStatusRoutes{d}, adminRoutes{d},
-	}
+	}, NewHarnessRoutes(d, agent))
 }

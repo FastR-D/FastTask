@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
-	"time"
 
 	"github.com/FastR-D/FastTask/internal/agent"
 	"github.com/FastR-D/FastTask/internal/agent/protocol"
@@ -50,19 +48,17 @@ type sessionStream struct {
 	assistantIdx int
 }
 
-// runSession is one run execution: the embedded sessionStream (emit/state/persist)
-// plus the run-lifecycle fields (job id, turn count, resume context) and the
-// terminal transitions (succeed/fail/cancel/awaiting-approval).
+// runSession is one run execution: the embedded sessionStream (emit/state/persist) plus the
+// run-lifecycle fields and the terminal transitions (succeed/fail/cancel).
+//
+// Under the harness a session is a view rather than a loop iteration: it is rebuilt from the
+// authoritative rows whenever the proxy or the tool surface has to write something
+// (doc/harness.md §4.4). jobID survives for the runs the Worker still executes.
 type runSession struct {
 	*sessionStream
 	jobID    string
 	userText string
 	turns    int
-	// resumed marks a run continuing after an approval receipt (§7.2); it reuses
-	// the existing assistant message instead of creating one. resumeContext is the
-	// model conversation reconstructed from the persisted parts of that message.
-	resumed       bool
-	resumeContext []agent.ChatMessage
 }
 
 // beginRun sets up the run session: emit isRunning + threadId, replay existing
@@ -206,40 +202,6 @@ func (s *sessionStream) saveState() error {
 	return s.svc.repo.SaveRunState(s.ctx, s.userID, s.run.ID, string(encoded), s.sink.checkpoint())
 }
 
-func (s *runSession) jobCancelRequested() (bool, error) {
-	if s.jobID == "" {
-		return false, nil
-	}
-	var job persistence.AgentJob
-	err := s.svc.store.DB.WithContext(s.ctx).Select("cancel_requested").Where("id = ?", s.jobID).First(&job).Error
-	if err != nil {
-		if persistence.IsNotFound(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return job.CancelRequested, nil
-}
-
-// initialMessages builds the model conversation: the server system prompt plus
-// the replayed thread history (which ends with the current user message).
-func (s *runSession) initialMessages(systemPrompt string) []agent.ChatMessage {
-	messages := []agent.ChatMessage{{Role: "system", Content: systemPrompt}}
-	for i := 0; i < s.assistantIdx; i++ {
-		m := s.state.Messages[i]
-		role := string(m.Role)
-		if role != "user" && role != "assistant" {
-			continue
-		}
-		text := strings.TrimSpace(textOfParts(m.Parts))
-		if text == "" {
-			continue
-		}
-		messages = append(messages, agent.ChatMessage{Role: role, Content: text})
-	}
-	return messages
-}
-
 func textOfParts(parts []protocol.Part) string {
 	var builder strings.Builder
 	for _, part := range parts {
@@ -249,6 +211,29 @@ func textOfParts(parts []protocol.Part) string {
 	}
 	return builder.String()
 }
+
+// interruptRun ends a run whose driver disappeared (doc/harness.md §11). It is failRun's shape with
+// interrupted's meaning: the partial transcript stays readable and any pending proposal stays
+// pending, because the user — not the host — decides what happens next.
+func (s *runSession) interruptRun(code, message string) (map[string]any, error) {
+	incomplete := protocol.IncompleteStatus(protocol.ReasonError)
+	s.state.Messages[s.assistantIdx].Status = incomplete
+	_ = s.emitSet(protocol.MessageStatusPath(s.assistantIdx), incomplete)
+	s.state.IsRunning = false
+	_ = s.emitSet(protocol.IsRunningPath(), false)
+	_ = s.saveState()
+	_ = s.svc.repo.SetRunStatus(s.ctx, s.userID, s.run.ID, persistence.RunInterrupted, code, message)
+	return map[string]any{"run_id": s.run.ID, "status": persistence.RunInterrupted, "chunks": s.sink.emitted}, nil
+}
+
+// --- what the harness replaced ---
+//
+// The multi-turn loop that used to live here (toolLoop, executeToolCall, the turnSink that
+// streamed one turn's text, recordProposal and saveAwaitingApproval) is gone, and so is
+// resumeRun: doc/harness.md §12 hands the loop to libfx, and a resume is now pure chunk
+// replay rather than a rebuilt model context. What survives is everything that writes
+// authoritative state — the session, its emit helpers and the terminal transitions — because
+// the model proxy (harnessproxy.go) and the tool surface (harnesstools.go) both need it.
 
 // --- terminal transitions ---
 
@@ -314,284 +299,8 @@ func (s *AgentService) deterministicReply(sess *runSession) (map[string]any, err
 	return sess.succeed()
 }
 
-// --- the tool-calling loop (agent-impl.md §6) ---
-
-// turnSink streams one model turn's text into a lazily-created text part.
-type turnSink struct {
-	sess    *runSession
-	partIdx int
-	text    strings.Builder
-	err     error
-}
-
-func (t *turnSink) TextDelta(_ context.Context, delta string) error {
-	if delta == "" {
-		return nil
-	}
-	if t.partIdx < 0 {
-		idx, err := t.sess.addTextPart()
-		if err != nil {
-			t.err = err
-			return err
-		}
-		t.partIdx = idx
-	}
-	if err := t.sess.appendTextToPart(t.partIdx, delta); err != nil {
-		t.err = err
-		return err
-	}
-	t.text.WriteString(delta)
-	return nil
-}
-
-// toolLoop drives the multi-turn tool-calling loop (§6). Readonly tool calls are
-// executed and fed back; a turn with no tool calls ends the run. A proposal tool
-// call pauses the run at awaiting_approval (§7); a resumed run continues from
-// the reconstructed context with the approval outcome already fed back.
-func (s *AgentService) toolLoop(sess *runSession, provider agent.ChatProvider) (map[string]any, error) {
-	limits := s.limits
-	if limits.MaxTurns <= 0 {
-		limits = DefaultLoopLimits()
-	}
-	deadline := time.Now().Add(limits.WallClock)
-	// A fresh run starts from the system prompt + thread history; a resumed run
-	// starts from the reconstructed context that already includes the resolved
-	// proposal tool call and its result (§7.2).
-	messages := sess.initialMessages(s.systemPrompt)
-	if sess.resumed {
-		messages = append([]agent.ChatMessage{{Role: "system", Content: s.systemPrompt}}, sess.resumeContext...)
-	}
-	tools := s.tools.Definitions(ToolReadonly, ToolProposal)
-	tc := ToolContext{UserID: sess.userID, ThreadID: sess.run.ThreadID, RunID: sess.run.ID}
-
-	for turn := 0; turn < limits.MaxTurns; turn++ {
-		sess.turns = turn + 1
-
-		if time.Now().After(deadline) {
-			return sess.failRun("RUN_TIMEOUT", errors.New("run wall clock exceeded"))
-		}
-		if cancelled, err := sess.jobCancelRequested(); err == nil && cancelled {
-			return sess.cancelRun()
-		}
-
-		turnCtx, cancelTurn := context.WithTimeout(sess.ctx, time.Until(deadline))
-		sink := &turnSink{sess: sess, partIdx: -1}
-		result, err := provider.Chat(turnCtx, agent.ChatRequest{Messages: messages, Tools: tools, MaxTokens: limits.MaxOutputTokens}, sink)
-		cancelTurn()
-
-		if err != nil {
-			switch {
-			case errors.Is(err, agent.ErrNoToolSupport):
-				return sess.failRun("PROVIDER_NO_TOOL_SUPPORT", err)
-			case time.Now().After(deadline):
-				return sess.failRun("RUN_TIMEOUT", err)
-			default:
-				return sess.failRun("PROVIDER_ERROR", err)
-			}
-		}
-		if sink.err != nil {
-			return sess.failRun("STATE_ERROR", sink.err)
-		}
-		if sink.partIdx >= 0 {
-			if err := sess.persistTextPart(sink.partIdx, sink.text.String()); err != nil {
-				return sess.failRun("STATE_ERROR", err)
-			}
-		}
-
-		if len(result.ToolCalls) == 0 {
-			return sess.succeed()
-		}
-
-		messages = append(messages, agent.ChatMessage{Role: "assistant", Content: result.Text, ToolCalls: result.ToolCalls})
-
-		for i, call := range result.ToolCalls {
-			if strings.TrimSpace(call.ID) == "" {
-				call.ID = fmt.Sprintf("call_%s_t%d_%d", sess.run.ID, turn, i)
-			}
-			toolResult, awaiting := s.executeToolCall(sess, tc, call, limits.ToolTimeout)
-			if awaiting {
-				// Phase D: a proposal tool moved the run to awaiting_approval.
-				return sess.saveAwaitingApproval()
-			}
-			content := resultContent(toolResult)
-			if err := sess.persistToolCallPart(partIndexOfCall(sess, call.ID), call, toolResult); err != nil {
-				return sess.failRun("STATE_ERROR", err)
-			}
-			messages = append(messages, agent.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: content})
-		}
-	}
-
-	// Turn budget exhausted: end the run and tell the user (§6), not an error.
-	idx, err := sess.addTextPart()
-	if err != nil {
-		return sess.failRun("STATE_ERROR", err)
-	}
-	notice := "（已达到单次运行的工具调用轮次上限，先在此收尾。如需继续，请再发一条消息。）"
-	if err := sess.appendTextToPart(idx, notice); err != nil {
-		return sess.failRun("STATE_ERROR", err)
-	}
-	if err := sess.persistTextPart(idx, notice); err != nil {
-		return sess.failRun("STATE_ERROR", err)
-	}
-	return sess.succeed()
-}
-
-// executeToolCall validates and runs one tool call, streaming its tool-call part
-// and result into the run state. It returns the result to feed back to the model
-// and whether the call moved the run to awaiting_approval (phase D proposals).
-func (s *AgentService) executeToolCall(sess *runSession, tc ToolContext, call agent.ToolCall, timeout time.Duration) (ToolResult, bool) {
-	args := parseArgs(call.Arguments)
-	partIdx, err := sess.addToolCallPart(call, args)
-	if err != nil {
-		return ToolResult{IsError: true, Text: "failed to record tool call"}, false
-	}
-	_ = partIdx
-
-	tool, ok := s.tools.Get(call.Name)
-	if !ok {
-		return s.finishToolCall(sess, call, partIdx, toolError("unknown tool %q", call.Name)), false
-	}
-	if args == nil {
-		return s.finishToolCall(sess, call, partIdx, toolError("arguments are not a valid JSON object")), false
-	}
-	if problems := s.tools.ValidateArgs(call.Name, args); len(problems) > 0 {
-		return s.finishToolCall(sess, call, partIdx, ToolResult{IsError: true, Text: "invalid arguments: " + strings.Join(problems, "; ")}), false
-	}
-
-	// Both readonly and proposal tools execute OUTSIDE any business transaction
-	// (§5.2) with a per-call timeout (§6). A proposal tool writes only the
-	// Proposal staging record, never a business table (invariant 1).
-	toolCtx, cancel := context.WithTimeout(sess.ctx, timeout)
-	defer cancel()
-	result, execErr := tool.Execute(toolCtx, tc, args)
-	if execErr != nil {
-		if toolCtx.Err() == context.DeadlineExceeded {
-			result = toolError("tool %q timed out after %s", call.Name, timeout)
-		} else {
-			result = ToolResult{IsError: true, Text: fmt.Sprintf("tool %q failed: %v", call.Name, execErr)}
-		}
-	}
-
-	// A proposal tool that created a pending Proposal pauses the run for user
-	// approval (§6, §7): emit the approval part, surface it in fasttask state,
-	// and signal awaiting so the loop transitions to awaiting_approval.
-	if result.Proposal != nil && !result.IsError {
-		if err := sess.recordProposal(partIdx, call, result); err != nil {
-			return s.finishToolCall(sess, call, partIdx, toolError("failed to record proposal: %v", err)), false
-		}
-		return result, true
-	}
-	return s.finishToolCall(sess, call, partIdx, result), false
-}
-
-// finishToolCall records the result on the tool-call part and returns it.
-func (s *AgentService) finishToolCall(sess *runSession, call agent.ToolCall, partIdx int, result ToolResult) ToolResult {
-	_ = sess.setToolCallResult(partIdx, result)
-	return result
-}
-
-// recordProposal marks a tool-call part as awaiting approval, adds the proposal
-// to the fasttask business state (§2.7), and persists the part with its proposal
-// link so the approval receipt can find it (§7).
-func (s *runSession) recordProposal(partIdx int, call agent.ToolCall, result ToolResult) error {
-	ref := result.Proposal
-	part := &s.state.Messages[s.assistantIdx].Parts[partIdx]
-	part.Result = result.Result
-	part.Approval = &protocol.Approval{Status: protocol.ApprovalPending}
-	if err := s.emitSet(protocol.PartPath(s.assistantIdx, partIdx), *part); err != nil {
-		return err
-	}
-	s.state.FastTask.PendingProposals = append(s.state.FastTask.PendingProposals, protocol.PendingProposal{
-		ID: ref.ProposalID, GoalID: ref.GoalID, BaseRevision: ref.BaseRevision, Summary: ref.Summary,
-	})
-	if err := s.emitSet(protocol.FastTaskPath(), s.state.FastTask); err != nil {
-		return err
-	}
-	resultJSON, _ := json.Marshal(result.Result)
-	toolCallID := call.ID
-	proposalID := ref.ProposalID
-	return s.svc.repo.CreatePart(s.ctx, &persistence.AgentMessagePart{
-		UserID: s.userID, MessageID: s.assistantID, Idx: partIdx, Type: "tool-call",
-		ToolCallID: &toolCallID, ToolName: call.Name, ArgsJSON: normalizeArgs(call.Arguments),
-		ResultJSON: string(resultJSON), ApprovalStatus: protocol.ApprovalPending, ProposalID: &proposalID,
-	})
-}
-
-// saveAwaitingApproval persists state and flips the run to awaiting_approval
-// (phase D). The HTTP stream ends with [DONE]; the run holds no lease (§4.0).
-func (s *runSession) saveAwaitingApproval() (map[string]any, error) {
-	requires := protocol.RequiresActionStatus()
-	s.state.Messages[s.assistantIdx].Status = requires
-	_ = s.emitSet(protocol.MessageStatusPath(s.assistantIdx), requires)
-	s.state.IsRunning = false
-	_ = s.emitSet(protocol.IsRunningPath(), false)
-	if err := s.saveState(); err != nil {
-		return nil, err
-	}
-	if err := s.svc.repo.SetRunStatus(s.ctx, s.userID, s.run.ID, persistence.RunAwaitingApproval, "", ""); err != nil {
-		return nil, err
-	}
-	return map[string]any{"run_id": s.run.ID, "status": persistence.RunAwaitingApproval, "chunks": s.sink.emitted}, nil
-}
-
-// resumeRun rebuilds a session for a run continuing after an approval receipt
-// (§7.2): it reuses the SAME assistant message and message index, replays the
-// thread into authoritative state, and reconstructs the model context from the
-// persisted parts so the loop can carry on from the resolved tool call.
-func (s *AgentService) resumeRun(ctx context.Context, job persistence.AgentJob, run *persistence.AgentRun, assistant persistence.AgentMessage) (*runSession, error) {
-	sink := &dbSink{repo: s.repo, userID: run.UserID, run: run.ID}
-	sess := &runSession{
-		sessionStream: &sessionStream{svc: s, ctx: ctx, userID: run.UserID, run: run, sink: sink, state: protocol.NewState()},
-		jobID:         job.ID,
-		resumed:       true,
-	}
-	sess.state.IsRunning = true
-	sess.state.FastTask.ThreadID = run.ThreadID
-
-	if err := sess.emitSet(protocol.IsRunningPath(), true); err != nil {
-		return nil, err
-	}
-
-	existing, err := s.repo.ListThreadMessages(ctx, run.UserID, run.ThreadID)
-	if err != nil {
-		return nil, err
-	}
-	for i, m := range existing {
-		status := protocol.CompleteStatus("")
-		if m.ID == assistant.ID {
-			// The reused assistant message goes back to running while it continues.
-			status = protocol.RunningStatus()
-			sess.assistantID = m.ID
-			sess.assistantIdx = i
-		}
-		pm, err := s.toProtocolMessage(ctx, run.UserID, m, status)
-		if err != nil {
-			return nil, err
-		}
-		sess.state.Messages = append(sess.state.Messages, pm)
-		if err := sess.emitSet(protocol.MessagePath(i), pm); err != nil {
-			return nil, err
-		}
-	}
-	if sess.assistantID == "" {
-		return nil, errors.New("resume could not locate the assistant message")
-	}
-	// Re-emit the (now updated) fasttask state so resolved proposals drop off the
-	// pending list on the client.
-	sess.state.FastTask.PendingProposals = s.pendingProposals(ctx, run.UserID, run.ThreadID)
-	if err := sess.emitSet(protocol.FastTaskPath(), sess.state.FastTask); err != nil {
-		return nil, err
-	}
-	sess.userText = lastUserText(sess.state.Messages)
-
-	// Reconstruct the model conversation from persisted parts: prior turns become
-	// assistant/tool messages so the model sees the approval outcome and continues.
-	sess.resumeContext = s.rebuildModelContext(ctx, run.UserID, sess.state.Messages, sess.assistantIdx)
-	return sess, nil
-}
-
-// pendingProposals lists proposals still awaiting approval across the thread's
-// runs, so a resumed run's fasttask state reflects only what is truly pending.
+// pendingProposals lists proposals still awaiting approval across the thread's runs, so a
+// session's fasttask state reflects only what is truly pending.
 func (s *AgentService) pendingProposals(ctx context.Context, userID, threadID string) []protocol.PendingProposal {
 	out := []protocol.PendingProposal{}
 	var proposals []persistence.Proposal
@@ -605,10 +314,14 @@ func (s *AgentService) pendingProposals(ctx context.Context, userID, threadID st
 	return out
 }
 
-// rebuildModelContext converts the wire messages before and including the reused
-// assistant message into model turns. Text parts become assistant content; each
-// tool-call part with a recorded result becomes an assistant tool_call plus a
-// tool message, so the model resumes with the approval outcome in context (§7).
+// rebuildModelContext converts the wire messages up to a given index into model turns: text
+// parts become content, and each tool-call part with a recorded result becomes an assistant
+// tool_call plus a tool message.
+//
+// It used to rebuild the context of a run resuming after approval. Under the harness the
+// checkpoint carries history instead, so this became the DEGRADED path: it runs when a thread
+// has no usable checkpoint and its transcript has to be summarized into the instructions
+// (doc/harness.md §6.3).
 func (s *AgentService) rebuildModelContext(ctx context.Context, userID string, messages []protocol.Message, assistantIdx int) []agent.ChatMessage {
 	out := make([]agent.ChatMessage, 0, len(messages)+2)
 	for i := 0; i <= assistantIdx && i < len(messages); i++ {
@@ -652,16 +365,6 @@ func (s *AgentService) rebuildModelContext(ctx context.Context, userID string, m
 	_ = ctx
 	_ = userID
 	return out
-}
-
-// partIndexOfCall finds the assistant-message part index for a tool call id.
-func partIndexOfCall(sess *runSession, callID string) int {
-	for i, part := range sess.assistantParts() {
-		if part.Type == protocol.PartToolCall && part.ToolCallID == callID {
-			return i
-		}
-	}
-	return len(sess.assistantParts()) - 1
 }
 
 // --- small helpers ---

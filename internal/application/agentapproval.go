@@ -21,16 +21,18 @@ var (
 	ErrApprovalNotAwaiting = errors.New("run is not awaiting approval")
 )
 
-// approvalService implements the §7 approval-receipt flow: resolve a decision,
-// apply or reject the staged proposal synchronously, record the outcome on the
-// tool-call part, and re-queue the same run. It is split out of AgentService
-// (wiring.md §9: no struct declares >15 methods) as a cohesive unit and embedded
-// back, so AgentService.ResolveApproval resolves by promotion and SubmitCommands
-// routes add-tool-result receipts to it unchanged.
+// approvalService implements the §7 approval-receipt flow: resolve a decision, apply or
+// reject the staged proposal synchronously, record the outcome on the tool-call part, and
+// let the run continue. It is split out of AgentService (wiring.md §9: no struct declares
+// >15 methods) as a cohesive unit and embedded back, so AgentService.ResolveApproval
+// resolves by promotion and SubmitCommands routes add-tool-result receipts to it unchanged.
 type approvalService struct {
 	app   *App
 	repo  *persistence.AgentRepository
 	store *persistence.Store
+	// svc reaches the harness units a resolved proposal has to notify: under a host the same
+	// turn continues instead of a new job being queued (doc/harness.md §7).
+	svc *AgentService
 }
 
 // approvalDecision is the add-tool-result payload for a proposal (§7.1): the
@@ -127,11 +129,13 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 			var payload dailyPlanPayload
 			if err := json.Unmarshal([]byte(proposal.PatchJSON), &payload); err != nil {
 				s.markProposalConflict(ctx, proposal.ID)
+				s.recordConflict(ctx, userID, part.ID, "the daily plan proposal could not be read")
 				return SubmitResult{}, fmt.Errorf("%w: malformed daily plan proposal", ErrValidation)
 			}
 			plan, items, applyErr := s.app.ApplyDailyPlanProposal(ctx, userID, &proposal, payload)
 			if applyErr != nil {
 				s.markProposalConflict(ctx, proposal.ID)
+				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
 				if errors.Is(applyErr, ErrRevision) {
 					return SubmitResult{}, ErrRevision
 				}
@@ -152,6 +156,11 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 			// ErrRevision → 412, and the proposal is marked conflict, never overwritten.
 			newRevision, applyErr := s.app.ApplyProposal(ctx, userID, &proposal, patches, proposal.BaseRevision)
 			if applyErr != nil {
+				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
+				// A host is waiting on this decision, so the run has to go back to running even
+				// though the apply failed: the model gets the conflict as its tool result and can
+				// re-propose in the same turn (doc/harness.md §7). The user still sees 412.
+				s.releaseHarnessRun(ctx, userID, run)
 				if errors.Is(applyErr, ErrRevision) {
 					s.markProposalConflict(ctx, proposal.ID)
 					return SubmitResult{}, ErrRevision
@@ -184,10 +193,73 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 		}
 	}
 
+	if run.HarnessMode != "" {
+		// A host is waiting on the long poll, so the SAME turn continues: no new job, no new
+		// run, and no second stream (doc/harness.md §7). This replaces the requeue below and
+		// is why agentapproval.go no longer creates an agent_run job of its own.
+		if err := s.continueHarnessRun(ctx, userID, run, part.ID); err != nil {
+			return SubmitResult{}, err
+		}
+		return SubmitResult{ThreadID: run.ThreadID, RunID: run.ID, FromSeq: fromSeq, NoStream: true}, nil
+	}
 	if err := s.requeueRun(ctx, userID, run); err != nil {
 		return SubmitResult{}, err
 	}
 	return SubmitResult{ThreadID: run.ThreadID, RunID: run.ID, FromSeq: fromSeq}, nil
+}
+
+// releaseHarnessRun puts a parked run back to running without touching the transcript. It is the
+// recovery half of an approval that could not be applied: the decision happened, so the run must
+// not stay parked, and the model learns the outcome from the recorded conflict
+// (doc/harness.md §7).
+func (s *approvalService) releaseHarnessRun(ctx context.Context, userID string, run *persistence.AgentRun) {
+	if run.HarnessMode == "" || run.Status != persistence.RunAwaitingApproval {
+		return
+	}
+	_ = s.repo.SetRunStatus(ctx, userID, run.ID, persistence.RunRunning, "", "")
+}
+
+// continueHarnessRun puts a parked run back to running and pushes the resolved part to the
+// stream that is still open (§7). The host learns the decision from its long poll; the user
+// sees it here.
+func (s *approvalService) continueHarnessRun(ctx context.Context, userID string, run *persistence.AgentRun, partID string) error {
+	if err := s.repo.SetRunStatus(ctx, userID, run.ID, persistence.RunRunning, "", ""); err != nil {
+		return err
+	}
+	sess, err := s.svc.harnessService.harnessLifecycle.loadRunSession(ctx, run)
+	if err != nil {
+		return err
+	}
+	if sess == nil {
+		return nil
+	}
+	running := protocol.RunningStatus()
+	sess.state.Messages[sess.assistantIdx].Status = running
+	_ = sess.emitSet(protocol.MessageStatusPath(sess.assistantIdx), running)
+	if part, err := s.repo.GetPart(ctx, userID, partID); err == nil {
+		updated := partFromRow(part)
+		if part.Idx < len(sess.assistantParts()) {
+			sess.state.Messages[sess.assistantIdx].Parts[part.Idx] = updated
+		}
+		_ = sess.emitSet(protocol.PartPath(sess.assistantIdx, part.Idx), updated)
+	}
+	// The resolved proposal drops off the pending list (§2.7).
+	sess.state.FastTask.PendingProposals = s.svc.pendingProposals(ctx, userID, run.ThreadID)
+	_ = sess.emitSet(protocol.FastTaskPath(), sess.state.FastTask)
+	return sess.saveState()
+}
+
+// recordConflict writes a failed apply onto the part as a structured error, so a host waiting
+// on the long poll learns the tree moved instead of waiting for a decision that will never
+// come (§7.4). For a server-driven run it is a no-op: nothing is waiting.
+func (s *approvalService) recordConflict(ctx context.Context, userID, partID, reason string) {
+	payload, _ := json.Marshal(map[string]any{
+		"decision": "conflict", "applied": false,
+		"error":  "the task tree changed before this approval; the proposal was marked conflict",
+		"detail": reason,
+	})
+	_ = s.repo.UpdatePartResult(ctx, userID, partID, string(payload), true)
+	_ = s.repo.UpdatePartApproval(ctx, userID, partID, "conflict", nil)
 }
 
 // recordApproval writes the decision onto the tool-call part so the resumed run

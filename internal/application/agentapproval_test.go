@@ -11,8 +11,16 @@ import (
 	"github.com/FastR-D/FastTask/internal/persistence"
 )
 
-// proposalArgs builds a valid propose_task_tree_patch argument JSON string that
-// creates one task under the fixture goal.
+// The approval flow under the harness (doc/harness.md §7).
+//
+// What changed against the in-process loop is the timing, not the semantics: a proposal parks
+// the run, the host waits on a long poll instead of the stream ending, and the SAME turn
+// continues after the decision — no new run and no new job. What did not change is that a
+// proposal writes no business table until a user approves it, and that the decision arrives as
+// an add-tool-result receipt (ADR-0002 §3.1).
+
+// proposalArgs builds a valid propose_task_tree_patch argument JSON string that creates one task
+// under the fixture goal.
 func proposalArgs(goalID string) string {
 	patch := []map[string]any{{
 		"op": "create", "type": "task", "client_ref": "n1",
@@ -22,20 +30,34 @@ func proposalArgs(goalID string) string {
 	return string(encoded)
 }
 
-// proposeFixture runs a run to awaiting_approval and returns the fixture, service,
-// run id and the proposal tool-call id.
-func proposeFixture(t *testing.T, fake *fakeChat) (fixture, *AgentService, string, string) {
+// proposalScript is the two-turn model script every approval test needs: propose, then answer.
+func proposalScript(goalID, answer string) []scriptedTurn {
+	return []scriptedTurn{
+		{text: "我建议这样拆：", toolCalls: []agent.ToolCall{{
+			ID: "call_propose", Name: "propose_task_tree_patch", Arguments: proposalArgs(goalID),
+		}}},
+		{text: answer},
+	}
+}
+
+// proposeFixture drives a run to awaiting_approval and returns everything a test needs to decide
+// it. The proposal tool call has already been executed by the host at that point, exactly as it
+// would be in a browser.
+func proposeFixture(t *testing.T, answer string) (fixture, *AgentService, *testHost, string) {
 	t.Helper()
-	f, svc := loopFixture(t, fake)
-	job := submitJob(t, svc, f.store, f.user.ID, "帮我拆解论文下一步")
-	if _, err := svc.ExecuteRun(context.Background(), job); err != nil {
-		t.Fatalf("ExecuteRun: %v", err)
+	f := newFixture(t)
+	upstream := newFakeUpstream(t, proposalScript(f.goal.ID, answer)...)
+	svc := NewAgentService(f.app, WithCredentialsResolver(upstream.resolver()))
+	runID := submitHarnessRun(t, svc, f.store, f.user.ID, "帮我拆解论文下一步")
+	host := newTestHost(t, svc, upstream, f.user.ID, runID)
+
+	if outcomes := host.modelTurn(); len(outcomes) != 1 || outcomes[0].Status != "pending" {
+		t.Fatalf("outcomes=%#v, want one parked proposal", outcomes)
 	}
-	run := runStatus(t, svc, f.user.ID, job.SubjectID)
-	if run.Status != persistence.RunAwaitingApproval {
-		t.Fatalf("run status=%q, want awaiting_approval", run.Status)
+	if status := host.runStatus().Status; status != persistence.RunAwaitingApproval {
+		t.Fatalf("run status=%q, want awaiting_approval (§7)", status)
 	}
-	return f, svc, run.ID, "call_propose"
+	return f, svc, host, runID
 }
 
 func countTasks(t *testing.T, store *persistence.Store, userID, goalID string) int64 {
@@ -60,14 +82,15 @@ func countProposalsByStatus(t *testing.T, store *persistence.Store, userID, stat
 	return n
 }
 
-func resumeJob(t *testing.T, svc *AgentService, store *persistence.Store, userID, runID string) persistence.AgentJob {
+// countRunJobs is the assertion §1.2 and §7 both hinge on: a harness run has no job, and an
+// approval must not create one.
+func countRunJobs(t *testing.T, store *persistence.Store, runID string) int64 {
 	t.Helper()
-	run := runStatus(t, svc, userID, runID)
-	var job persistence.AgentJob
-	if err := store.DB.Where("id = ?", run.JobID).First(&job).Error; err != nil {
-		t.Fatalf("load resume job: %v", err)
+	var n int64
+	if err := store.DB.Model(&persistence.AgentJob{}).Where("subject_id = ?", runID).Count(&n).Error; err != nil {
+		t.Fatal(err)
 	}
-	return job
+	return n
 }
 
 func approveCommand(toolCallID, decision, reason string) Command {
@@ -79,75 +102,78 @@ func approveCommand(toolCallID, decision, reason string) Command {
 	return Command{Type: "add-tool-result", ToolCallID: toolCallID, Result: encoded}
 }
 
-// TestProposalToolWritesNoBusinessTables covers agent-impl.md §10 ("proposal 级
-// 工具执行后业务表零写入") and invariant 1: proposing stages a Proposal and
-// changes nothing in goals/tasks until the user approves.
-func TestProposalToolWritesNoBusinessTables(t *testing.T) {
-	fake := &fakeChat{turns: []scriptedTurn{
-		{text: "我建议这样拆：", toolCalls: []agent.ToolCall{{ID: "call_propose", Name: "propose_task_tree_patch", Arguments: ""}}},
-		{text: "已提交，等你确认。"},
-	}}
-	// The Arguments are goal-dependent; fill them after the fixture goal is known.
-	f := newFixture(t)
-	fake.turns[0].toolCalls[0].Arguments = proposalArgs(f.goal.ID)
-	svc := NewAgentService(f.app, WithChatResolver(func(context.Context) (agent.ChatProvider, error) { return fake, nil }))
+// waitApproval reads the decision back off the long poll the host is holding open (§7).
+func waitApproval(t *testing.T, svc *AgentService, host *testHost, proposalID string) ApprovalWait {
+	t.Helper()
+	wait, err := svc.WaitForApproval(context.Background(), host.principal, proposalID, 0)
+	if err != nil {
+		t.Fatalf("WaitForApproval: %v", err)
+	}
+	return wait
+}
 
-	job := submitJob(t, svc, f.store, f.user.ID, "帮我拆解论文下一步")
-	if _, err := svc.ExecuteRun(context.Background(), job); err != nil {
-		t.Fatalf("ExecuteRun: %v", err)
+// pendingProposalID returns the proposal the parked run is waiting on.
+func pendingProposalID(t *testing.T, store *persistence.Store, userID string) string {
+	t.Helper()
+	var proposal persistence.Proposal
+	if err := store.DB.Where("user_id = ? AND status = 'pending'", userID).First(&proposal).Error; err != nil {
+		t.Fatalf("no pending proposal: %v", err)
 	}
-	run := runStatus(t, svc, f.user.ID, job.SubjectID)
-	if run.Status != persistence.RunAwaitingApproval {
-		t.Fatalf("run status=%q, want awaiting_approval", run.Status)
-	}
-	// Zero business writes: still exactly the four fixture tasks.
+	return proposal.ID
+}
+
+// TestProposalToolWritesNoBusinessTables covers agent.md §4 invariant 1 and agent-impl.md §10:
+// proposing stages a Proposal and changes nothing in goals/tasks until the user approves.
+func TestProposalToolWritesNoBusinessTables(t *testing.T) {
+	f, svc, host, runID := proposeFixture(t, "已提交，等你确认。")
+
 	if got := countTasks(t, f.store, f.user.ID, f.goal.ID); got != int64(len(f.tasks)) {
-		t.Fatalf("tasks=%d after proposing, want %d (proposal must not write business tables)", got, len(f.tasks))
+		t.Fatalf("tasks=%d after proposing, want %d (a proposal must not write business tables)", got, len(f.tasks))
 	}
-	// Exactly one pending proposal was staged.
 	if got := countProposalsByStatus(t, f.store, f.user.ID, "pending"); got != 1 {
 		t.Fatalf("pending proposals=%d, want 1", got)
 	}
-	// The tool-call part is persisted with approval pending and the proposal link.
-	parts := assistantParts(t, svc, f.user.ID, run.ID)
 	var found bool
-	for _, p := range parts {
+	for _, p := range assistantParts(t, svc, f.user.ID, runID) {
 		if p.Type == "tool-call" && p.ToolName == "propose_task_tree_patch" {
 			found = true
 			if p.ApprovalStatus != "pending" || p.ProposalID == nil {
 				t.Fatalf("proposal part approval=%q proposalID=%v", p.ApprovalStatus, p.ProposalID)
+			}
+			if p.ResultJSON == "" {
+				t.Fatal("the proposal part carries no structured diff for the approval card")
 			}
 		}
 	}
 	if !found {
 		t.Fatal("no proposal tool-call part persisted")
 	}
+	// The run is parked, not finished, and holds no job (§1.2).
+	if countRunJobs(t, f.store, runID) != 0 {
+		t.Fatal("a harness run created an AgentJob")
+	}
+	if host.beats == 0 {
+		t.Fatal("the host never beat; a parked run would be reaped mid-wait (§10.4)")
+	}
 }
 
-// TestApprovalApproveAppliesAndResumes covers §7.2/§7.3: approving applies the
-// proposal synchronously (tasks created), records the decision, re-queues the
-// SAME run, and the resumed loop feeds the approval result back to the model.
-func TestApprovalApproveAppliesAndResumes(t *testing.T) {
-	f := newFixture(t)
-	fake := &fakeChat{turns: []scriptedTurn{
-		{text: "建议：", toolCalls: []agent.ToolCall{{ID: "call_propose", Name: "propose_task_tree_patch", Arguments: proposalArgs(f.goal.ID)}}},
-		{text: "已应用，任务已创建。"},
-	}}
-	svc := NewAgentService(f.app, WithChatResolver(func(context.Context) (agent.ChatProvider, error) { return fake, nil }))
+// TestApprovalApproveContinuesSameTurn covers §7.2, §7.3 and §5.1: approving applies the
+// proposal synchronously, records the decision, hands it to the waiting host, and the SAME run and
+// turn continue — no new run, no new job, no rebuilt context.
+func TestApprovalApproveContinuesSameTurn(t *testing.T) {
+	f, svc, host, runID := proposeFixture(t, "已应用，任务已创建。")
 	ctx := context.Background()
-
-	job := submitJob(t, svc, f.store, f.user.ID, "拆解论文")
-	if _, err := svc.ExecuteRun(ctx, job); err != nil {
-		t.Fatalf("ExecuteRun: %v", err)
-	}
-	runID := job.SubjectID
+	proposalID := pendingProposalID(t, f.store, f.user.ID)
 
 	result, err := svc.ResolveApproval(ctx, f.user.ID, approveCommand("call_propose", "approve", ""))
 	if err != nil {
 		t.Fatalf("ResolveApproval: %v", err)
 	}
 	if result.RunID != runID {
-		t.Fatalf("approval resumed run=%q, want same run %q (§7.2)", result.RunID, runID)
+		t.Fatalf("approval resolved run=%q, want the same run %q (§7.2)", result.RunID, runID)
+	}
+	if !result.NoStream {
+		t.Fatal("an approval receipt opened a second stream; the open one carries the continuation (§7)")
 	}
 	// ApplyProposal ran synchronously: one task created (4 -> 5).
 	if got := countTasks(t, f.store, f.user.ID, f.goal.ID); got != int64(len(f.tasks)+1) {
@@ -156,109 +182,75 @@ func TestApprovalApproveAppliesAndResumes(t *testing.T) {
 	if got := countProposalsByStatus(t, f.store, f.user.ID, "applied"); got != 1 {
 		t.Fatalf("applied proposals=%d, want 1", got)
 	}
-	// FromSeq is the awaiting checkpoint so the client streams only the continuation.
-	run := runStatus(t, svc, f.user.ID, runID)
-	if result.FromSeq != run.CheckpointSeq {
-		// CheckpointSeq advances on resume; FromSeq captured the pre-resume value.
-		if result.FromSeq <= 0 {
-			t.Fatalf("FromSeq=%d, want the awaiting checkpoint > 0", result.FromSeq)
-		}
+	if got := countRunJobs(t, f.store, runID); got != 0 {
+		t.Fatalf("the approval created %d AgentJobs; the same turn continues in the host (§7)", got)
+	}
+	// The run is live again, and the host's wait returns the decision.
+	if status := host.runStatus().Status; status != persistence.RunRunning {
+		t.Fatalf("run status=%q after approval, want running", status)
+	}
+	wait := waitApproval(t, svc, host, proposalID)
+	if wait.Status != "approved" {
+		t.Fatalf("long poll returned %q, want approved", wait.Status)
+	}
+	encoded, _ := json.Marshal(wait.Result)
+	if !strings.Contains(string(encoded), "applied") {
+		t.Fatalf("the decision the model sees carries no apply result: %s", encoded)
 	}
 
-	// Resume the same run under the new job; the loop continues and succeeds.
-	rjob := resumeJob(t, svc, f.store, f.user.ID, runID)
-	if rjob.ID == job.ID {
-		t.Fatal("resume did not create a new AgentJob (§7.2)")
-	}
-	if _, err := svc.ExecuteRun(ctx, rjob); err != nil {
-		t.Fatalf("resume ExecuteRun: %v", err)
-	}
-	if got := runStatus(t, svc, f.user.ID, runID).Status; got != persistence.RunSucceeded {
-		t.Fatalf("resumed run status=%q, want succeeded", got)
-	}
-	// The resumed model turn saw the approval result fed back (§7).
-	if fake.calls < 2 {
-		t.Fatalf("model calls=%d, want the resumed continuation", fake.calls)
-	}
-	resumed := fake.requests[1]
-	var toolContent string
-	for _, m := range resumed.Messages {
-		if m.Role == "tool" {
-			toolContent = m.Content
-		}
-	}
-	if !strings.Contains(toolContent, "approve") {
-		t.Fatalf("approval result not fed back to the model: %q", toolContent)
+	// The same turn continues: one more model call, then the host reports completion.
+	host.drive(2)
+	if got := host.runStatus().Status; got != persistence.RunSucceeded {
+		t.Fatalf("run status=%q, want succeeded", got)
 	}
 	if !strings.Contains(concatText(assistantParts(t, svc, f.user.ID, runID)), "已应用") {
-		t.Fatal("resumed assistant text not persisted")
+		t.Fatal("the continuation's text was not persisted")
 	}
 }
 
-// TestApprovalRejectFeedsReasonToModel covers §7: rejecting records the reason as
-// the tool result and resumes the run so the model can re-propose. No tasks are
-// created on reject.
+// TestApprovalRejectFeedsReasonToModel covers §7: rejecting records the reason as the tool result,
+// writes no task, and lets the model re-propose in the same turn.
 func TestApprovalRejectFeedsReasonToModel(t *testing.T) {
-	f := newFixture(t)
-	fake := &fakeChat{turns: []scriptedTurn{
-		{text: "建议：", toolCalls: []agent.ToolCall{{ID: "call_propose", Name: "propose_task_tree_patch", Arguments: proposalArgs(f.goal.ID)}}},
-		{text: "明白，我换个拆法。"},
-	}}
-	svc := NewAgentService(f.app, WithChatResolver(func(context.Context) (agent.ChatProvider, error) { return fake, nil }))
+	f, svc, host, _ := proposeFixture(t, "明白，我换个拆法。")
 	ctx := context.Background()
-
-	job := submitJob(t, svc, f.store, f.user.ID, "拆解论文")
-	if _, err := svc.ExecuteRun(ctx, job); err != nil {
-		t.Fatalf("ExecuteRun: %v", err)
+	proposalID := pendingProposalID(t, f.store, f.user.ID)
+	host.decide = func(string, string) approvalDecision {
+		return approvalDecision{Decision: "reject", Reason: "第二步和第三步重复了"}
 	}
-	runID := job.SubjectID
 
 	if _, err := svc.ResolveApproval(ctx, f.user.ID, approveCommand("call_propose", "reject", "第二步和第三步重复了")); err != nil {
 		t.Fatalf("ResolveApproval reject: %v", err)
 	}
-	// Reject writes no tasks.
 	if got := countTasks(t, f.store, f.user.ID, f.goal.ID); got != int64(len(f.tasks)) {
 		t.Fatalf("tasks=%d after reject, want unchanged %d", got, len(f.tasks))
 	}
 	if got := countProposalsByStatus(t, f.store, f.user.ID, "rejected"); got != 1 {
 		t.Fatalf("rejected proposals=%d, want 1", got)
 	}
-	rjob := resumeJob(t, svc, f.store, f.user.ID, runID)
-	if _, err := svc.ExecuteRun(ctx, rjob); err != nil {
-		t.Fatalf("resume ExecuteRun: %v", err)
+	wait := waitApproval(t, svc, host, proposalID)
+	if wait.Status != "rejected" {
+		t.Fatalf("long poll returned %q, want rejected", wait.Status)
 	}
-	// The reject reason reached the model (§7: 拒绝理由要回灌模型).
-	resumed := fake.requests[1]
-	var toolContent string
-	for _, m := range resumed.Messages {
-		if m.Role == "tool" {
-			toolContent = m.Content
-		}
+	encoded, _ := json.Marshal(wait.Result)
+	if !strings.Contains(string(encoded), "第二步和第三步重复了") {
+		t.Fatalf("the reject reason did not reach the model: %s", encoded)
 	}
-	if !strings.Contains(toolContent, "第二步和第三步重复了") {
-		t.Fatalf("reject reason not fed back to the model: %q", toolContent)
+
+	host.drive(2)
+	if got := host.runStatus().Status; got != persistence.RunSucceeded {
+		t.Fatalf("run status=%q after a rejection, want succeeded", got)
 	}
 }
 
-// TestApprovalBaseRevisionConflict412 covers §7.4/§10: if the tree moved after the
-// proposal was staged, approve returns ErrRevision (→412), marks the proposal
-// conflict, and does NOT apply the patch.
+// TestApprovalBaseRevisionConflict412 covers §7.4: if the tree moved after the proposal was
+// staged, approving returns ErrRevision (→412), marks the proposal conflict, does NOT apply the
+// patch — and, under a host, releases the run so the model can see the conflict instead of waiting
+// forever.
 func TestApprovalBaseRevisionConflict412(t *testing.T) {
-	f := newFixture(t)
-	fake := &fakeChat{turns: []scriptedTurn{
-		{text: "建议：", toolCalls: []agent.ToolCall{{ID: "call_propose", Name: "propose_task_tree_patch", Arguments: proposalArgs(f.goal.ID)}}},
-		{text: "不会到达"},
-	}}
-	svc := NewAgentService(f.app, WithChatResolver(func(context.Context) (agent.ChatProvider, error) { return fake, nil }))
+	f, svc, host, _ := proposeFixture(t, "不会到达")
 	ctx := context.Background()
+	proposalID := pendingProposalID(t, f.store, f.user.ID)
 
-	job := submitJob(t, svc, f.store, f.user.ID, "拆解论文")
-	if _, err := svc.ExecuteRun(ctx, job); err != nil {
-		t.Fatalf("ExecuteRun: %v", err)
-	}
-	runID := job.SubjectID
-
-	// Advance the tree revision behind the proposal's back.
 	moved := persistence.Task{GoalID: f.goal.ID, Type: "task", Title: "插入的变更", SuccessCriteria: "sc", MinimumAction: "ma", Priority: 50, EstimateMinutes: 25}
 	if err := f.app.CreateTask(ctx, f.user.ID, &moved); err != nil {
 		t.Fatal(err)
@@ -267,67 +259,52 @@ func TestApprovalBaseRevisionConflict412(t *testing.T) {
 
 	_, err := svc.ResolveApproval(ctx, f.user.ID, approveCommand("call_propose", "approve", ""))
 	if !errors.Is(err, ErrRevision) {
-		t.Fatalf("approve after tree moved err=%v, want ErrRevision (412)", err)
+		t.Fatalf("approve after the tree moved err=%v, want ErrRevision (412)", err)
 	}
-	// The stale patch was NOT applied: task count is just the moved one, no proposal task.
 	if got := countTasks(t, f.store, f.user.ID, f.goal.ID); got != tasksAfterMove {
-		t.Fatalf("tasks=%d after 412, want %d (stale patch must not apply)", got, tasksAfterMove)
+		t.Fatalf("tasks=%d after 412, want %d (a stale patch must not apply)", got, tasksAfterMove)
 	}
 	if got := countProposalsByStatus(t, f.store, f.user.ID, "conflict"); got != 1 {
 		t.Fatalf("conflict proposals=%d, want 1", got)
 	}
-	// The run was NOT resumed on apply failure (§7.3).
-	if got := runStatus(t, svc, f.user.ID, runID).Status; got != persistence.RunAwaitingApproval {
-		t.Fatalf("run status=%q after 412, want still awaiting_approval (not resumed)", got)
+	// The run is released rather than left parked: the decision happened, it just failed.
+	if got := host.runStatus().Status; got != persistence.RunRunning {
+		t.Fatalf("run status=%q after 412, want running so the turn can continue", got)
+	}
+	wait := waitApproval(t, svc, host, proposalID)
+	if wait.Status != "conflict" || !wait.IsError {
+		t.Fatalf("long poll returned %q (isError=%v), want a conflict error the model can act on", wait.Status, wait.IsError)
 	}
 }
 
-// TestApprovalDuplicateReceipt409 covers §7.4: a second receipt for the same
-// toolCallId is rejected as a duplicate and does not re-apply.
+// TestApprovalDuplicateReceipt409 covers §7.4: a second receipt for the same toolCallId is a
+// duplicate and does not re-apply.
 func TestApprovalDuplicateReceipt409(t *testing.T) {
-	fake := &fakeChat{turns: []scriptedTurn{
-		{text: "建议：", toolCalls: []agent.ToolCall{{ID: "call_propose", Name: "propose_task_tree_patch", Arguments: ""}}},
-		{text: "已应用。"},
-	}}
-	f := newFixture(t)
-	fake.turns[0].toolCalls[0].Arguments = proposalArgs(f.goal.ID)
-	svc := NewAgentService(f.app, WithChatResolver(func(context.Context) (agent.ChatProvider, error) { return fake, nil }))
+	f, svc, _, runID := proposeFixture(t, "已应用。")
 	ctx := context.Background()
 
-	job := submitJob(t, svc, f.store, f.user.ID, "拆解论文")
-	if _, err := svc.ExecuteRun(ctx, job); err != nil {
-		t.Fatalf("ExecuteRun: %v", err)
-	}
 	if _, err := svc.ResolveApproval(ctx, f.user.ID, approveCommand("call_propose", "approve", "")); err != nil {
 		t.Fatalf("first approve: %v", err)
 	}
 	tasksAfterFirst := countTasks(t, f.store, f.user.ID, f.goal.ID)
-	// Second receipt for the same toolCallId → duplicate (409), no re-apply.
 	_, err := svc.ResolveApproval(ctx, f.user.ID, approveCommand("call_propose", "approve", ""))
 	if !errors.Is(err, ErrApprovalDuplicate) {
 		t.Fatalf("second receipt err=%v, want ErrApprovalDuplicate (409)", err)
 	}
 	if got := countTasks(t, f.store, f.user.ID, f.goal.ID); got != tasksAfterFirst {
-		t.Fatalf("tasks=%d after duplicate, want unchanged %d", got, tasksAfterFirst)
+		t.Fatalf("tasks=%d after a duplicate receipt, want unchanged %d", got, tasksAfterFirst)
+	}
+	if got := countRunJobs(t, f.store, runID); got != 0 {
+		t.Fatalf("a duplicate receipt created %d jobs", got)
 	}
 }
 
-// TestApprovalCrossUserToolCall404 covers §7.4/§10: an approval receipt is
+// TestApprovalCrossUserToolCall404 covers §7.4 and agent.md §4 invariant 5: a receipt is
 // re-authenticated, and a toolCallId owned by another user is not-found (404).
 func TestApprovalCrossUserToolCall404(t *testing.T) {
-	fake := &fakeChat{turns: []scriptedTurn{
-		{text: "建议：", toolCalls: []agent.ToolCall{{ID: "call_propose", Name: "propose_task_tree_patch", Arguments: ""}}},
-	}}
-	f := newFixture(t)
-	fake.turns[0].toolCalls[0].Arguments = proposalArgs(f.goal.ID)
-	svc := NewAgentService(f.app, WithChatResolver(func(context.Context) (agent.ChatProvider, error) { return fake, nil }))
+	f, svc, _, _ := proposeFixture(t, "不会到达")
 	ctx := context.Background()
 
-	job := submitJob(t, svc, f.store, f.user.ID, "拆解论文")
-	if _, err := svc.ExecuteRun(ctx, job); err != nil {
-		t.Fatalf("ExecuteRun: %v", err)
-	}
-	// A different user cannot resolve the owner's approval.
 	other := persistence.User{ID: persistence.NewID("user"), Identifier: "approver-other", PasswordHash: "h", DisplayName: "O", Timezone: "Asia/Shanghai", Locale: "zh-CN", Role: "member", Status: "active", Revision: 1, CreatedAt: persistence.Now(), UpdatedAt: persistence.Now()}
 	if err := f.store.DB.Create(&other).Error; err != nil {
 		t.Fatal(err)
@@ -336,32 +313,26 @@ func TestApprovalCrossUserToolCall404(t *testing.T) {
 	if !persistence.IsNotFound(err) {
 		t.Fatalf("cross-user approval err=%v, want not-found (404)", err)
 	}
-	// The owner's proposal is untouched.
 	if got := countProposalsByStatus(t, f.store, f.user.ID, "pending"); got != 1 {
-		t.Fatalf("pending proposals=%d, want 1 (cross-user attempt must not resolve it)", got)
+		t.Fatalf("pending proposals=%d, want 1 (a cross-user attempt must not resolve it)", got)
 	}
 }
 
-// TestApprovalInvalidDecision asserts a receipt without a valid decision is
-// rejected before touching the proposal.
+// TestApprovalInvalidDecision asserts a receipt without a valid decision is rejected before
+// touching the proposal.
 func TestApprovalInvalidDecision(t *testing.T) {
-	fake := &fakeChat{turns: []scriptedTurn{
-		{text: "建议：", toolCalls: []agent.ToolCall{{ID: "call_propose", Name: "propose_task_tree_patch", Arguments: ""}}},
-	}}
-	f := newFixture(t)
-	fake.turns[0].toolCalls[0].Arguments = proposalArgs(f.goal.ID)
-	svc := NewAgentService(f.app, WithChatResolver(func(context.Context) (agent.ChatProvider, error) { return fake, nil }))
+	f, svc, host, _ := proposeFixture(t, "不会到达")
 	ctx := context.Background()
-	job := submitJob(t, svc, f.store, f.user.ID, "拆解论文")
-	if _, err := svc.ExecuteRun(ctx, job); err != nil {
-		t.Fatalf("ExecuteRun: %v", err)
-	}
+
 	bad := Command{Type: "add-tool-result", ToolCallID: "call_propose", Result: json.RawMessage(`{"decision":"maybe"}`)}
 	if _, err := svc.ResolveApproval(ctx, f.user.ID, bad); !errors.Is(err, ErrEmptyCommand) {
 		t.Fatalf("invalid decision err=%v, want ErrEmptyCommand", err)
 	}
-	// Still pending; nothing applied.
 	if got := countProposalsByStatus(t, f.store, f.user.ID, "pending"); got != 1 {
 		t.Fatalf("pending proposals=%d, want 1", got)
+	}
+	// Still parked: an invalid decision is not a decision.
+	if status := host.runStatus().Status; status != persistence.RunAwaitingApproval {
+		t.Fatalf("run status=%q, want awaiting_approval", status)
 	}
 }

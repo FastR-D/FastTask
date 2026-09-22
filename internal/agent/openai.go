@@ -34,7 +34,6 @@ type OpenAI struct {
 	apiKey             string
 	transcriptionModel string
 	client             *http.Client
-	streamClient       *http.Client
 }
 
 func NewOpenAI(cfg config.Config) *OpenAI {
@@ -47,10 +46,7 @@ func NewOpenAIValues(baseURL, model, apiKey, transcriptionModel string) *OpenAI 
 		model:              model,
 		apiKey:             apiKey,
 		transcriptionModel: transcriptionModel,
-		client:             &http.Client{Timeout: 45 * time.Second},
-		// Streaming chat must not have a total timeout; the agent loop bounds it
-		// via context (doc/agent-impl.md §6). See chat.go.
-		streamClient: &http.Client{},
+		client: &http.Client{Timeout: 45 * time.Second},
 	}
 }
 

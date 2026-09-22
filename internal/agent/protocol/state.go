@@ -128,6 +128,11 @@ type PartType string
 const (
 	PartText     PartType = "text"
 	PartToolCall PartType = "tool-call"
+	// PartReasoning carries a model's chain of thought (doc/chat-features.md §3.3).
+	// It is display-only: nothing may parse or act on its text (agent.md §4
+	// invariant 4). ID separates the multiple reasoning segments one message can
+	// hold, so they are never concatenated into a single blob.
+	PartReasoning PartType = "reasoning"
 )
 
 // Part is a message part. It is polymorphic on the wire: a text part is exactly
@@ -139,6 +144,9 @@ type Part struct {
 
 	// Text part.
 	Text string `json:"-"`
+
+	// Reasoning part identity (§3.3). Empty for every other part type.
+	ID string `json:"-"`
 
 	// Tool-call part.
 	ToolCallID string         `json:"-"`
@@ -154,6 +162,12 @@ type Part struct {
 // TextPart builds a text part. An empty text is valid and required as the
 // append-text target before streaming begins (§2.7.1).
 func TextPart(text string) Part { return Part{Type: PartText, Text: text} }
+
+// ReasoningPart builds a reasoning part. An empty text is valid: like a text part
+// it is the append-text target established before the deltas arrive.
+func ReasoningPart(id, text string) Part {
+	return Part{Type: PartReasoning, ID: id, Text: text}
+}
 
 // ToolCallPart builds a tool-call part with the given arguments.
 func ToolCallPart(toolCallID, toolName string, args map[string]any) Part {
@@ -182,6 +196,12 @@ func (p Part) MarshalJSON() ([]byte, error) {
 			Type PartType `json:"type"`
 			Text string   `json:"text"`
 		}{Type: p.Type, Text: p.Text})
+	case PartReasoning:
+		return json.Marshal(struct {
+			Type PartType `json:"type"`
+			ID   string   `json:"id,omitempty"`
+			Text string   `json:"text"`
+		}{Type: p.Type, ID: p.ID, Text: p.Text})
 	case PartToolCall:
 		args := p.Args
 		if args == nil {
@@ -216,6 +236,15 @@ func (p *Part) UnmarshalJSON(data []byte) error {
 		}
 		p.ToolCallID, p.ToolName, p.Args = wire.ToolCallID, wire.ToolName, wire.Args
 		p.Result, p.IsError, p.Approval = wire.Result, wire.IsError, wire.Approval
+	case PartReasoning:
+		var wire struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(data, &wire); err != nil {
+			return err
+		}
+		p.ID, p.Text = wire.ID, wire.Text
 	default:
 		var wire struct {
 			Text string `json:"text"`
@@ -246,8 +275,13 @@ const (
 // first run of a new thread so the client can attach it to its thread list
 // (§2.2).
 type FastTaskState struct {
-	ThreadID         string            `json:"threadId,omitempty"`
-	ActiveGoalID     string            `json:"activeGoalId,omitempty"`
+	ThreadID     string `json:"threadId,omitempty"`
+	ActiveGoalID string `json:"activeGoalId,omitempty"`
+	// RunID names the run this state belongs to. A harness host needs it to ask
+	// for a run capability token (doc/harness.md §10.2): assistant-ui owns the
+	// fetch that creates the run, so the browser learns the id from the stream
+	// rather than from a response header it cannot read.
+	RunID            string            `json:"runId,omitempty"`
 	PendingProposals []PendingProposal `json:"pendingProposals"`
 }
 
@@ -295,3 +329,7 @@ func FastTaskPath() []string { return []string{"fasttask"} }
 // first run of a new thread (§2.2): the server creates the conversation and
 // sets ["fasttask","threadId"] so the converter can attach it to the thread list.
 func FastTaskThreadIDPath() []string { return []string{"fasttask", "threadId"} }
+
+// FastTaskRunIDPath addresses the runId a harness host needs in order to request
+// its capability token (doc/harness.md §10.2).
+func FastTaskRunIDPath() []string { return []string{"fasttask", "runId"} }

@@ -97,6 +97,9 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 		"serviceImportsWrite":   {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
 		"serviceImportsRead":    {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
 		"serviceAgentJobsWrite": {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
+		// A harness token is an opaque run capability, not a JWT: it is bound to one run,
+		// expires with it, and authorizes nothing else (doc/harness.md §10).
+		"harnessToken": {Type: "http", Scheme: "bearer", BearerFormat: "opaque"},
 	}
 	humaConfig.Components.Schemas = huma.NewMapRegistry("#/components/schemas/", schemaNamer)
 	humagin.MultipartMaxMemory = 8 << 20
@@ -107,7 +110,7 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	// Callers that build a Server directly (unit tests, §2 rule 4) pass none and
 	// get the builtin registrars, preserving the historical registration set.
 	if len(routes) == 0 {
-		routes = BuiltinRouteRegistrars(NewRouteDeps(app, authService, &server.cfg))
+		routes = BuiltinRouteRegistrars(NewRouteDeps(app, authService, &server.cfg), agent)
 	}
 	for _, registrar := range routes {
 		registrar.RegisterRoutes(api)
@@ -115,6 +118,7 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	// The agent transport endpoints are bare-Gin (§9.1) and the SPA fallback is
 	// not a huma route, so both stay direct Server calls rather than registrars.
 	server.registerAgent()
+	server.registerAgentHarness()
 	server.static()
 	return server
 }
@@ -135,6 +139,17 @@ func (s *Server) authenticationMiddleware(ctx huma.Context, next func(huma.Conte
 				next(ctx)
 				return
 			}
+		}
+		if _, ok := requirement["harnessToken"]; ok {
+			// A run capability is its own subject: it resolves to the run it was issued for, and
+			// the user identity comes from it rather than from a request body (§10.2).
+			if harness, err := s.agent.AuthenticateHarness(ctx.Context(), authorization); err == nil {
+				ctx = huma.WithValue(ctx, harnessPrincipalKey{}, harness)
+				next(ctx)
+				return
+			}
+			huma.WriteErr(s.API, ctx, http.StatusUnauthorized, "HARNESS_TOKEN_INVALID: the run capability is not valid")
+			return
 		}
 		for scheme, scope := range map[string]string{"serviceImportsWrite": "imports:write", "serviceImportsRead": "imports:read", "serviceAgentJobsWrite": "agent-jobs:write"} {
 			if _, ok := requirement[scheme]; !ok {
