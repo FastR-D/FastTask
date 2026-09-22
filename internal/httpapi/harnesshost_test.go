@@ -210,7 +210,10 @@ func startHarnessRunInThread(t *testing.T, api testAPI, text, threadID string) (
 		responses <- api.do(t, http.MethodPost, "/api/v1/agent/commands", body, nil)
 	}()
 	// Wait for THIS run, not merely the newest one: a test that drives several runs in a row would
-	// otherwise pick up an earlier, already finished run.
+	// otherwise pick up an earlier, already finished run. It also waits for the run's preamble — the
+	// assistant message the transcript is written into. A real client cannot observe the run before
+	// that, because the preamble is committed before the response headers are written; a test polling
+	// the database can, and would then race the server.
 	runID := ""
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -219,7 +222,7 @@ func startHarnessRunInThread(t *testing.T, api testAPI, text, threadID string) (
 			Where("user_id = ? AND harness_mode = ? AND status IN ?", api.user.ID, application.HarnessModeWASM,
 				[]string{persistence.RunQueued, persistence.RunRunning, persistence.RunAwaitingApproval, persistence.RunCancelling}).
 			Order("created_at DESC").First(&run).Error
-		if err == nil {
+		if err == nil && hasAssistantMessage(api, run.ID) {
 			runID = run.ID
 			break
 		}
@@ -553,4 +556,12 @@ func decisionString(decision map[string]any) string {
 func decisionReason(decision map[string]any) string {
 	value, _ := decision["reason"].(string)
 	return value
+}
+
+// hasAssistantMessage reports whether a run's preamble has been committed.
+func hasAssistantMessage(api testAPI, runID string) bool {
+	var count int64
+	api.store.DB.Model(&persistence.AgentMessage{}).
+		Where("run_id = ? AND role = ?", runID, "assistant").Count(&count)
+	return count > 0
 }

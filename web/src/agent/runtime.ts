@@ -1,5 +1,6 @@
 import { useAssistantTransportRuntime, type AssistantRuntime } from '@assistant-ui/react'
 import { ensureFreshAccessToken } from '../api'
+import { cancelActiveRun, driveRun, selectMode } from '../harness'
 import { convertState } from './converter'
 import type { ServerAgentState } from './state'
 
@@ -13,9 +14,52 @@ async function authHeaders(): Promise<Record<string, string>> {
   return access ? { Authorization: `Bearer ${access}` } : {}
 }
 
-export function prepareAgentCommand(body: { state?: unknown; [key: string]: unknown }) {
+// lastUserText is the message the runtime is sending. The harness host needs the text to prompt with
+// (§5.1), and assistant-ui — not this module — owns the request, so the text is captured on the way out
+// and read on the way back.
+let lastUserText = ''
+
+/** extractUserText concatenates the text parts of the add-message commands in a request body. */
+export function extractUserText(commands: unknown): string {
+  if (!Array.isArray(commands)) return ''
+  const parts: string[] = []
+  for (const command of commands) {
+    if (!command || typeof command !== 'object') continue
+    const entry = command as { type?: string; message?: { parts?: Array<{ type?: string; text?: string }> } }
+    if (entry.type !== 'add-message') continue
+    for (const part of entry.message?.parts ?? []) {
+      if (part?.type === 'text' && typeof part.text === 'string') parts.push(part.text)
+    }
+  }
+  return parts.join('').trim()
+}
+
+/**
+ * prepareAgentCommand adds the two fields the server needs beyond assistant-ui's own body: the thread
+ * identity, and the harness mode that says who drives the run (doc/harness.md §1.2).
+ *
+ * The mode comes from the session probe rather than from a guess, and the probe is awaited here — it is
+ * cached after the first call and warmed when the chat mounts (§3.2), so this does not put a 2 MB wasm
+ * compile on the send path. An unavailable host sends no mode at all, which leaves the run to the
+ * server instead of creating one nobody can drive.
+ */
+export async function prepareAgentCommand(body: { state?: unknown; commands?: unknown; [key: string]: unknown }) {
   const state = body.state as ServerAgentState | undefined
-  return { ...body, threadId: state?.fasttask?.threadId ?? null }
+  const text = extractUserText(body.commands)
+  if (text) lastUserText = text
+  const selection = await selectMode(null)
+  const mode = selection.mode === 'unavailable' ? undefined : selection.mode
+  return {
+    ...body,
+    threadId: state?.fasttask?.threadId ?? null,
+    ...(mode ? { harness_mode: mode } : {}),
+  }
+}
+
+/** harnessRunOf reads the run a browser host has to drive. assistant-ui owns the fetch, so the header is
+ *  the only place the server can name it (§1.2). */
+export function harnessRunOf(response: Response): string | null {
+  return response.headers.get('X-Harness-Run')
 }
 
 // useAgentRuntime wires the assistant-transport runtime. ALL transport wiring is
@@ -36,6 +80,21 @@ export function useAgentRuntime(initialState: ServerAgentState, onNotice: (messa
     // before the first command. Only the ID returned by FastTask in state is a
     // server thread; sending the temporary ID makes the first message a 404.
     prepareSendCommandsRequest: prepareAgentCommand,
+    // A run the server handed to a browser host has to be driven from here: the Worker will not touch
+    // it, and nothing else does (doc/harness.md §1.2). The stream keeps rendering from server state
+    // while the host works, so the UI needs no change (§13 phase D).
+    onResponse: response => {
+      const runId = harnessRunOf(response)
+      if (!runId) return
+      void driveRun({ runId, text: lastUserText }).catch(error => {
+        onNotice(`对话驱动失败：${error instanceof Error ? error.message : '请稍后重试'}`)
+      })
+    },
+    // The stop button cancels through the server first: cancelling is the user's power, and a host may
+    // not cancel its own run (§5.2, §10.2).
+    onCancel: () => {
+      void cancelActiveRun().catch(() => undefined)
+    },
     onError: (error, { commands }) => {
       const unsent = commands.find(command => command.type === 'add-message')
       if (unsent?.type === 'add-message') {

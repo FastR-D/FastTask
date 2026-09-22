@@ -17,5 +17,8 @@
     "jsx": "react-jsx"
   },
   "include": ["src"],
-  "exclude": ["src/sw.ts"]
+  // Tests live in tsconfig.test.json: they run under vitest in Node and may use node:fs,
+  // node:http and process, none of which the browser bundle may reach for. Keeping them out of
+  // this project is what stops a UI file from importing @types/node by accident.
+  "exclude": ["src/sw.ts", "src/**/*.test.ts", "src/**/*.test.tsx", "src/test-setup.ts"]
 }

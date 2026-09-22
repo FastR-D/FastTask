@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node", "vitest/globals"],
+    "composite": true,
+    "skipLibCheck": true,
+    "allowJs": false,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx"
+  },
+  // A composite project must list every file it pulls in, and a test that renders a component pulls
+  // in that component, so this project covers all of src — the ambient declarations included, because
+  // without vite/client and the mdui JSX augmentation every CSS import and every <mdui-*> element
+  // would fail to typecheck. The app project stays test-free, which is what keeps node globals out of
+  // the browser bundle.
+  "include": ["src"],
+  "exclude": ["src/sw.ts"]
+}

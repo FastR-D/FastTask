@@ -265,3 +265,35 @@
   .agent-bubble { max-width: 92%; }
   .agent-proposal-buttons mdui-button { flex: 1 1 auto; }
 }
+
+/* The harness status line (doc/harness.md §3.2): a degradation is stated, never implied. */
+.agent-harness {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--mdui-spacing-small, 4px);
+  align-items: center;
+  padding: var(--mdui-spacing-small, 4px) var(--mdui-spacing-medium, 8px);
+  font-size: var(--mdui-typescale-label-medium-size, 12px);
+  color: var(--mdui-color-on-surface-variant);
+  border-bottom: 1px solid var(--mdui-color-outline-variant);
+}
+
+.agent-harness.degraded {
+  color: var(--mdui-color-error);
+}
+
+.agent-harness-mode {
+  font-weight: 600;
+}
+
+.agent-harness-reason,
+.agent-harness-detail,
+.agent-harness-degraded,
+.agent-harness-error {
+  opacity: 0.85;
+}
+
+/* An offline composer is visibly disabled, not silently broken (doc/harness.md §9.3). */
+.agent-composer.offline {
+  opacity: 0.6;
+}
