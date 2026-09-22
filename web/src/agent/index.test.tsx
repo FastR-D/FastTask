@@ -50,6 +50,25 @@ describe('AgentChat restore', () => {
     expect(requestMock).toHaveBeenCalledWith('/agent/thread-state')
   })
 
+  it('renders markdown in both bubbles and keeps the user line breaks', async () => {
+    const state = restored('## 目标\n\n第一行\n第二行\n\n| 项 | 值 |\n| --- | --- |\n| a | 1 |')
+    requestMock.mockResolvedValue({ data: { state }, etag: null })
+    const { container } = render(<AgentChat goalId={null} />)
+    await screen.findByText('已经记下了。')
+
+    const user = container.querySelector('.agent-msg-user .agent-bubble')
+    const assistant = container.querySelector('.agent-msg-assistant .agent-bubble')
+    // Both sides go through agent/Markdown.tsx, so both carry the .agent-md tree.
+    expect(user?.querySelector('.agent-md')).not.toBeNull()
+    expect(assistant?.querySelector('.agent-md')).not.toBeNull()
+    // The user side additionally runs remark-breaks: Shift+Enter survives.
+    expect(user?.querySelector('h2')).toHaveTextContent('目标')
+    expect(user?.querySelectorAll('p br')).toHaveLength(1)
+    expect(user?.querySelectorAll('.agent-md-table table tbody tr')).toHaveLength(1)
+    // Neither side may render raw HTML from the other party's text.
+    expect(container.querySelector('.agent-md script')).toBeNull()
+  })
+
   it('stays usable when the restore read fails', async () => {
     requestMock.mockRejectedValue(new Error('需要联网'))
     const onNotice = vi.fn()

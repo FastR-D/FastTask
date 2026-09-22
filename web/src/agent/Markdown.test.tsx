@@ -1,21 +1,25 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { TextMessagePartProps } from '@assistant-ui/react'
-import { MarkdownText } from './Markdown'
+import { MarkdownText, UserMarkdownText } from './Markdown'
 
 // vitest runs without `globals`, so testing-library's auto-cleanup never fires
 // and every query below would match the previous test's tree too.
 afterEach(cleanup)
 
-// MarkdownText is the assistant bubble's Text part renderer. assistant-ui
-// spreads the message part flat onto it (`jsx(Text, { ...part })`), so the props
-// are `{ type, text, status }` and the surrounding MessagePartState is stubbed.
+// Both components are a bubble's Text part renderer. assistant-ui spreads the
+// message part flat onto it (`jsx(Text, { ...part })`), so the props are
+// `{ type, text, status }` and the surrounding MessagePartState is stubbed.
 function textPart(text: string) {
   return { type: 'text', text, status: { type: 'complete' } } as unknown as TextMessagePartProps
 }
 
 function renderMarkdown(text: string) {
   return render(<MarkdownText {...textPart(text)} />)
+}
+
+function renderUserMarkdown(text: string) {
+  return render(<UserMarkdownText {...textPart(text)} />)
 }
 
 describe('agent markdown rendering', () => {
@@ -122,5 +126,49 @@ describe('agent markdown rendering', () => {
     const { container } = renderMarkdown('')
     expect(container.querySelector('.agent-md')).not.toBeNull()
     expect(container.textContent).toBe('')
+  })
+})
+
+describe('user bubble markdown rendering', () => {
+  it('renders the same GFM structures as the assistant bubble', () => {
+    renderUserMarkdown('## 我的计划\n\n- [x] 已做\n- [ ] 待做\n\n| 项 | 状态 |\n| --- | --- |\n| 构建 | ok |')
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('我的计划')
+    expect(document.querySelectorAll('.agent-md li.task-list-item input[type="checkbox"]')).toHaveLength(2)
+    expect(screen.getByRole('cell', { name: '构建' })).toBeInTheDocument()
+  })
+
+  it('keeps Shift+Enter line breaks as <br> instead of folding them into a space', () => {
+    renderUserMarkdown('第一行\n第二行\n第三行')
+    const paragraph = document.querySelector('.agent-md p')
+    expect(paragraph?.querySelectorAll('br')).toHaveLength(2)
+    expect(paragraph?.textContent).toContain('第一行')
+    expect(paragraph?.textContent).toContain('第三行')
+  })
+
+  it('leaves model output on strict CommonMark so a soft break stays a space', () => {
+    renderMarkdown('第一行\n第二行')
+    const paragraph = document.querySelector('.agent-md p')
+    expect(paragraph?.querySelectorAll('br')).toHaveLength(0)
+    expect(paragraph?.textContent).toBe('第一行\n第二行')
+  })
+
+  it('hardens links typed by the user the same way', () => {
+    renderUserMarkdown('[文档](https://opencode.ai/docs)')
+    const link = screen.getByRole('link', { name: '文档' })
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+  })
+
+  it('never renders raw HTML typed into the composer (XSS)', () => {
+    renderUserMarkdown('<img src=x onerror="window.__userPwned=1"><script>window.__userPwned=1</script>')
+    expect(document.querySelector('.agent-md img')).toBeNull()
+    expect(document.querySelector('.agent-md script')).toBeNull()
+    expect(document.querySelector('[onerror]')).toBeNull()
+    expect((window as unknown as { __userPwned?: number }).__userPwned).toBeUndefined()
+  })
+
+  it('does not leak the hast node attribute either', () => {
+    renderUserMarkdown('[a](https://opencode.ai)\n\n| x | y |\n| --- | --- |\n| 1 | 2 |')
+    expect(document.querySelector('[node]')).toBeNull()
   })
 })

@@ -147,16 +147,26 @@ async function authHeaders() {
 
 测试相关的一条要点：`src/mdui.ts` 不在测试中加载，因此 mdui 元素**在 DOM 里但没有行为**。既有测试用 `closest('mdui-button')`、`toBeEnabled()` 做断言并能通过（属性是反射的），但不要断言 mdui 组件的交互行为。
 
-### 模型回复的 markdown 渲染
+### 对话气泡的 markdown 渲染
 
-助手气泡的 Text part 由 `web/src/agent/Markdown.tsx` 渲染（`react-markdown` + `remark-gfm`），通过 `MessagePrimitive.Parts` 的 `components={{ Text: MarkdownText }}` 挂上去。**用户气泡不套用 markdown**——那是用户自己打的纯文本，仍走默认的 `pre-wrap`。
+两侧气泡的 Text part 都由 `web/src/agent/Markdown.tsx` 渲染（`react-markdown` + `remark-gfm`），通过 `MessagePrimitive.Parts` 的 `components={{ Text: … }}` 挂上去，但**用的是两个不同的导出**：
 
-四条必须守住的约束：
+| 气泡 | 组件 | remark 插件 | 理由 |
+|---|---|---|---|
+| 助手 | `MarkdownText` | `remark-gfm` | 模型输出本身就有真正的段落分隔，严格 CommonMark 即可；再叠加换行插件会把刻意硬换行的文本双倍行距 |
+| 用户 | `UserMarkdownText` | `remark-gfm` + `remark-breaks` | 用户是用 Shift+Enter 换行的，而 CommonMark 把软换行折叠成空格——不加 `remark-breaks` 整条消息会糊成一段。与 GitHub 评论的行为一致 |
+
+`remark-breaks` 必须锁 4.x：3.x 还是 unified 10 / mdast 3 世代，与 react-markdown 10（unified 11）不兼容。
+
+用户气泡底色是 `--mdui-color-primary`，上面那套 markdown 样式挑的表面/前景 token（`surface-container-high`、`on-surface-variant`、`outline-variant`、primary 链接）全都落在对比色的错误一侧，所以 `.agent-msg-user .agent-md` 里整体反相：`on-primary` 当表面、`primary` 当墨色。**只用实色 token**——ADR-0004 §4.2 不允许字面色值，而 mdui 与本仓库都没有用过 `rgb()` alpha 写法。
+
+五条必须守住的约束：
 
 - **不引入 `@assistant-ui/react-markdown`**。它会带进 radix primitives，等于绕过 ADR-0004 §4.6 对 assistant-ui 官方组件包的否决；直接用 `react-markdown` 更小也更可控。
-- **不引入 `rehype-raw`**。模型输出里的裸 HTML 必须保持转义状态（`<img onerror=…>` 只能当文本显示），否则 `server.go:66` 的 CSP 挡不住已经进了 React 树的属性。链接一律 `target="_blank" rel="noopener noreferrer"`。
+- **不引入 `rehype-raw`**。模型输出与用户输入里的裸 HTML 都必须保持转义状态（`<img onerror=…>` 只能当文本显示），否则 `server.go:66` 的 CSP 挡不住已经进了 React 树的属性。链接一律 `target="_blank" rel="noopener noreferrer"`。
 - **自定义组件要先剥掉 `node` 再展开 props**。`react-markdown` 会把源 hast 节点作为 `node` 传给每个自定义组件，直接 `{...props}` 会在 DOM 上留下 `node="[object Object]"`。
 - **气泡的 `white-space: pre-wrap` 必须在 `.agent-md` 里复位成 `normal`**，否则 markdown 自己的换行会被再翻倍一次。
+- **反相样式只写在 `.agent-msg-user .agent-md` 作用域里**，不要为此另开一套 CSS 变量或第二个气泡类；否则换主题时要同时对齐两套色板，ADR-0004 §3 的「暗色模式零成本」就不成立了。
 
 宽表格在 400px 下的处理见 §7：`.agent-md-table` 是横向滚动容器，单元格关掉 `word-break` 以保持自然宽度；同时 `.agent-chat` / `.agent-viewport` / `.agent-msg` / `.agent-bubble` 都需要 `min-width: 0`，否则 flex/grid 的自动最小尺寸会让整页被表格撑破。
 

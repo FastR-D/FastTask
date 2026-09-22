@@ -3,6 +3,9 @@
 /backups/
 /web/node_modules/
 /web/dist/
+# Staging output for a deploy: the running server reads /web/dist/ straight off
+# disk, so a new bundle is built here first and renamed into place.
+/web/dist.new/
 *.db
 *.db-shm
 *.db-wal
