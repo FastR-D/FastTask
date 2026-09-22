@@ -1,0 +1,58 @@
+# The optional Node sidecar host (doc/tech.md §21.4, doc/harness.md §8).
+#
+# Install this ONLY when the deployment needs the fallback for browsers without JSPI. When it is used,
+# fasttask.env must set FASTTASK_SIDECAR_SPAWN=false so the Go server probes this unit instead of starting
+# its own child, and both sides must read the same FASTTASK_SIDECAR_SECRET.
+#
+# PartOf means: stopping or restarting fasttask.service stops or restarts this unit too, but not the other
+# way round — the sidecar is a fallback, and the server must keep serving when it is down.
+[Unit]
+Description=FastTask Node sidecar (agent host fallback)
+PartOf=fasttask.service
+After=network-online.target fasttask.service
+
+[Service]
+Type=simple
+User=fasttask
+Group=fasttask
+WorkingDirectory=/opt/fasttask
+# The shared capability secret and the endpoint live here. No model credential may be in this file: the
+# sidecar calls the Go server's proxy and never sees a provider key (doc/harness.md §4.5).
+EnvironmentFile=/etc/fasttask/sidecar.env
+ExecStart=/usr/bin/node /opt/fasttask/sidecar/dist/host.mjs
+Restart=on-failure
+RestartSec=5
+# A run may be driving a model call when the unit is stopped; give it the same grace the server does.
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateDevices=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictRealtime=true
+# AF_UNIX for the listening socket, AF_INET/AF_INET6 for the loopback call back to the server.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+# MemoryDenyWriteExecute is deliberately NOT set: V8 needs writable executable pages.
+# ReadWritePaths deliberately excludes the database and data directories — the sidecar holds no state and
+# never touches SQLite (§8.1). It only needs its socket directory.
+ReadWritePaths=/run/fasttask-sidecar
+RuntimeDirectory=fasttask-sidecar
+RuntimeDirectoryMode=0750
+LogsDirectory=fasttask-sidecar
+StateDirectory=fasttask-sidecar
+
+[Install]
+WantedBy=multi-user.target

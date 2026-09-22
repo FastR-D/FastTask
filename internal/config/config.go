@@ -55,6 +55,14 @@ type Config struct {
 	SidecarNodePath     string
 	SidecarSocket       string
 	SidecarStartTimeout time.Duration
+	// SidecarSpawn says whether this process starts the sidecar itself. The default is yes, which is what
+	// §8.4 describes. A deployment that runs the sidecar under its own systemd unit (doc/tech.md §21.4)
+	// turns it off: this process then only probes readiness and refuses runs when the host is gone, and
+	// never owns a PID it did not start.
+	SidecarSpawn bool
+	// SidecarSecret is the shared capability secret. Empty means "generate one for this process lifetime",
+	// which only works when this process also starts the sidecar and can hand it over.
+	SidecarSecret string
 }
 
 func Load() (Config, error) {
@@ -101,6 +109,8 @@ func Load() (Config, error) {
 		SidecarNodePath:     env("FASTTASK_SIDECAR_NODE_PATH", "node"),
 		SidecarSocket:       env("FASTTASK_SIDECAR_SOCKET", ""),
 		SidecarStartTimeout: envDuration("FASTTASK_SIDECAR_START_TIMEOUT", 15*time.Second),
+		SidecarSpawn:        envBool("FASTTASK_SIDECAR_SPAWN", true),
+		SidecarSecret:       env("FASTTASK_SIDECAR_SECRET", ""),
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return Config{}, errors.New("FASTTASK_PORT must be between 1 and 65535")
@@ -113,6 +123,11 @@ func Load() (Config, error) {
 	}
 	if c.SidecarEnabled && c.SidecarStartTimeout < time.Second {
 		return Config{}, errors.New("FASTTASK_SIDECAR_START_TIMEOUT must be at least 1s")
+	}
+	if c.SidecarEnabled && !c.SidecarSpawn && c.SidecarSecret == "" {
+		// Nobody would be able to authenticate: an externally started sidecar cannot be handed a secret
+		// this process invented at boot, so the deployment has to supply the one both sides read.
+		return Config{}, errors.New("FASTTASK_SIDECAR_SECRET is required when FASTTASK_SIDECAR_SPAWN is false")
 	}
 	if c.Environment == "production" && (strings.Contains(c.JWTSecret, "development") || c.AdminPassword == "fasttask-admin") {
 		return Config{}, errors.New("production requires non-default FASTTASK_JWT_SECRET and FASTTASK_ADMIN_PASSWORD")

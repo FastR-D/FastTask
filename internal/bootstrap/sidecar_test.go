@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,11 +22,41 @@ import (
 // the sidecar healthy says so instead of queueing runs into a hole, and none of it touches the WASM path.
 
 // fakeSidecar serves the §8.3 interface on a unix socket and records what it was asked.
+//
+// The health flag and the recorded calls are guarded because a supervisor may be probing this socket from
+// its own goroutine while the test flips the flag or reads what arrived — which is exactly what the
+// externally managed case does.
 type fakeSidecar struct {
 	listener net.Listener
 	server   *http.Server
+
+	mu       sync.Mutex
 	healthy  bool
 	requests []recordedCall
+}
+
+func (f *fakeSidecar) setHealthy(healthy bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.healthy = healthy
+}
+
+func (f *fakeSidecar) isHealthy() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.healthy
+}
+
+func (f *fakeSidecar) record(call recordedCall) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, call)
+}
+
+func (f *fakeSidecar) calls() []recordedCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]recordedCall(nil), f.requests...)
 }
 
 type recordedCall struct {
@@ -43,8 +75,8 @@ func newFakeSidecar(t *testing.T, socket string, healthy bool) *fakeSidecar {
 	fake.listener = listener
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		fake.requests = append(fake.requests, recordedCall{path: "/healthz", authorization: r.Header.Get("Authorization")})
-		if !fake.healthy {
+		fake.record(recordedCall{path: "/healthz", authorization: r.Header.Get("Authorization")})
+		if !fake.isHealthy() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -56,7 +88,7 @@ func newFakeSidecar(t *testing.T, socket string, healthy bool) *fakeSidecar {
 	mux.HandleFunc("/run", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		fake.requests = append(fake.requests, recordedCall{path: "/run", authorization: r.Header.Get("Authorization"), body: body})
+		fake.record(recordedCall{path: "/run", authorization: r.Header.Get("Authorization"), body: body})
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"stop_reason": "stop", "usage": map[string]any{"outputTokens": 12},
@@ -64,7 +96,7 @@ func newFakeSidecar(t *testing.T, socket string, healthy bool) *fakeSidecar {
 		})
 	})
 	mux.HandleFunc("/run/", func(w http.ResponseWriter, r *http.Request) {
-		fake.requests = append(fake.requests, recordedCall{path: r.URL.Path, authorization: r.Header.Get("Authorization")})
+		fake.record(recordedCall{path: r.URL.Path, authorization: r.Header.Get("Authorization")})
 		w.WriteHeader(http.StatusOK)
 	})
 	fake.server = &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -102,13 +134,13 @@ func TestSidecarClientTalksToTheSocketWithTheSecret(t *testing.T) {
 	}
 
 	// Every call carried the shared secret, and /run carried the capability the host drives with (§8.2).
-	for _, call := range fake.requests {
+	for _, call := range fake.calls() {
 		if call.authorization != "Bearer shared-secret" {
 			t.Fatalf("%s authorization=%q, want the shared secret", call.path, call.authorization)
 		}
 	}
 	var sawRun bool
-	for _, call := range fake.requests {
+	for _, call := range fake.calls() {
 		if call.path != "/run" {
 			continue
 		}
@@ -249,4 +281,94 @@ func indexOf(haystack, needle string) int {
 		}
 	}
 	return -1
+}
+
+// TestExternallyManagedSidecarIsProbedNotOwned covers the deployment shape doc/tech.md §21.4 describes:
+// systemd owns the process, and this one only decides whether the fallback can be offered. What it must
+// NOT do is start a child, signal one, or delete a socket file it did not create.
+func TestExternallyManagedSidecarIsProbedNotOwned(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "sidecar.sock")
+	fake := newFakeSidecar(t, socket, true)
+	supervisor, err := NewSidecar(config.Config{
+		SidecarEnabled: true, SidecarSpawn: false, SidecarSecret: "shared-secret",
+		SidecarSocket: socket, SidecarStartTimeout: 2 * time.Second,
+		PublicURL: "http://127.0.0.1:1", DatabasePath: filepath.Join(t.TempDir(), "fasttask.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewSidecar: %v", err)
+	}
+	supervisor.probeInterval = 5 * time.Millisecond
+	supervisor.failureThreshold = 2
+
+	ctx := context.Background()
+	if err := supervisor.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !supervisor.Available() {
+		t.Fatal("a healthy external sidecar was reported unavailable")
+	}
+	supervisor.mu.Lock()
+	command := supervisor.cmd
+	supervisor.mu.Unlock()
+	if command != nil {
+		t.Fatal("an externally managed sidecar was started by this process")
+	}
+	if !supervisor.Driver().Healthy(ctx) {
+		t.Fatal("the driver reported an unhealthy host for a healthy one")
+	}
+
+	// The host stops answering: after the threshold the fallback is withdrawn, and the WASM path is
+	// untouched because nothing here touches it (§14.10).
+	fake.setHealthy(false)
+	waitForAvailability(t, supervisor, false)
+
+	// systemd restarts it, and the probe notices without any help.
+	fake.setHealthy(true)
+	waitForAvailability(t, supervisor, true)
+
+	if err := supervisor.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if supervisor.Available() {
+		t.Fatal("Stop left an externally managed sidecar marked available")
+	}
+	if _, err := os.Stat(socket); err != nil {
+		t.Fatalf("Stop removed a socket this process does not own: %v", err)
+	}
+}
+
+// TestSpawnedSidecarSecretIsGeneratedOnce pins the default: with no secret configured, this process makes
+// one up and hands it to the child, so a leaked secret dies with the process (§8.2).
+func TestSpawnedSidecarSecretIsGeneratedOnce(t *testing.T) {
+	first, err := NewSidecar(config.Config{SidecarEnabled: true, SidecarSpawn: true, SidecarSocket: filepath.Join(t.TempDir(), "a.sock")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewSidecar(config.Config{SidecarEnabled: true, SidecarSpawn: true, SidecarSocket: filepath.Join(t.TempDir(), "b.sock")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.secret == "" || first.secret == second.secret {
+		t.Fatal("two supervisors share a secret, or one has none")
+	}
+	// A configured secret wins, which is what lets an external unit and this process agree on one.
+	configured, err := NewSidecar(config.Config{SidecarEnabled: true, SidecarSpawn: false, SidecarSecret: "from-the-deployment", SidecarSocket: filepath.Join(t.TempDir(), "c.sock")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured.secret != "from-the-deployment" {
+		t.Fatalf("secret=%q, want the configured one", configured.secret)
+	}
+}
+
+func waitForAvailability(t *testing.T, supervisor *SidecarSupervisor, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if supervisor.Available() == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("availability never became %v", want)
 }
