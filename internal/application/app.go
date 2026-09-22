@@ -42,20 +42,25 @@ type App struct {
 	*DeviceService
 	*IntegrationService
 	*AdminService
+	*JobService
 }
 
 func New(store *persistence.Store) *App {
-	return newApp(store, nil)
+	return newApp(store, nil, nil)
 }
 
-func NewWithSecret(store *persistence.Store, secret string) *App {
-	return newApp(store, deriveSecretKey(secret))
+// NewWithSecret builds the aggregate with the provider encryption key. The
+// variadic materializers let the fx composition root inject the
+// "job_materializers" value group (wiring.md §5); callers that pass none (harden,
+// tests) get the builtins, preserving the historical two-argument behaviour.
+func NewWithSecret(store *persistence.Store, secret string, materializers ...JobMaterializer) *App {
+	return newApp(store, deriveSecretKey(secret), materializers)
 }
 
 // newApp assembles the aggregate with the given (possibly nil) provider key. It
 // preserves the historical New vs NewWithSecret behaviour exactly: New passes a
 // nil key (encryption fails closed), NewWithSecret always derives one.
-func newApp(store *persistence.Store, secretKey []byte) *App {
+func newApp(store *persistence.Store, secretKey []byte, materializers []JobMaterializer) *App {
 	return &App{
 		Store:              store,
 		ProviderService:    NewProviderService(store, secretKey),
@@ -63,6 +68,7 @@ func newApp(store *persistence.Store, secretKey []byte) *App {
 		DeviceService:      NewDeviceService(store),
 		IntegrationService: NewIntegrationService(store),
 		AdminService:       NewAdminService(store),
+		JobService:         NewJobService(store, materializers),
 	}
 }
 
@@ -773,111 +779,6 @@ func (a *App) TransitionSession(ctx context.Context, userID, id string, expected
 	return &session, nil
 }
 
-func (a *App) CreateJob(ctx context.Context, userID, jobType, subjectType, subjectID string, baseRevision int, input any) (*persistence.AgentJob, error) {
-	encoded, err := json.Marshal(input)
-	if err != nil {
-		return nil, err
-	}
-	now := persistence.Now()
-	job := persistence.AgentJob{ID: persistence.NewID("job"), UserID: userID, Type: jobType, Status: "queued", SubjectType: subjectType, SubjectID: subjectID, BaseRevision: baseRevision, InputJSON: string(encoded), MaxAttempts: 3, RunAfter: now, Revision: 1, CreatedAt: now, UpdatedAt: now}
-	if err := a.Store.DB.WithContext(ctx).Create(&job).Error; err != nil {
-		return nil, err
-	}
-	return &job, nil
-}
-
-func (a *App) RetryJob(ctx context.Context, userID, id string, expected int) (*persistence.AgentJob, error) {
-	var old persistence.AgentJob
-	if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).First(&old).Error; err != nil {
-		return nil, notFound(err)
-	}
-	if old.Revision != expected {
-		return nil, ErrRevision
-	}
-	if old.Status != "failed" {
-		return nil, ErrConflict
-	}
-	now := persistence.Now()
-	job := old
-	retryOf := old.ID
-	job.ID, job.Status, job.RetryOfJobID, job.AttemptCount, job.LeaseVersion, job.Revision = persistence.NewID("job"), "queued", &retryOf, 0, 0, 1
-	job.ErrorCode, job.ErrorMessage, job.OutputJSON, job.LockedBy, job.RunTokenHash = "", "", "", "", ""
-	job.LockedUntil, job.StartedAt, job.FinishedAt = nil, nil, nil
-	job.RunAfter, job.CreatedAt, job.UpdatedAt = now, now, now
-	if err := a.Store.DB.WithContext(ctx).Create(&job).Error; err != nil {
-		return nil, err
-	}
-	return &job, nil
-}
-
-func (a *App) CancelJob(ctx context.Context, userID, id string, expected int) (*persistence.AgentJob, error) {
-	var job persistence.AgentJob
-	if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).First(&job).Error; err != nil {
-		return nil, notFound(err)
-	}
-	if job.Revision != expected {
-		return nil, ErrRevision
-	}
-	if job.Status != "queued" && job.Status != "running" {
-		return nil, ErrConflict
-	}
-	status := job.Status
-	updates := map[string]any{"cancel_requested": true, "revision": expected + 1, "updated_at": persistence.Now()}
-	if job.Status == "queued" {
-		status = "cancelled"
-		updates["status"] = status
-		updates["finished_at"] = persistence.Now()
-	}
-	if err := a.Store.DB.WithContext(ctx).Model(&job).Updates(updates).Error; err != nil {
-		return nil, err
-	}
-	if err := a.Store.DB.WithContext(ctx).First(&job, "id = ?", id).Error; err != nil {
-		return nil, err
-	}
-	return &job, nil
-}
-
-func (a *App) AgentCallback(ctx context.Context, userID, id string, attempt, lease int, runToken, status string, output any, errorCode, errorMessage string) (*persistence.AgentJob, error) {
-	var job persistence.AgentJob
-	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&job).Error; err != nil {
-			return notFound(err)
-		}
-		if job.Status != "running" || job.AttemptCount != attempt || job.LeaseVersion != lease || job.RunTokenHash != persistence.Hash(runToken) {
-			return ErrStaleAgentAttempt
-		}
-		if job.CancelRequested {
-			status = "cancelled"
-		}
-		if status != "succeeded" && status != "failed" && status != "cancelled" {
-			return ErrValidation
-		}
-		encoded, _ := json.Marshal(output)
-		now := persistence.Now()
-		if status == "succeeded" {
-			if err := a.MaterializeJobResult(tx, job, output, now); err != nil {
-				return err
-			}
-		}
-		updates := map[string]any{"status": status, "output_json": string(encoded), "error_code": errorCode, "error_message": errorMessage, "finished_at": now, "locked_by": "", "locked_until": nil, "run_token_hash": "", "revision": job.Revision + 1, "updated_at": now}
-		result := tx.Model(&persistence.AgentJob{}).Where("id = ? AND user_id = ? AND status = 'running' AND attempt_count = ? AND lease_version = ? AND run_token_hash = ?", id, userID, attempt, lease, persistence.Hash(runToken)).Updates(updates)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return ErrStaleAgentAttempt
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).First(&job).Error; err != nil {
-		return nil, err
-	}
-	return &job, nil
-}
-
 func (a *App) RejectProposal(ctx context.Context, userID, goalID, proposalID string, expected int) (*persistence.Proposal, error) {
 	var proposal persistence.Proposal
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
@@ -903,53 +804,6 @@ func (a *App) RejectProposal(ctx context.Context, userID, goalID, proposalID str
 		return nil, err
 	}
 	return &proposal, nil
-}
-
-func (a *App) MaterializeJobResult(tx *gorm.DB, job persistence.AgentJob, output any, now time.Time) error {
-	encoded, _ := json.Marshal(output)
-	switch job.Type {
-	case "task_tree_generation", "task_tree_revision":
-		var result map[string]json.RawMessage
-		if err := json.Unmarshal(encoded, &result); err != nil || len(result["proposal"]) == 0 {
-			return ErrValidation
-		}
-		proposal := persistence.Proposal{ID: persistence.NewID("proposal"), UserID: job.UserID, GoalID: job.SubjectID, JobID: job.ID, BaseRevision: job.BaseRevision, Status: "pending", Instruction: "agent proposal", PatchJSON: string(result["proposal"]), Revision: 1, CreatedAt: now, UpdatedAt: now}
-		return tx.Create(&proposal).Error
-	case "conversation":
-		var input map[string]any
-		_ = json.Unmarshal([]byte(job.InputJSON), &input)
-		var result map[string]any
-		_ = json.Unmarshal(encoded, &result)
-		conversationID, reply := textValue(input["conversation_id"]), textValue(result["reply"])
-		if conversationID == "" || reply == "" {
-			return ErrValidation
-		}
-		return tx.Create(&persistence.ConversationMessage{ID: persistence.NewID("msg"), UserID: job.UserID, ConversationID: conversationID, Role: "assistant", Content: reply, JobID: job.ID, CreatedAt: now}).Error
-	case "support_generation":
-		var plan persistence.DailyPlan
-		if err := tx.Where("id = ? AND user_id = ?", job.SubjectID, job.UserID).First(&plan).Error; err != nil {
-			return notFound(err)
-		}
-		var unsatisfied int64
-		if err := tx.Model(&persistence.DailyPlanItem{}).Where("plan_id = ? AND kind = 'core' AND status NOT IN ('satisfied','superseded')", plan.ID).Count(&unsatisfied).Error; err != nil {
-			return err
-		}
-		if unsatisfied > 0 {
-			return ErrConflict
-		}
-		item := persistence.DailyPlanItem{ID: persistence.NewID("dpi"), UserID: job.UserID, PlanID: plan.ID, PlanRevision: plan.CurrentRevision, Kind: "input", Title: "阅读与当前阻碍直接相关的资料", Commitment: "限定范围阅读并记录三条与当前阻碍直接相关的信息", MinimumAction: "打开一份相关资料并定位摘要", AllowedTypes: "result,step,time,minimum_action", TargetMinutes: 25, Status: "planned", Position: 1, Revision: 1, CreatedAt: now, UpdatedAt: now}
-		if err := tx.Create(&item).Error; err != nil {
-			return err
-		}
-		result := tx.Model(&persistence.DailyPlan{}).Where("id = ? AND revision = ?", plan.ID, plan.Revision).Updates(map[string]any{"revision": plan.Revision + 1, "updated_at": now})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return ErrRevision
-		}
-	}
-	return nil
 }
 
 func (a *DeviceService) RegisterDevice(ctx context.Context, userID string, device *persistence.Device) (string, error) {

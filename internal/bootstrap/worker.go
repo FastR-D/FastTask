@@ -14,15 +14,38 @@ import (
 var WorkerModule = fx.Module("worker",
 	fx.Provide(NewWorker),
 	fx.Invoke(registerWorkerLifecycle),
+	// job_handlers value group (wiring.md §5): each domain registers the handler
+	// for its job types, replacing the Worker's central job-type switch. Adding a
+	// job type no longer edits the Worker — a domain provides a handler here.
+	fx.Provide(
+		fx.Annotate(application.NewAgentRunHandler, fx.ResultTags(`group:"job_handlers"`)),
+		fx.Annotate(application.NewTaskTreeHandler, fx.ResultTags(`group:"job_handlers"`)),
+		fx.Annotate(application.NewDailyPlanHandler, fx.ResultTags(`group:"job_handlers"`)),
+		fx.Annotate(application.NewConversationHandler, fx.ResultTags(`group:"job_handlers"`)),
+		fx.Annotate(application.NewVoiceTranscriptionHandler, fx.ResultTags(`group:"job_handlers"`)),
+		fx.Annotate(application.NewSupportGenerationHandler, fx.ResultTags(`group:"job_handlers"`)),
+	),
 )
 
-// NewWorker builds the worker with the per-job provider resolver and the agent
-// runtime. The resolver prefers the admin-configured default provider and falls
-// back to environment configuration, matching the historical inline behaviour.
-func NewWorker(app *application.App, cfg config.Config, agent *application.AgentService) *application.Worker {
-	worker := application.NewWorker(app, cfg.WorkerInterval)
-	worker.WithProviderResolver(ProviderResolver(app, cfg))
-	worker.WithAgentRunner(agent)
+// workerParams collects the Worker's dependencies, including the job_handlers
+// value group (wiring.md §5).
+type workerParams struct {
+	fx.In
+	App      *application.App
+	Config   config.Config
+	Agent    *application.AgentService
+	Handlers []application.JobHandler `group:"job_handlers"`
+}
+
+// NewWorker builds the worker with the per-job provider resolver, the agent
+// runtime, and the collected job handlers. The resolver prefers the
+// admin-configured default provider and falls back to environment configuration,
+// matching the historical inline behaviour.
+func NewWorker(p workerParams) *application.Worker {
+	worker := application.NewWorker(p.App, p.Config.WorkerInterval)
+	worker.WithProviderResolver(ProviderResolver(p.App, p.Config))
+	worker.WithAgentRunner(p.Agent)
+	worker.WithJobHandlers(p.Handlers)
 	return worker
 }
 

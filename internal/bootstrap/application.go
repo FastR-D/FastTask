@@ -17,11 +17,31 @@ import (
 var ApplicationModule = fx.Module("application",
 	fx.Provide(NewApp),
 	fx.Provide(NewAgentService),
+	// job_materializers value group (wiring.md §5, §4.1): each domain registers the
+	// materializer that folds its job types' output into business tables. NewApp
+	// collects the group and hands it to JobService, replacing the old central
+	// switch in MaterializeJobResult. Provided in Core so every role that builds an
+	// App (serve, worker, scheduler) can satisfy the group.
+	fx.Provide(
+		fx.Annotate(application.NewTaskTreeMaterializer, fx.ResultTags(`group:"job_materializers"`)),
+		fx.Annotate(application.NewConversationMaterializer, fx.ResultTags(`group:"job_materializers"`)),
+		fx.Annotate(application.NewSupportMaterializer, fx.ResultTags(`group:"job_materializers"`)),
+	),
 )
 
-// NewApp builds the application aggregate with the provider encryption key.
-func NewApp(store *persistence.Store, cfg config.Config) *application.App {
-	return application.NewWithSecret(store, cfg.ProviderEncryptionKey)
+// appParams collects the App's dependencies, including the job_materializers
+// value group (wiring.md §5).
+type appParams struct {
+	fx.In
+	Store         *persistence.Store
+	Config        config.Config
+	Materializers []application.JobMaterializer `group:"job_materializers"`
+}
+
+// NewApp builds the application aggregate with the provider encryption key and
+// the collected job materializers.
+func NewApp(p appParams) *application.App {
+	return application.NewWithSecret(p.Store, p.Config.ProviderEncryptionKey, p.Materializers...)
 }
 
 // NewAgentService builds the agent runtime over the App. It is shared by the
