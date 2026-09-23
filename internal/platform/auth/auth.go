@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	fastcas "github.com/FastR-D/FastCAS/sdk/go"
 	"strings"
 	"sync"
 	"time"
@@ -28,10 +29,11 @@ type Principal struct {
 }
 
 type Service struct {
-	store    *persistence.Store
-	config   config.Config
-	mu       sync.Mutex
-	failures map[string]loginFailure
+	store     *persistence.Store
+	config    config.Config
+	mu        sync.Mutex
+	failures  map[string]loginFailure
+	casClient *fastcas.Client
 }
 
 type loginFailure struct {
@@ -176,6 +178,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (persistence
 			ID: persistence.NewID("session"), FamilyID: session.FamilyID, UserID: session.UserID,
 			RefreshHash: persistence.Hash(newRefresh), Status: "active", ExpiresAt: now.Add(s.config.RefreshTTL),
 			CreatedAt: now, UpdatedAt: now,
+			AuthSource: session.AuthSource, CasIssuer: session.CasIssuer, CasSID: session.CasSID, CasLinkID: session.CasLinkID, CasLinkVersion: session.CasLinkVersion,
 		}
 		if err := tx.Create(&newSession).Error; err != nil {
 			return err

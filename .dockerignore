@@ -23,6 +23,7 @@ doc/
 web/node_modules/
 web/dist/
 web/dist.new/
+web/coverage/
 sidecar/node_modules/
 sidecar/dist/
 

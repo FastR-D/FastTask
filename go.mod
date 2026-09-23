@@ -1,6 +1,8 @@
 module github.com/FastR-D/FastTask
 
-go 1.24.1
+go 1.26.0
+
+toolchain go1.26.8
 
 require (
 	github.com/danielgtaylor/huma/v2 v2.36.0
@@ -18,12 +20,15 @@ require (
 )
 
 require (
+	github.com/FastR-D/FastCAS/sdk/go v0.1.0
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.15.0 // indirect
 	github.com/bytedance/sonic/loader v0.5.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
+	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
 	github.com/gin-contrib/sse v1.1.0 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.30.1 // indirect
@@ -52,7 +57,10 @@ require (
 	go.uber.org/zap v1.26.0 // indirect
 	golang.org/x/arch v0.24.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
+	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+replace github.com/FastR-D/FastCAS/sdk/go => ../FastCAS/sdk/go

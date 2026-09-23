@@ -130,6 +130,7 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	// not a huma route, so both stay direct Server calls rather than registrars.
 	server.registerAgent()
 	server.registerAgentHarness()
+	server.registerFastCAS()
 	server.static()
 	return server
 }

@@ -63,6 +63,9 @@ type Config struct {
 	// SidecarSecret is the shared capability secret. Empty means "generate one for this process lifetime",
 	// which only works when this process also starts the sidecar and can hand it over.
 	SidecarSecret string
+
+	FastCASIssuer, FastCASClientID, FastCASClientSecret, FastCASRedirectURI string
+	FastCASLoopbackHTTP                                                     bool
 }
 
 func Load() (Config, error) {
@@ -111,6 +114,20 @@ func Load() (Config, error) {
 		SidecarStartTimeout: envDuration("FASTTASK_SIDECAR_START_TIMEOUT", 15*time.Second),
 		SidecarSpawn:        envBool("FASTTASK_SIDECAR_SPAWN", true),
 		SidecarSecret:       env("FASTTASK_SIDECAR_SECRET", ""),
+		FastCASIssuer:       env("FASTTASK_FASTCAS_ISSUER", ""),
+		FastCASClientID:     env("FASTTASK_FASTCAS_CLIENT_ID", ""),
+		FastCASClientSecret: env("FASTTASK_FASTCAS_CLIENT_SECRET", ""),
+		FastCASRedirectURI:  env("FASTTASK_FASTCAS_REDIRECT_URI", ""),
+		FastCASLoopbackHTTP: envBool("FASTTASK_FASTCAS_LOOPBACK_HTTP", false),
+	}
+	fastcasFields := 0
+	for _, value := range []string{c.FastCASIssuer, c.FastCASClientID, c.FastCASClientSecret, c.FastCASRedirectURI} {
+		if value != "" {
+			fastcasFields++
+		}
+	}
+	if fastcasFields != 0 && fastcasFields != 4 {
+		return Config{}, errors.New("configure all four FASTTASK_FASTCAS connection variables or leave all unset")
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return Config{}, errors.New("FASTTASK_PORT must be between 1 and 65535")
