@@ -266,7 +266,18 @@
   .agent-proposal-buttons mdui-button { flex: 1 1 auto; }
 }
 
-/* The harness status line (doc/harness.md §3.2): a degradation is stated, never implied. */
+/* The harness bar (doc/harness.md §3.2, §15): the status line and the host switch sit together because
+   they answer one question — where the agent is running, and whether the user wants it somewhere else. */
+.agent-harness-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--mdui-spacing-small, 4px);
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--mdui-color-outline-variant);
+}
+
+/* The status line itself: a degradation is stated, never implied. */
 .agent-harness {
   display: flex;
   flex-wrap: wrap;
@@ -275,7 +286,14 @@
   padding: var(--mdui-spacing-small, 4px) var(--mdui-spacing-medium, 8px);
   font-size: var(--mdui-typescale-label-medium-size, 12px);
   color: var(--mdui-color-on-surface-variant);
-  border-bottom: 1px solid var(--mdui-color-outline-variant);
+}
+
+/* The switch is a setting, so it is compact: it must not outshout the conversation it belongs to. */
+.agent-harness-choice {
+  flex: 0 1 auto;
+  min-width: 8rem;
+  max-width: 12rem;
+  margin-inline-end: var(--mdui-spacing-medium, 8px);
 }
 
 .agent-harness.degraded {

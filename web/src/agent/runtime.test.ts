@@ -37,6 +37,28 @@ describe('agent command identity', () => {
     expect(body.harness_mode).toBeUndefined()
   })
 
+  it('asks the probe when the user has expressed no preference', async () => {
+    const harness = await import('../harness')
+    localStorage.removeItem('fasttask.harness.mode')
+    await prepareAgentCommand({ threadId: null, state: { messages: [], isRunning: false, fasttask: {} } })
+    expect(vi.mocked(harness.selectMode)).toHaveBeenLastCalledWith(null)
+  })
+
+  it('hands a stored preference to the probe instead of asking it (§3.2, §15)', async () => {
+    const harness = await import('../harness')
+    vi.mocked(harness.selectMode).mockResolvedValueOnce({ mode: 'sidecar', reason: 'FORCED' })
+    localStorage.setItem('fasttask.harness.mode', 'sidecar')
+    try {
+      const body = await prepareAgentCommand({ threadId: null, state: { messages: [], isRunning: false, fasttask: {} } })
+      // A forced mode is adopted without probing, which is the whole point of the switch: someone who
+      // knows their browser beats a probe that can only guess.
+      expect(vi.mocked(harness.selectMode)).toHaveBeenLastCalledWith('sidecar')
+      expect(body.harness_mode).toBe('sidecar')
+    } finally {
+      localStorage.removeItem('fasttask.harness.mode')
+    }
+  })
+
   it('reads the user text out of the commands the runtime assembled', () => {
     expect(extractUserText([
       { type: 'add-message', message: { role: 'user', parts: [{ type: 'text', text: '帮我' }, { type: 'text', text: '推进论文' }] } },

@@ -1,6 +1,7 @@
 import { useAssistantTransportRuntime, type AssistantRuntime, type AttachmentAdapter } from '@assistant-ui/react'
 import { ensureFreshAccessToken } from '../api'
 import { cancelActiveRun, driveRun, selectMode } from '../harness'
+import { forcedModeOf, readModePreference } from './modePreference'
 import { convertState } from './converter'
 import type { ServerAgentState } from './state'
 
@@ -47,7 +48,8 @@ export async function prepareAgentCommand(body: { state?: unknown; commands?: un
   const state = body.state as ServerAgentState | undefined
   const text = extractUserText(body.commands)
   if (text) lastUserText = text
-  const selection = await selectMode(null)
+  // A user who picked a host in settings beats the probe (§3.2); 'auto' means probe.
+  const selection = await selectMode(forcedModeOf(readModePreference()))
   const mode = selection.mode === 'unavailable' ? undefined : selection.mode
   return {
     ...body,
@@ -101,7 +103,7 @@ export function useAgentRuntime(
     onResponse: response => {
       const runId = harnessRunOf(response)
       if (!runId) return
-      void driveRun({ runId, text: lastUserText }).catch(error => {
+      void driveRun({ runId, text: lastUserText, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
         onNotice(`对话驱动失败：${error instanceof Error ? error.message : '请稍后重试'}`)
       })
     },

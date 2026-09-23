@@ -8,7 +8,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { request } from '../api'
 import { createImageAttachmentAdapter } from './attachments'
-import { HarnessStatusLine, useOnline } from './HarnessStatus'
+import { HarnessModeControl, HarnessStatusLine, useOnline } from './HarnessStatus'
 import { MarkdownText, UserMarkdownText } from './Markdown'
 import { ReasoningPart } from './Reasoning'
 import { useAgentRuntime } from './runtime'
@@ -182,7 +182,10 @@ function Conversation({
       <TaskTreeProposalUI />
       <DailyPlanProposalUI />
       <ThreadPrimitive.Root className="agent-chat">
-        <HarnessStatusLine />
+        <div className="agent-harness-bar">
+          <HarnessStatusLine />
+          <HarnessModeControl />
+        </div>
         <ThreadPrimitive.Viewport className="agent-viewport">
           <ThreadPrimitive.Empty>
             <div className="agent-empty">

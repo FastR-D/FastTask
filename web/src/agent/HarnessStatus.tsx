@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
-import { subscribeHarnessStatus, warmUpHarness, type HarnessStatus } from '../harness'
+import { fieldValue } from '../mdui-react'
+import { resetModeProbe, subscribeHarnessStatus, warmUpHarness, type HarnessStatus } from '../harness'
+import { readModePreference, writeModePreference, type ModePreference } from './modePreference'
 
 /** useOnline tracks connectivity. The PWA can load the host offline, but a model call cannot be made
  *  without a network, so the composer has to say so instead of failing on send (doc/harness.md §9.3). */
@@ -73,5 +75,34 @@ export function HarnessStatusLine() {
       )}
       {status.error && <span className="agent-harness-error">{status.error}</span>}
     </div>
+  )
+}
+
+// The host switch (§3.2's "管理员或用户在设置中强制指定", §15's decision to expose it to ordinary users).
+//
+// It sits on the same line as the status because the two answer one question: where is the agent running,
+// and do I want it somewhere else. Choosing a host clears the session's probe answer, so the switch takes
+// effect on the next run instead of after a reload, and re-warms the probe when it is set back to auto.
+export function HarnessModeControl() {
+  const [preference, setPreference] = useState<ModePreference>(() => readModePreference())
+
+  function choose(value: ModePreference) {
+    writeModePreference(value)
+    setPreference(value)
+    resetModeProbe()
+    void warmUpHarness().catch(() => undefined)
+  }
+
+  return (
+    <mdui-select
+      className="agent-harness-choice"
+      label="运行位置"
+      value={preference}
+      onChange={event => choose(fieldValue(event) as ModePreference)}
+    >
+      <mdui-menu-item value="auto">自动（探测本机能力）</mdui-menu-item>
+      <mdui-menu-item value="wasm">本机运行</mdui-menu-item>
+      <mdui-menu-item value="sidecar">服务端运行</mdui-menu-item>
+    </mdui-select>
   )
 }
