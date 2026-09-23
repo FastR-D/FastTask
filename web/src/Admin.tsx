@@ -10,10 +10,10 @@ export function Admin({ user, onNotice }: { user: User; onNotice: (value: string
   const [section, setSection] = useState<Section>('users')
   return (
     <section className="admin-page">
-      <header className="page-head compact">
-        <div>
-          <p className="eyebrow">ADMIN PLATFORM</p>
-          <h1>统一控制台。<br /><em>可继续扩展。</em></h1>
+      <header className="page-head">
+        <div className="title-block">
+          <p className="eyebrow">管理员 · {user.display_name}</p>
+          <h1>后台</h1>
         </div>
       </header>
       <mdui-tabs className="admin-tabs" value={section} onChange={e => setSection(fieldValue(e) as Section)}>
