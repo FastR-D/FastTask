@@ -1,5 +1,6 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, readOfflineUser, rememberUser, request, token } from './api'
+import { ApiError, completeFastCAS, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, readOfflineUser, rememberUser, request, token } from './api'
+import { FastCASAccount } from './FastCASAccount'
 import type { Device, Goal, Job, Plan, PlanItem, Proposal, Task, TaskTree, User, WorkSession } from './types'
 import { fieldValue, useMduiEvent } from './mdui-react'
 import { Admin } from './Admin'
@@ -8,11 +9,11 @@ import { PwaUpdate } from './PwaUpdate'
 import { AgentChat } from './agent'
 import { localDateInTimezone } from './date'
 
-type Tab = 'today' | 'goals' | 'dialogue' | 'jobs' | 'review' | 'devices' | 'admin'
+type Tab = 'today' | 'goals' | 'dialogue' | 'jobs' | 'review' | 'devices' | 'admin' | 'account'
 
 const NAV_ICONS: Record<Tab, string> = {
   today: 'today', goals: 'account_tree', dialogue: 'forum', jobs: 'pending',
-  review: 'fact_check', devices: 'devices', admin: 'admin_panel_settings',
+  review: 'fact_check', devices: 'devices', admin: 'admin_panel_settings', account: 'verified_user',
 }
 const BAR_TABS: Tab[] = ['today', 'goals', 'dialogue', 'jobs', 'review']
 
@@ -24,37 +25,48 @@ const DEVICE_STATUS: Record<string,string> = { active: '在用', disabled: '已�
 
 export function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(token.get()))
+  const [callbackPending] = useState(() => new URLSearchParams(window.location.search).get('fastcas') === 'callback')
+  const [authError, setAuthError] = useState('')
   // Cold start of an installed PWA has an empty in-memory access token but a
   // persisted refresh token (pwa.md §4). Restore the session silently rather
   // than flashing the login screen; if the refresh token is gone or rejected the
   // user lands on Login as before.
-  const [restoring, setRestoring] = useState(() => !token.get() && hasRefreshToken())
+  const [restoring, setRestoring] = useState(() => callbackPending || (!token.get() && hasRefreshToken()))
   useEffect(() => {
     if (!restoring) return
     let alive = true
-    ensureFreshAccessToken().then(restored => {
+    const restore = callbackPending ? completeFastCAS().then(() => token.get()) : ensureFreshAccessToken()
+    restore.then(restored => {
       if (!alive) return
       setAuthenticated(Boolean(restored) || offlineSessionAvailable())
       setRestoring(false)
-    })
+    }).catch(error => {
+      if (alive) {
+        setAuthError(error instanceof Error ? error.message : 'FastCAS 登录失败')
+        setAuthenticated(Boolean(token.get()))
+        setRestoring(false)
+      }
+    }).finally(() => { if (callbackPending) window.history.replaceState(null, '', window.location.pathname) })
     return () => { alive = false }
-  }, [restoring])
+  }, [restoring, callbackPending])
   const handleLogout = useCallback(async () => { await logout(); setAuthenticated(false) }, [])
   if (restoring) return null
   return (
     <>
       {authenticated
         ? <Workspace onLogout={handleLogout} />
-        : <Login onLogin={() => setAuthenticated(true)} />}
+        : <Login onLogin={() => setAuthenticated(true)} initialError={authError} />}
       <PwaUpdate />
     </>
   )
 }
 
-function Login({ onLogin }: { onLogin: () => void }) {
+function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialError?: string }) {
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
+  const [error, setError] = useState(initialError)
+  const [fastcas, setFastcas] = useState(false)
+  useEffect(() => { void request<{enabled:boolean}>('/auth/fastcas/available').then(r => setFastcas(r.data.enabled)).catch(() => {}) }, [])
   const [busy, setBusy] = useState(false)
   async function submit() {
     if (busy || !identifier.trim() || !password) return
@@ -79,6 +91,7 @@ function Login({ onLogin }: { onLogin: () => void }) {
         <mdui-text-field label="密码" type="password" toggle-password variant="outlined" required autocomplete="current-password" value={password} onChange={e => setPassword(fieldValue(e))}/>
         {error && <p className="login-error" role="alert"><mdui-icon name="error_outline"/>{error}</p>}
         <mdui-button variant="filled" full-width disabled={busy} loading={busy} onClick={submit}>{busy ? '正在验证…' : '开始今天'}</mdui-button>
+        {fastcas && <mdui-button variant="outlined" full-width onClick={() => window.location.assign('/api/v1/auth/fastcas/login')}>使用 FastCAS 登录</mdui-button>}
         <small>生产环境请使用管理员下发账号，登录状态会安全地保留在此设备上，退出登录时一并清除。</small>
       </form>
     </div>
@@ -135,6 +148,7 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
         {tab==='jobs' && <JobQueue onNotice={setNotice}/>}
         {tab==='review' && <Review onNotice={setNotice}/>}
         {tab==='devices' && <Devices onNotice={setNotice} timezone={user?.timezone}/>}
+        {tab==='account' && <FastCASAccount/>}
         {tab==='admin' && user?.role==='admin' && <Admin user={user} onNotice={setNotice}/>}
       </div>
     </mdui-layout-main>
@@ -146,7 +160,7 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
 }
 
 function navItems(user: User | null): [Tab,string][] {
-  const items: [Tab,string][] = [['today','今日'],['goals','目标树'],['dialogue','对话'],['jobs','任务队列'],['review','复盘'],['devices','设备']]
+  const items: [Tab,string][] = [['today','今日'],['goals','目标树'],['dialogue','对话'],['jobs','任务队列'],['review','复盘'],['devices','设备'],['account','账号认证']]
   if (user?.role === 'admin') items.push(['admin','后台'])
   return items
 }

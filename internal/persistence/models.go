@@ -19,7 +19,39 @@ type User struct {
 type Session struct {
 	ID, FamilyID, UserID, RefreshHash, ReplacedByHash, Status string
 	ExpiresAt, CreatedAt, UpdatedAt                           time.Time
+	AuthSource, CasIssuer, CasLinkID                          string
+	CasSID                                                    string `gorm:"column:cas_sid"`
+	CasLinkVersion                                            int64
 }
+
+type FastCASTransaction struct {
+	State     string `gorm:"primaryKey"`
+	Payload   string
+	ExpiresAt time.Time
+}
+
+func (FastCASTransaction) TableName() string { return "fastcas_transactions" }
+
+type FastCASLink struct {
+	ID         string    `json:"id" gorm:"primaryKey"`
+	Issuer     string    `json:"issuer"`
+	ClientID   string    `json:"client_id"`
+	UserID     string    `json:"local_account_ref"`
+	Subject    string    `json:"subject"`
+	State      string    `json:"state"`
+	Version    int64     `json:"version"`
+	VerifiedAt time.Time `json:"verified_at"`
+}
+
+func (FastCASLink) TableName() string { return "fastcas_links" }
+
+type FastCASEvent struct {
+	Issuer      string `gorm:"primaryKey"`
+	ID          string `gorm:"primaryKey"`
+	ProcessedAt time.Time
+}
+
+func (FastCASEvent) TableName() string { return "fastcas_events" }
 
 type AdminAuditEvent struct {
 	ID           string    `json:"id"`

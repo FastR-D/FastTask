@@ -208,3 +208,16 @@ export async function logout() {
   try { await request('/auth/logout', { method:'POST' }) } catch { /* Local logout must still complete. */ }
   await clearSession()
 }
+
+let fastcasCompletion: Promise<{linked: boolean}> | null = null
+export function completeFastCAS(): Promise<{linked: boolean}> {
+  if (!fastcasCompletion) fastcasCompletion = (async () => {
+    if (hasRefreshToken()) await ensureFreshAccessToken()
+    // Do not retry an OAuth callback or clear a working local session because
+    // the optional upstream provider rejected its own login transaction.
+    const {data} = await execute<{linked:boolean;access_token:string;refresh_token:string}>('/auth/fastcas/complete', {method:'POST'}, false)
+    if (!data.linked) { storeAccess(data.access_token); writeRefresh(data.refresh_token) }
+    return data
+  })()
+  return fastcasCompletion
+}

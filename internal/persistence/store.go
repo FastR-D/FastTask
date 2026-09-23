@@ -26,7 +26,7 @@ var embeddedMigrations embed.FS
 
 type Store struct{ DB *gorm.DB }
 
-const ExpectedSchemaVersion = 8
+const ExpectedSchemaVersion = 9
 
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -70,6 +70,31 @@ func RunMigrations(ctx context.Context, db *gorm.DB) error {
 			return err
 		}
 	}
+	// Early FastCAS builds used version 6 before the upstream agent-thread
+	// migration claimed it. Reopen that slot only for the known legacy row;
+	// migration 9 below adopts the existing FastCAS tables after 6-8 run.
+	if currentVersion >= 6 {
+		var versionSixName string
+		if err := db.WithContext(ctx).Raw("SELECT name FROM schema_migrations WHERE version=6").Scan(&versionSixName).Error; err != nil {
+			return err
+		}
+		if versionSixName == "fastcas" {
+			if currentVersion != 6 {
+				return fmt.Errorf("legacy FastCAS migration 6 conflicts with schema version %d", currentVersion)
+			}
+			valid, err := existingFastCASSchema(ctx, db)
+			if err != nil {
+				return err
+			}
+			if !valid {
+				return errors.New("legacy FastCAS migration 6 lacks expected tables or session columns")
+			}
+			if err := db.WithContext(ctx).Exec("DELETE FROM schema_migrations WHERE version=6 AND name='fastcas'").Error; err != nil {
+				return err
+			}
+			currentVersion = 5
+		}
+	}
 	entries, err := embeddedMigrations.ReadDir("migrations")
 	if err != nil {
 		return err
@@ -96,6 +121,19 @@ func RunMigrations(ctx context.Context, db *gorm.DB) error {
 		if version != currentVersion+1 {
 			return fmt.Errorf("migration gap: database is at %d, next migration is %d", currentVersion, version)
 		}
+		if version == 9 {
+			valid, err := existingFastCASSchema(ctx, db)
+			if err != nil {
+				return err
+			}
+			if valid {
+				if err := db.WithContext(ctx).Exec("INSERT INTO schema_migrations(version,name,applied_at) VALUES(9,'fastcas',CURRENT_TIMESTAMP)").Error; err != nil {
+					return err
+				}
+				currentVersion = version
+				continue
+			}
+		}
 		contents, err := embeddedMigrations.ReadFile("migrations/" + name)
 		if err != nil {
 			return err
@@ -112,6 +150,40 @@ func RunMigrations(ctx context.Context, db *gorm.DB) error {
 		currentVersion = version
 	}
 	return nil
+}
+
+func existingFastCASSchema(ctx context.Context, db *gorm.DB) (bool, error) {
+	var tables int
+	if err := db.WithContext(ctx).Raw("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('fastcas_transactions','fastcas_links','fastcas_events')").Scan(&tables).Error; err != nil {
+		return false, err
+	}
+	if tables != 3 {
+		return false, nil
+	}
+	rows, err := db.WithContext(ctx).Raw("PRAGMA table_info(sessions)").Rows()
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var id, notNull, primaryKey int
+		var name, kind string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&id, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, name := range []string{"auth_source", "cas_issuer", "cas_sid", "cas_link_id", "cas_link_version"} {
+		if !columns[name] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // noTransactionMarker opts a migration out of the wrapping transaction. A

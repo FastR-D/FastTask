@@ -9,16 +9,18 @@
 # WASM host (doc/harness.md §16, ADR-0005). libfx's native addons are not built for musl, so "just add
 # node" is not the answer; a sidecar deployment uses the systemd units in deployments/systemd/ instead.
 
-FROM node:20-alpine AS web
-WORKDIR /src
+FROM node:22.22.2-alpine AS web
+WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
-COPY web ./
+COPY web/ ./
+COPY sidecar/ /src/sidecar/
 RUN npm run build
 
-FROM golang:1.24-alpine AS go
+FROM golang:1.26.8-alpine AS go
 RUN apk add --no-cache build-base sqlite-dev
 WORKDIR /src
+COPY --from=fastcas-sdk / /FastCAS/sdk/go/
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
@@ -26,7 +28,7 @@ COPY --from=web /src/web/dist ./web/dist
 ENV CGO_ENABLED=1
 RUN go build -trimpath -ldflags="-s -w" -o /out/fasttask ./cmd/fasttask
 
-FROM alpine:3.19
+FROM alpine:3.22
 # tzdata is not optional: the server loads Asia/Shanghai for daily planning and `doctor` fails without it
 # (internal/bootstrap/commands.go), and alpine ships no zoneinfo by default. su-exec is what lets the
 # entrypoint start as root to repair a bind mount's ownership and then drop to `fasttask`.
@@ -56,5 +58,5 @@ USER fasttask
 # restarting the container would not fix either. The start period covers the first migration run.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD wget -qO- "http://127.0.0.1:${FASTTASK_PORT}/health/ready" >/dev/null || exit 1
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "/usr/local/bin/fasttask"]
 CMD ["serve", "--with-worker", "--with-scheduler"]
