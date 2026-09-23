@@ -27,6 +27,12 @@ function walk(directory: string): string[] {
 }
 
 describe('browser artifacts', () => {
+  it('reads mutable snapshots from the network before falling back to offline cache', () => {
+    const worker = readFileSync(join(src, 'sw.ts'), 'utf8')
+    expect(worker).toContain("new NetworkFirst({\n    cacheName: 'ft-api-snapshots'")
+    expect(worker).not.toContain('new StaleWhileRevalidate({')
+  })
+
   it('never imports the libfx entry that drags in fx-term.wasm (§9.1)', () => {
     // The package root resolves default asset URLs for BOTH wasm files at module scope, so importing it
     // makes the bundler emit the terminal. harness/runtime.ts imports libfx/wasm instead.

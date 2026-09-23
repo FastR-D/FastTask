@@ -54,7 +54,7 @@
 |---|---|
 | `/assets/*`（带哈希） | CacheFirst，长期缓存。服务端已设 `immutable`（`server.go:63`） |
 | `index.html` | NetworkFirst。服务端已设 `no-store`（`server.go:65`），符合要求 |
-| `GET /api/v1/daily-plans/current`、`/goals`、`/goals/{id}/task-tree` | StaleWhileRevalidate，**且必须按用户隔离缓存键** |
+| `GET /api/v1/daily-plans/current`、`/goals`、`/goals/{id}/task-tree` | NetworkFirst（3 秒后回退最近快照），**且必须按用户隔离缓存键**。StaleWhileRevalidate 曾导致新进入目标树时显示旧列表且不再更新 React 状态 |
 | 其余 `/api/**` | NetworkOnly |
 | `/api/v1/agent/**` | **NetworkOnly，且必须显式排除**。SSE 流绝不能进 Workbox 缓存 |
 | `fx-core.wasm`（[ADR-0005](adr/0005-libfx-agent-harness.md)） | 预缓存。2.01 MB / brotli 0.53 MB |

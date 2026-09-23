@@ -6,8 +6,8 @@
 // must be NetworkOnly — a stream must never enter a Workbox cache (§3.2).
 export const AGENT_RE = /^\/api\/v1\/agent\//
 
-// SNAPSHOT_RE matches the per-user read snapshots that may be served stale while
-// revalidating: today's plan, the goal list, and a goal's task tree (§3.2, §5).
+// SNAPSHOT_RE matches the per-user read snapshots with network-first reads and
+// offline cache fallback: today's plan, the goal list, and a goal's task tree (§3.2, §5).
 export const SNAPSHOT_RE = /^\/api\/v1\/(daily-plans\/current|goals(?:\/[^/]+\/task-tree)?)$/
 
 // subjectFromAuth reads the JWT `sub` claim (the user id) from an Authorization
