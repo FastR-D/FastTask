@@ -1,38 +1,38 @@
-.admin-tabs{margin-bottom:1.5rem}
-.admin-layout{display:grid;grid-template-columns:21rem minmax(0,1fr);gap:1.5rem;align-items:start}
+.admin-tabs{margin-bottom:var(--ft-space-5)}
+.admin-layout{display:grid;grid-template-columns:20rem minmax(0,1fr);gap:var(--ft-space-5);align-items:start}
 .admin-form{
-  padding:1.4rem;display:grid;gap:1rem;align-content:start;
-  border-radius:var(--mdui-shape-corner-large);
+  padding:var(--ft-space-4);display:grid;gap:var(--ft-space-4);align-content:start;
+  border-radius:var(--mdui-shape-corner-medium);
   background:rgb(var(--mdui-color-surface-container-low));
 }
-.admin-form h2{font-size:var(--mdui-typescale-title-large-size);font-weight:600}
-.admin-form small{color:rgb(var(--mdui-color-on-surface-variant));line-height:1.55}
-.admin-content{min-width:0;display:grid;gap:1.25rem}
-.admin-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.75rem;align-items:center}
-.admin-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(19rem,1fr));gap:1rem}
-.admin-card{padding:1.25rem;display:grid;gap:.7rem;align-content:start}
-.admin-card.selected{outline:2px solid rgb(var(--mdui-color-primary));outline-offset:-1px}
+.admin-form h2{font-size:var(--mdui-typescale-title-medium-size);font-weight:500}
+.admin-form small{color:rgb(var(--mdui-color-on-surface-variant));line-height:1.55;font-size:var(--mdui-typescale-body-small-size)}
+.admin-content{min-width:0;display:grid;gap:var(--ft-space-5)}
+.admin-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--ft-space-3);align-items:center}
+.admin-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(19rem,1fr));gap:var(--ft-space-4);align-items:start}
+.admin-card{padding:var(--ft-space-4);display:grid;gap:var(--ft-space-3);align-content:start;border-radius:var(--mdui-shape-corner-medium)}
+.admin-card.selected{box-shadow:inset 2px 0 0 rgb(var(--mdui-color-primary));background:rgb(var(--mdui-color-surface-container-low))}
 .admin-card.muted{opacity:.55}
-.admin-card header{display:flex;justify-content:space-between;gap:1rem}
-.admin-card h3{font-size:var(--mdui-typescale-title-medium-size);font-weight:600;margin:.15rem 0}
-.admin-card small{color:rgb(var(--mdui-color-on-surface-variant))}
-.admin-card p{margin:.15rem 0;font-size:var(--mdui-typescale-body-medium-size)}
-.admin-actions{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:auto}
+.admin-card header{display:flex;justify-content:space-between;gap:var(--ft-space-4)}
+.admin-card h3{font-size:var(--mdui-typescale-title-small-size);line-height:var(--mdui-typescale-title-small-line-height);font-weight:500;margin:var(--ft-space-1) 0}
+.admin-card small{color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-small-size)}
+.admin-card p{margin:var(--ft-space-1) 0;font-size:var(--mdui-typescale-body-medium-size)}
+.admin-actions{display:flex;flex-wrap:wrap;gap:var(--ft-space-2);margin-top:auto}
 .provider-url{word-break:break-all;color:rgb(var(--mdui-color-on-surface-variant))}
-.edit-stack{display:grid;gap:.75rem}
+.edit-stack{display:grid;gap:var(--ft-space-3)}
+/* 会话信息是元数据，不需要第二块染色面板：一条 hairline 分组即可。 */
 .session-panel{
-  padding:1.25rem;display:grid;gap:.7rem;
-  border-radius:var(--mdui-shape-corner-large);
-  background:rgb(var(--mdui-color-surface-container-low));
+  padding:var(--ft-space-4) 0 0;display:grid;gap:var(--ft-space-3);
+  border-top:1px solid rgb(var(--mdui-color-outline-variant));
 }
-.session-panel h3{font-size:var(--mdui-typescale-title-medium-size);font-weight:600}
-.session-panel div{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;font-size:var(--mdui-typescale-body-medium-size)}
+.session-panel h3{font-size:var(--mdui-typescale-title-small-size);font-weight:500}
+.session-panel div{display:flex;justify-content:space-between;gap:var(--ft-space-4);flex-wrap:wrap;font-size:var(--mdui-typescale-body-medium-size)}
 .session-panel code{font-size:var(--mdui-typescale-label-small-size);word-break:break-all}
 .session-panel span{color:rgb(var(--mdui-color-on-surface-variant));white-space:nowrap}
-.audit-panel{display:grid;gap:.8rem}
-.audit-item{padding:1.1rem 1.25rem;display:grid;gap:.5rem}
-.audit-item header{display:flex;justify-content:space-between;gap:1rem;align-items:center;flex-wrap:wrap}
-.audit-item strong{font-size:var(--mdui-typescale-title-small-size)}
+.audit-panel{display:grid;gap:var(--ft-space-3)}
+.audit-item{padding:var(--ft-space-3) var(--ft-space-4);display:grid;gap:var(--ft-space-2);border-radius:var(--mdui-shape-corner-medium)}
+.audit-item header{display:flex;justify-content:space-between;gap:var(--ft-space-4);align-items:center;flex-wrap:wrap}
+.audit-item strong{font-size:var(--mdui-typescale-title-small-size);font-weight:500}
 .audit-item time,.audit-item code{font-size:var(--mdui-typescale-label-small-size);color:rgb(var(--mdui-color-on-surface-variant))}
 .audit-item p{font-size:var(--mdui-typescale-body-medium-size)}
 .audit-item code{white-space:pre-wrap;word-break:break-all}

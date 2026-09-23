@@ -83,10 +83,10 @@ export function Review({ onNotice }: { onNotice: (value: string) => void }) {
 
   return (
     <section className="review-page">
-      <header className="page-head compact">
-        <div>
-          <p className="eyebrow">WEEKLY REFLECT</p>
-          <h1>把你的判断，<br />和<em>真实投入</em>叠在一起。</h1>
+      <header className="page-head">
+        <div className="title-block">
+          <p className="eyebrow">{review ? `${review.start_date} → ${review.end_date} · ${review.timezone}` : '正在聚合本周记录'}</p>
+          <h1>复盘</h1>
         </div>
         <div className="week-switch">
           <mdui-button variant="outlined" icon="arrow_back" onClick={() => load(shiftWeek(week, -1))} disabled={loading || !week}>上一周</mdui-button>
@@ -99,29 +99,25 @@ export function Review({ onNotice }: { onNotice: (value: string) => void }) {
 
       {!loading && !review && (
         <div className="empty-state">
-          <span>∴</span>
-          <h2 className="ts-headline-small">复盘暂时不可用</h2>
+          <h2>复盘暂时不可用</h2>
           <p>请稍后重试。复盘只读取已有记录，不会修改任何数据。</p>
         </div>
       )}
 
       {!loading && review && (
         <>
-          <p className="meta review-window">{review.start_date} → {review.end_date} · {review.timezone}</p>
-
           {empty ? (
             <div className="empty-state">
-              <span>∅</span>
-              <h2 className="ts-headline-small">本周没有记录到有效专注时间</h2>
+              <h2>本周没有记录到有效专注时间</h2>
               <p>{review.summary.text}完成一次专注或记录一条推进证据后，这里会出现四区分布与停滞提醒。</p>
             </div>
           ) : (
             <>
-              <mdui-card variant="elevated" className="summary-card">
+              <div className="summary-card">
                 <p className="eyebrow">SUMMARY · {review.summary.rule} · {review.summary.source}</p>
                 <h2>{review.summary.text}</h2>
                 {review.llm_note && <p className="llm-note">{review.llm_note}</p>}
-              </mdui-card>
+              </div>
 
               <section className="focus-panel">
                 <h3>四区投入分布</h3>
@@ -242,7 +238,7 @@ export function GoalMapView({ goal, onNotice, onOpenTask }: { goal: Goal; onNoti
   const dueSoon = Boolean(goal.target_date) && (Date.parse(`${goal.target_date}T23:59:59Z`) - Date.now()) / 86400000 <= 14
 
   if (loading) return <div className="loading-block"><mdui-linear-progress /><p className="empty">正在绘制目标地图…</p></div>
-  if (!map) return <div className="empty-state"><h2 className="ts-headline-small">地图不可用</h2><p>无法读取该目标的坐标数据。</p></div>
+  if (!map) return <div className="empty-state"><h2>地图不可用</h2><p>无法读取该目标的坐标数据。</p></div>
 
   return (
     <mdui-card variant="outlined" className="lens-map">
