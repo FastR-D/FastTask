@@ -1,4 +1,4 @@
-import { CSSProperties, FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, readOfflineUser, rememberUser, request, token } from './api'
 import type { Device, Goal, Job, Plan, PlanItem, Proposal, Task, TaskTree, User, WorkSession } from './types'
 import { fieldValue, useMduiEvent } from './mdui-react'
@@ -15,6 +15,12 @@ const NAV_ICONS: Record<Tab, string> = {
   review: 'fact_check', devices: 'devices', admin: 'admin_panel_settings',
 }
 const BAR_TABS: Tab[] = ['today', 'goals', 'dialogue', 'jobs', 'review']
+
+// The API speaks English enums; the interface speaks Chinese. One map each, so a status is
+// never shown raw (`ACTIVE · TREE REV 10`) and never translated in three different places.
+const GOAL_STATUS: Record<string,string> = { active: '进行中', paused: '已暂停', completed: '已完成', archived: '已归档' }
+const TASK_STATUS: Record<string,string> = { ready: '待开始', in_progress: '进行中', blocked: '受阻', paused: '已暂停', completed: '已完成' }
+const DEVICE_STATUS: Record<string,string> = { active: '在用', disabled: '已停用', revoked: '已撤销' }
 
 export function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(token.get()))
@@ -65,11 +71,10 @@ function Login({ onLogin }: { onLogin: () => void }) {
       <h1>把漫长的研究，<br/>压缩成今天能动手的三件事。</h1>
       <p className="story-sub">目标不是另一张待办清单。目标应该每天产生清晰、可验证、足够小的行动。</p>
       <div className="signal-row"><span>01 选择</span><span>02 专注</span><span>03 证据</span></div>
-      <span className="story-glyph" aria-hidden="true">03</span>
     </section>
     <div className="login-panel">
       <form className="login-card" onSubmit={onSubmit} onKeyDown={onKeyDown}>
-        <div><p className="eyebrow">WELCOME BACK</p><h2 className="ts-headline-small">进入工作台</h2></div>
+        <div><p className="eyebrow">WELCOME BACK</p><h2>进入工作台</h2></div>
         <mdui-text-field label="账号" variant="outlined" required autocomplete="username" value={identifier} onChange={e => setIdentifier(fieldValue(e))}/>
         <mdui-text-field label="密码" type="password" toggle-password variant="outlined" required autocomplete="current-password" value={password} onChange={e => setPassword(fieldValue(e))}/>
         {error && <p className="login-error" role="alert"><mdui-icon name="error_outline"/>{error}</p>}
@@ -171,20 +176,21 @@ function Today({ onNotice, timezone }: { onNotice: (s:string)=>void; timezone?: 
   const total = coreItems.length
   return <section className="today-page">
     <header className="page-head">
-      <div><p className="eyebrow">TODAY / {new Date().toLocaleDateString('zh-CN',{timeZone:timezone,month:'long',day:'numeric',weekday:'long'})}</p><h1>今天只推进<br/><em>真正重要</em>的事。</h1></div>
-      <div className="progress-orbit" style={{'--done':`${total ? Math.round((done/total)*100) : 0}%`} as CSSProperties}><strong>{done}<small>/{total}</small></strong><span>核心信号</span></div>
+      <div className="title-block"><p className="eyebrow">{new Date().toLocaleDateString('zh-CN',{timeZone:timezone,month:'long',day:'numeric',weekday:'long'})}</p><h1>今日推进</h1></div>
+      <div className="head-side">
+        {total>0&&<p className="head-stat"><strong>{done}<small>/{total}</small></strong><span>核心信号已满足</span></p>}
+        {plan&&<mdui-button variant="tonal" icon="refresh" onClick={()=>generate(true)}>基于最新进展重规划</mdui-button>}
+      </div>
     </header>
     {session && <div className="focus-strip">
       <div className="focus-info"><span className="pulse"/><b>专注进行中</b><span className="focus-timer">{Math.floor(elapsed/60).toString().padStart(2,'0')}:{(elapsed%60).toString().padStart(2,'0')}</span></div>
       <mdui-button variant="filled" onClick={finish}>结束并记录</mdui-button>
     </div>}
-    {loading ? <div className="loading-block"><mdui-linear-progress/><p className="empty">正在整理今天的信号…</p></div> : !plan ? <div className="empty-state"><span>∴</span><h2 className="ts-headline-small">今天还没有计划</h2><p>系统会从活跃目标中选择最多三个有明确最小行动的任务。</p><mdui-button variant="filled" icon="auto_awesome" onClick={()=>generate(false)}>生成今日计划</mdui-button></div> : <>
-		<div className="plan-toolbar"><mdui-button variant="tonal" icon="refresh" onClick={()=>generate(true)}>基于最新进展重规划</mdui-button></div>
-    <div className="today-grid">{coreItems.map((item,index)=><mdui-card key={item.id} variant="outlined" className={item.status==='satisfied'?'signal-card done':'signal-card'}>
-      <div className="signal-index">0{index+1}</div>
+    {loading ? <div className="loading-block"><mdui-linear-progress/><p className="empty">正在整理今天的信号…</p></div> : !plan ? <div className="empty-state"><h2>今天还没有计划</h2><p>系统会从活跃目标中选择最多三个有明确最小行动的任务。</p><mdui-button variant="filled" icon="auto_awesome" onClick={()=>generate(false)}>生成今日计划</mdui-button></div> : <>
+    <div className="today-grid">{coreItems.map(item=><mdui-card key={item.id} variant="outlined" className={item.status==='satisfied'?'signal-card done':'signal-card'}>
       <div className="signal-content">
         <p className="meta">{item.status==='satisfied'?'已满足':'核心推进'} · {item.target_minutes} 分钟</p>
-        <h2 className="ts-title-large">{item.title}</h2>
+        <h2>{item.title}</h2>
         <p>{item.commitment}</p>
         <div className="minimum"><span>最小行动</span>{item.minimum_action}</div>
         <div className="actions">
@@ -193,7 +199,7 @@ function Today({ onNotice, timezone }: { onNotice: (s:string)=>void; timezone?: 
         </div>
       </div>
     </mdui-card>)}</div>
-      {items.length===0&&<div className="empty-state"><h2 className="ts-headline-small">合法的空计划</h2><p>当前没有符合条件的任务。请先创建目标、补充最小行动或解除阻碍。</p></div>}
+      {items.length===0&&<div className="empty-state"><h2>合法的空计划</h2><p>当前没有符合条件的任务。请先创建目标、补充最小行动或解除阻碍。</p></div>}
     </>}
   </section>
 }
@@ -210,7 +216,7 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
   async function addTask(){if(!selected||!taskDraft.title.trim()||!taskDraft.criteria.trim()||!taskDraft.minimum.trim())return;try{await request('/tasks',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({goal_id:selected.id,type:'task',title:taskDraft.title,description:'',success_criteria:taskDraft.criteria,minimum_action:taskDraft.minimum,estimate_minutes:50,priority:70,position:tasks.length})});setTaskDraft({title:'',criteria:'',minimum:''});onNotice('任务已加入目标树');await load(selected,true)}catch(e){onNotice(errorText(e))}}
 	async function askAgent(revision=false){if(!selected)return;try{const path=revision?'revision-jobs':'generation-jobs';const headers:Record<string,string>={'Idempotency-Key':idem()};if(revision)headers['If-Match']=treeETag;const instruction=revision?revisionInstruction:'生成三层以内的可执行任务树，每个任务必须有最小行动';const {data}=await request<Job>(`/goals/${selected.id}/task-tree/${path}`,{method:'POST',headers,body:JSON.stringify({instruction})});onNotice(`作业 ${data.id} 已进入队列`);const job=await waitJob(data.id);if(job.status!=='succeeded')throw new Error(job.error_message||'Agent 作业失败');await load(selected,true);setRevisionInstruction('')}catch(e){onNotice(errorText(e))}}
 	async function decide(proposal:Proposal,apply:boolean){if(!selected)return;try{if(apply){await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/application`,{method:'POST',headers:{'If-Match':treeETag,'Idempotency-Key':idem()}});onNotice('提案已确认并应用')}else{await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/rejection`,{method:'PUT',headers:{'If-Match':etag('proposal',proposal.id,proposal.revision)}});onNotice('提案已拒绝')}await load(selected,true)}catch(e){onNotice(errorText(e))}}
-  return <section className="goals-page"><header className="page-head compact"><div><p className="eyebrow">GOAL MAP</p><h1>目标不是终点，<br/>它是一张<em>可修正的地图</em>。</h1></div><mdui-button variant="filled" icon={showCreate?'close':'add'} onClick={()=>setShowCreate(v=>!v)}>新建目标</mdui-button></header>
+  return <section className="goals-page"><header className="page-head"><div className="title-block"><p className="eyebrow">{goals.length} 个长期目标</p><h1>目标树</h1></div><div className="head-side"><mdui-button variant="filled" icon={showCreate?'close':'add'} onClick={()=>setShowCreate(v=>!v)}>新建目标</mdui-button></div></header>
     {showCreate&&<mdui-dialog ref={createDialogRef} className="goal-dialog" open headline="新建目标" description="长期目标定义方向，验收标准决定什么才算完成。">
       <div className="form-stack">
         <mdui-text-field label="目标标题" variant="outlined" required value={goalDraft.title} onChange={e=>setGoalDraft(d=>({...d,title:fieldValue(e)}))}/>
@@ -230,20 +236,22 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
         {goals.length===0&&<p className="empty">先建立第一个长期目标。</p>}
       </mdui-list>
 		<div className="tree-panel">{selected?<>
-      <div className="tree-head"><div><p className="meta">{selected.status.toUpperCase()} · TREE REV {tree?.revision??0}</p><h2 className="ts-headline-small">{selected.title}</h2><p>{selected.success_criteria}</p></div><mdui-button variant="tonal" icon="auto_awesome" onClick={()=>askAgent(false)}>让 Agent 拆解</mdui-button></div>
-      <mdui-segmented-button-group className="view-switch" selects="single" value={view} onChange={e=>setView(fieldValue(e) as 'list'|'map')}>
-        <mdui-segmented-button value="list" icon="list">列表</mdui-segmented-button>
-        <mdui-segmented-button value="map" icon="map">地图</mdui-segmented-button>
-      </mdui-segmented-button-group>
+      <div className="tree-head"><div><p className="meta">{GOAL_STATUS[selected.status]??selected.status} · 修订 {tree?.revision??0}{selected.target_date?` · 目标日期 ${selected.target_date}`:''}</p><h2>{selected.title}</h2><p>{selected.success_criteria}</p></div><mdui-button variant="tonal" icon="auto_awesome" onClick={()=>askAgent(false)}>让 Agent 拆解</mdui-button></div>
       {tree?.proposals.map(proposal=><ProposalCard key={proposal.id} proposal={proposal} onApply={()=>decide(proposal,true)} onReject={()=>decide(proposal,false)}/>)}
-      <div className="revision-request">
-        <mdui-text-field variant="outlined" value={revisionInstruction} onChange={e=>setRevisionInstruction(fieldValue(e))} placeholder="例如：把实验任务拆小，并移到当前里程碑下"/>
-        <mdui-button variant="outlined" icon="edit_note" onClick={()=>askAgent(true)} disabled={!revisionInstruction.trim()}>生成修订提案</mdui-button>
+      <div className="tree-tools">
+        <mdui-segmented-button-group className="view-switch" selects="single" value={view} onChange={e=>setView(fieldValue(e) as 'list'|'map')}>
+          <mdui-segmented-button value="list" icon="list">列表</mdui-segmented-button>
+          <mdui-segmented-button value="map" icon="map">地图</mdui-segmented-button>
+        </mdui-segmented-button-group>
+        <div className="revision-request">
+          <mdui-text-field variant="outlined" label="修订指令" value={revisionInstruction} onChange={e=>setRevisionInstruction(fieldValue(e))} placeholder="例如：把实验任务拆小，并移到当前里程碑下"/>
+          <mdui-button variant="outlined" icon="edit_note" onClick={()=>askAgent(true)} disabled={!revisionInstruction.trim()}>生成修订提案</mdui-button>
+        </div>
       </div>
-      {view==='map'?<GoalMapView goal={selected} onNotice={onNotice} onOpenTask={id=>{setFocusTask(id);setView('list')}}/>:<div className="task-stack">{tasks.filter(t=>t.goal_id===selected.id).map(task=><mdui-card key={task.id} variant="outlined" className={focusTask===task.id?'task-card focused':'task-card'}>
-        <span className="task-type">{task.type}</span>
-        <div><h3 className="ts-title-medium">{task.title}</h3><p>{task.success_criteria}</p><small>下一步 · {task.minimum_action}</small></div>
-        <strong>{task.priority}</strong>
+      {view==='map'?<GoalMapView goal={selected} onNotice={onNotice} onOpenTask={id=>{setFocusTask(id);setView('list')}}/>:<div className="task-stack">{tasks.filter(t=>t.goal_id===selected.id).map(task=><mdui-card key={task.id} variant="outlined" className={`task-card${task.status==='completed'?' done':''}${focusTask===task.id?' focused':''}`}>
+        <span className={`task-status ${task.status}`} role="img" aria-label={TASK_STATUS[task.status]??task.status}/>
+        <div><h3>{task.title}{task.type==='milestone'&&<span className="task-type">里程碑</span>}</h3><p>{task.success_criteria}</p>{task.status==='blocked'?<small className="blocked">受阻{task.blocked_reason?` · ${task.blocked_reason}`:''}</small>:task.status!=='completed'&&<small>下一步 · {task.minimum_action}</small>}</div>
+        <strong>P{task.priority}</strong>
       </mdui-card>)}</div>}
       <div className="task-create">
         <mdui-text-field variant="outlined" label="任务" value={taskDraft.title} onChange={e=>setTaskDraft(d=>({...d,title:fieldValue(e)}))} placeholder="手工添加一个真实任务"/>
@@ -255,7 +263,7 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
   </section>
 }
 
-function ProposalCard({proposal,onApply,onReject}:{proposal:Proposal;onApply:()=>void;onReject:()=>void}){let operations:Record<string,unknown>[]=[];try{operations=JSON.parse(proposal.patch_json)}catch{return null}return <mdui-card variant="outlined" className="proposal-card"><p className="eyebrow">AGENT PROPOSAL · BASE REV {proposal.base_revision}</p><h3 className="ts-title-large">待确认的任务树变更</h3>{operations.map((operation,index)=><div className="proposal-op" key={index}><b>{String(operation.op||'create')}</b><span>{String(operation.title||operation.target_id||'未命名变更')}</span><small>{String(operation.minimum_action||operation.success_criteria||'')}</small></div>)}<div className="actions"><mdui-button variant="outlined" onClick={onReject}>拒绝</mdui-button><mdui-button variant="filled" onClick={onApply}>确认应用</mdui-button></div></mdui-card>}
+function ProposalCard({proposal,onApply,onReject}:{proposal:Proposal;onApply:()=>void;onReject:()=>void}){let operations:Record<string,unknown>[]=[];try{operations=JSON.parse(proposal.patch_json)}catch{return null}return <mdui-card variant="outlined" className="proposal-card"><p className="eyebrow">AGENT PROPOSAL · BASE REV {proposal.base_revision}</p><h3>待确认的任务树变更</h3>{operations.map((operation,index)=><div className="proposal-op" key={index}><b>{String(operation.op||'create')}</b><span>{String(operation.title||operation.target_id||'未命名变更')}</span><small>{String(operation.minimum_action||operation.success_criteria||'')}</small></div>)}<div className="actions"><mdui-button variant="outlined" onClick={onReject}>拒绝</mdui-button><mdui-button variant="filled" onClick={onApply}>确认应用</mdui-button></div></mdui-card>}
 
 type JobFilter = 'active' | 'queued' | 'running' | 'all' | 'failed' | 'succeeded'
 
@@ -270,42 +278,44 @@ export function JobQueue({ onNotice }: { onNotice:(s:string)=>void }) {
   const activeStatuses=new Set(['queued','running']);const counts={active:jobs.filter(j=>activeStatuses.has(j.status)).length,queued:jobs.filter(j=>j.status==='queued').length,running:jobs.filter(j=>j.status==='running').length,failed:jobs.filter(j=>j.status==='failed').length,succeeded:jobs.filter(j=>j.status==='succeeded').length}
   const visible=jobs.filter(job=>filter==='all'||filter==='active'&&activeStatuses.has(job.status)||job.status===filter).slice(0,50)
   const stats:[JobFilter,string,number][]=[['active','活跃',counts.active],['queued','排队',counts.queued],['running','运行中',counts.running],['failed','失败',counts.failed],['succeeded','成功',counts.succeeded],['all','全部',jobs.length]]
-  return <section className="jobs-page"><header className="page-head compact jobs-head"><div><p className="eyebrow">AGENT JOBS / LIVE</p><h1>每一个后台动作，<br/>都应该<em>看得见进度</em>。</h1></div><div className={connected?'live-indicator online':'live-indicator offline'}><span/><div><b>{connected?'实时连接':'连接中断'}</b><small>{updatedAt?`更新于 ${updatedAt.toLocaleTimeString('zh-CN',{hour12:false})}`:'正在连接队列'}</small></div></div></header>
+  return <section className="jobs-page"><header className="page-head"><div className="title-block"><p className="eyebrow">{counts.failed?`${counts.failed} 个作业失败`:counts.active?`${counts.active} 个作业正在进行`:'队列空闲'}</p><h1>任务队列</h1></div><div className="head-side"><div className={connected?'live-indicator online':'live-indicator offline'}><span/><div><b>{connected?'实时连接':'连接中断'}</b><small>{updatedAt?`更新于 ${updatedAt.toLocaleTimeString('zh-CN',{hour12:false})}`:'正在连接队列'}</small></div></div></div></header>
     <div className="job-stats">{stats.map(([key,label,count])=><mdui-chip key={key} selectable selected={filter===key} onClick={()=>setFilter(key)}><span>{label}</span><b>{count}</b></mdui-chip>)}</div>
     {!connected&&<div className="queue-warning"><mdui-icon name="warning_amber"/>暂时无法刷新队列，正在保留最后一次成功读取的数据并自动重连。</div>}
-    {loading?<p className="empty">正在连接任务队列…</p>:visible.length===0?<div className="empty-state"><span>✓</span><h2 className="ts-headline-small">{filter==='active'?'当前没有活跃作业':'该分类暂时没有作业'}</h2><p>任务拆解、计划生成、对话回复和语音转写会实时出现在这里。</p></div>:<div className="job-list">{visible.map(job=><JobRow key={job.id} job={job} now={now} busy={mutating===job.id} onAction={act}/>)}</div>}
+    {loading?<p className="empty">正在连接任务队列…</p>:visible.length===0?<div className="empty-state"><h2>{filter==='active'?'当前没有活跃作业':'该分类暂时没有作业'}</h2><p>任务拆解、计划生成、对话回复和语音转写会实时出现在这里。</p></div>:<div className="job-list">{visible.map(job=><JobRow key={job.id} job={job} now={now} busy={mutating===job.id} onAction={act}/>)}</div>}
   </section>
 }
 
 function JobRow({job,now,busy,onAction}:{job:Job;now:number;busy:boolean;onAction:(job:Job,action:'cancel'|'retry')=>void}){
   const active=job.status==='queued'||job.status==='running';const start=job.started_at?new Date(job.started_at).getTime():new Date(job.created_at).getTime();const end=job.finished_at?new Date(job.finished_at).getTime():now;const elapsed=Math.max(0,Math.floor((end-start)/1000));const retrying=job.status==='queued'&&job.attempt_count>0
-  return <mdui-card variant="outlined" className={`job-row status-${job.status}`}><div className="job-state"><span className={active?'pulse-job':''}/><b>{retrying?'等待重试':jobStatus(job.status)}</b><small>{formatDuration(elapsed)}</small></div><div className="job-main"><div className="job-title"><h3 className="ts-title-medium">{jobType(job.type)}</h3><code>{job.id}</code></div><p>{job.subject_type?`${subjectType(job.subject_type)} · ${shortID(job.subject_id)}`:'系统作业'}{job.base_revision>0?` · 基于版本 ${job.base_revision}`:''}</p><div className="attempt-track"><mdui-linear-progress value={Math.min(1,Math.max(0.08,job.attempt_count/Math.max(1,job.max_attempts)))}/><span>尝试 {job.attempt_count}/{job.max_attempts}</span></div>{job.error_message&&<details className="job-error"><summary>{job.status==='succeeded'?'曾失败后恢复':job.error_code||'最近一次错误'}</summary><p>{job.error_message}</p></details>}<small className="job-time">创建 {new Date(job.created_at).toLocaleString()} · 更新 {new Date(job.updated_at).toLocaleString()}</small></div><div className="job-controls">{active&&<mdui-button variant="outlined" disabled={busy||job.cancel_requested} onClick={()=>onAction(job,'cancel')}>{job.cancel_requested?'取消中':'取消'}</mdui-button>}{['failed','cancelled'].includes(job.status)&&<mdui-button variant="filled" icon="replay" disabled={busy} onClick={()=>onAction(job,'retry')}>{busy?'处理中':'重试'}</mdui-button>}</div></mdui-card>
+  return <mdui-card variant="outlined" className={`job-row status-${job.status}`}><div className="job-state"><span className={active?'pulse-job':''}/><b>{retrying?'等待重试':jobStatus(job.status)}</b><small>{formatDuration(elapsed)}</small></div><div className="job-main"><div className="job-title"><h3>{jobType(job.type)}</h3><code>{job.id}</code></div><p>{job.subject_type?`${subjectType(job.subject_type)} · ${shortID(job.subject_id)}`:'系统作业'}{job.base_revision>0?` · 基于版本 ${job.base_revision}`:''}{job.attempt_count>1?` · 第 ${job.attempt_count}/${job.max_attempts} 次尝试`:''}</p>{job.error_message&&<details className="job-error"><summary>{job.status==='succeeded'?'曾失败后恢复':job.error_code||'最近一次错误'}</summary><p>{job.error_message}</p></details>}<small className="job-time">创建 {stamp(job.created_at)} · 更新 {stamp(job.updated_at)}</small></div><div className="job-controls">{active&&<mdui-button variant="outlined" disabled={busy||job.cancel_requested} onClick={()=>onAction(job,'cancel')}>{job.cancel_requested?'取消中':'取消'}</mdui-button>}{['failed','cancelled'].includes(job.status)&&<mdui-button variant="filled" icon="replay" disabled={busy} onClick={()=>onAction(job,'retry')}>{busy?'处理中':'重试'}</mdui-button>}</div></mdui-card>
 }
 
 function jobStatus(status:string){return ({queued:'排队中',running:'运行中',succeeded:'已成功',failed:'已失败',cancelled:'已取消'} as Record<string,string>)[status]||status}
 function jobType(type:string){return ({task_tree_generation:'生成任务树',task_tree_revision:'修订任务树',daily_plan_generation:'生成每日计划',support_item_generation:'生成辅助任务',conversation:'生成对话回复',voice_transcription:'语音转写'} as Record<string,string>)[type]||type.replaceAll('_',' ')}
 function subjectType(type:string){return ({goal:'目标',conversation:'对话',daily_plan:'每日计划',audio:'音频',user:'用户'} as Record<string,string>)[type]||type}
 function shortID(id?:string){return id?id.length>18?id.slice(0,10)+'…'+id.slice(-6):id:'—'}
+// Two full locale timestamps per row read as noise; month-day hour-minute is enough to
+// tell a fresh job from yesterday's, and it matches the zh-CN used everywhere else.
+function stamp(value:string){return new Date(value).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})}
 function formatDuration(seconds:number){const minutes=Math.floor(seconds/60);const rest=seconds%60;return minutes?`${minutes}分${rest.toString().padStart(2,'0')}秒`:`${rest}秒`}
 
 function Devices({ onNotice, timezone }: { onNotice:(s:string)=>void; timezone?: string }) {
   const [devices,setDevices]=useState<Device[]>([]);const [shownToken,setShownToken]=useState('');const [deviceName,setDeviceName]=useState('')
   async function load(){const {data}=await request<{items:Device[]}>('/devices');setDevices(data.items)}useEffect(()=>{load().catch(e=>onNotice(errorText(e)))},[])
   async function create(){if(!deviceName.trim())return;if(!timezone){onNotice('正在加载用户时区，请稍后重试');return}try{const {data}=await request<{device:Device;device_token:string}>('/devices',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({name:deviceName,kind:'eink_panel',timezone,capabilities:{width:800,height:480,color_mode:'monochrome'}})});setShownToken(data.device_token);setDeviceName('');load()}catch(e){onNotice(errorText(e))}}
-  return <section className="devices-page"><header className="page-head compact"><div><p className="eyebrow">QUIET DISPLAY</p><h1>把注意力留在桌面，<br/>而不是<em>通知中心</em>。</h1></div></header>
+  return <section className="devices-page"><header className="page-head"><div className="title-block"><p className="eyebrow">{devices.length?`${devices.length} 台设备已登记`:'尚未登记设备'}</p><h1>设备</h1></div></header>
     {shownToken&&<div className="token-box"><div><b>设备 Token 仅显示一次</b><code>{shownToken}</code></div><mdui-button variant="tonal" icon="content_copy" onClick={()=>navigator.clipboard.writeText(shownToken)}>复制</mdui-button></div>}
     <div className="device-grid">
       <mdui-card variant="outlined" className="device-add">
-        <mdui-icon className="add-icon" name="add_circle"/>
-        <h2 className="ts-title-large">连接墨水屏</h2>
+        <h2>连接墨水屏</h2>
         <p>创建一个只读、可撤销的设备身份。</p>
         <mdui-text-field variant="outlined" label="设备名称" value={deviceName} onChange={e=>setDeviceName(fieldValue(e))} placeholder="例如：办公室墨水屏" required/>
         <mdui-button variant="filled" disabled={!deviceName.trim()} onClick={create}>生成设备 Token</mdui-button>
       </mdui-card>
       {devices.map(device=><mdui-card variant="outlined" className="device-card" key={device.id}>
-        <div className="screen-preview"><span>3SIGNALS</span><b>01</b><p>今天最重要的任务</p></div>
-        <h3 className="ts-title-medium">{device.name}</h3>
-        <p><span className={`status ${device.status}`}/>{device.status} · {device.timezone}</p>
+        <h3>{device.name}</h3>
+        <p><span className={`status ${device.status}`}/>{DEVICE_STATUS[device.status]??device.status} · {device.timezone}</p>
+        <p className="meta">{device.kind==='eink_panel'?'墨水屏面板 · 只读':device.kind}</p>
         <code>{device.id}</code>
       </mdui-card>)}
     </div>
