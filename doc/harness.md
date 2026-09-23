@@ -863,6 +863,46 @@ A 的 Go 侧只是一个带凭据注入的反向代理，权威状态写入推�
 18. **宿主单实例**：连续切换三个线程，断言任一时刻只存在一个 libfx agent 实例（§3.7）。
 19. [`chat-features.md`](chat-features.md) §6 的七项验收，其中第 7 项（两种模式行为一致）由本节第 3 项的等价性测试覆盖。
 
+### 14.1 🟢 覆盖对照（2026-09-23 逐条核对）
+
+每一条要求对应的测试。核对方式是从测试名反查，不是从意图推断——**列在这里的名字都在仓库里存在**。
+
+| # | 要求 | 测试 |
+|---|---|---|
+| 1 | 协议往返（录制夹具 + 交错顺序） | `web/src/harness/shim.test.ts`：`translates one gateway call into an OpenAI-compatible request to our own proxy`、`keeps the interleaved order the spike measured (§16.3)`、`answers an upstream failure with an error response so libfx can retry (§3.6)`；夹具在 `web/src/harness/__fixtures__/`（录制说明见其 README）。**真机补充**：`web/src/harness/integration.test.ts` 加载真实 `libfx/node` 跑完整 turn |
+| 2 | 工具清单单源 | `TestAgentToolsEndpointProjectsTheRegistry`、`TestNewToolRegistryRejectsIdentityFields`、`TestReadonlyToolsRegistered` |
+| 3 | 双宿主等价 | `TestBothHostsWriteTheSameTranscript`；真机侧见 §16.6 |
+| 4 | `system` / `tools` 被忽略 | `TestHarnessProxyReplacesSystemAndTools`、`TestProxyReplacesHostSystemAndTools`、`TestAgentCommandsIgnoresForgedStateSystemTools` |
+| 5 | harness token 边界 | `TestHarnessTokenBoundaries`（用户 JWT 打宿主端点 401、**已终止 run 的令牌 401**、跨 run 401、伪造 401） |
+| 6 | 审批不计入墙钟 | `TestAgentApprovalWaitDoesNotCountAgainstWallClock`（等待时长 > 整个墙钟预算，run 仍成功） |
+| 7 | checkpoint 漂移降级 | `TestCheckpointVersionSkewDegrades` |
+| 8 | 构建产物 | `web/src/harness/artifacts.test.ts`：`never imports the libfx entry that drags in fx-term.wasm (§9.1)`、`self-hosts the runtime instead of pointing at a CDN`；CI 另断言 `dist/fx-core.wasm{,.br,.gz}` 存在且产物内无 `fx-term.wasm` / `*.node` |
+| 9 | 降级可见 | `web/src/agent/HarnessStatus.test.tsx`：`shows the mode AND the reason when the browser cannot host the runtime (§14.9)`、`says the agent is unavailable rather than leaving the composer to fail on send`、`outranks the mode line when the device is offline (phase G)`；`web/src/harness/backend.test.ts`：`degrades to the sidecar when JSPI is missing, with the reason (§3.2)`；`web/src/harness/host.test.ts`：`publishes a status a view can render, including a degraded context (§3.2, §6.3)` |
+| 10 | sidecar 缺失不影响 WASM | `TestSidecarSupervisorGivesUpWithoutTouchingWasm`、`TestSecurityPolicyAllowsWasm`、`TestSidecarModeIsRefusedWithoutASidecar`、`TestWasmRunIsNotExecutedByTheWorker`、`TestExternallyManagedSidecarIsProbedNotOwned` |
+| 11 | `baseURL` 绝对性 | `web/src/harness/shim.test.ts`：`builds an absolute proxy URL, or refuses (§14.11)` |
+| 12 | 工具调用不重复写入 | `TestHarnessToolCallHistoryInRequestIsNeverPersisted`、`TestToolCallIDCollisionIsRefused`、`TestReasoningAcrossModelCallsKeepsItsOwnParts`（同一 run 内多次调用的 part 不互撞） |
+| 13 | 取消三通道 | 出字中：`TestCancellationStopsAModelCallThatIsAlreadyStreaming`；等审批：`TestCancellationReleasesAnApprovalWait`；空闲等心跳：`TestHarnessRunCancellation` + `web/src/harness/host.test.ts`：`cancels the turn when a heartbeat reports a cancellation (§5.2 channel 1)`；无人确认时收尾：`TestHarnessCancellationIsFinishedByTheReaper`；用户入口：`TestAgentExplicitCancelTerminatesRunOverHTTP` |
+| 14 | 心跳失联回收 | `TestHarnessHeartbeatLossInterruptsRun`（run 置 interrupted、令牌 401、长轮询被释放、`Proposal` 仍 pending）、`TestSchedulerReapsLostHarnessHosts`、`TestHarnessHeartbeatKeepsARunAlive`、`TestHarnessRunNeverPickedUpIsReaped` |
+| 15 | `tools_etag` 陈旧 | `TestRunGrantRejectsStaleToolsETag` |
+| 16 | 令牌职责隔离 | `TestHarnessTokenBoundaries`（harness token 打取消端点 401、打 `POST /agent/runs` 401；用户 JWT 打代理/工具/心跳/checkpoint 401） |
+| 17 | 凭据不出 Go 进程 | `TestHarnessCredentialsNeverReachTheHost`、`TestHarnessResponsesNeverCarryCredentials`；宿主侧 `web/src/harness/integration.test.ts`（上游收到的 bearer 是 capability 而非 provider key）与 `web/src/harness/sidecar-server.test.ts`：`drives a run and reports how it ended, without completing it`（每个调用只带 capability） |
+| 18 | 宿主单实例 | `web/src/harness/host.test.ts`：`holds at most one agent instance, cancelling the run it replaces (§3.7, §14.18)` |
+| 19 | [`chat-features.md`](chat-features.md) §6 七项 | ①`TestAgentThreadStateRestoresCompletedConversation`、`TestThreadCatalogueListsAndPages`、`web/src/agent/threads.test.ts` ②`TestThreadArchiveKeepsEverythingAndDeleteRemovesIt`、`TestThreadDeleteCancelsAnInFlightRun`、`TestAttachmentDeleteRemovesRowAndFile` ③`TestReasoningIsPersistedAndCanBeDisabled` + `web/src/agent/Reasoning.test.tsx`：`is folded by default, and says what it is` ④同上 + `renders nothing at all when there is no reasoning to show` ⑤`TestAttachmentUploadSniffsTypeAndStripsMetadata`、`TestAgentAttachmentRoundTripOverHTTP`、`TestAgentMessageCarriesAttachmentReferences`、`web/src/agent/attachments.test.ts` ⑥`TestAgentThreadAccessIsScopedOverHTTP`、`TestAgentAttachmentRoundTripOverHTTP`（跨用户 GET/DELETE 均 404） ⑦`TestBothHostsWriteTheSameTranscript` |
+
+§8 的 sidecar 另有自己的契约测试：`TestSidecarRunPayloadMatchesHostContract`（**直接读 TypeScript 源码里的
+`SidecarRunRequest` 字段名**与 Go 发出的 JSON 键逐一对照，任何一侧改名都会失败）、
+`TestSidecarClientRefusesARoutableEndpoint` / `TestSidecarClientRefusesNonLoopbackEndpoints`（§8.2 只听 loopback）、
+`TestSpawnedSidecarSecretIsGeneratedOnce`（§8.2 密钥）、以及 `web/src/harness/sidecar-server.test.ts`
+（`answers nothing at all without the startup secret`、`cancels a run that is still going`、
+`only listens where the supervisor can reach it`）。
+
+§3.2 的模式开关（§15 决定暴露给用户）：`web/src/agent/modePreference.test.ts`、
+`web/src/agent/HarnessStatus.test.tsx`：`stores the choice, drops the cached probe and re-warms it`、
+`web/src/agent/runtime.test.ts`：`hands a stored preference to the probe instead of asking it (§3.2, §15)`。
+
+> **一处方法论**：本表是在实现完成后逐条反查得到的，查出两个真实缺口（§14.13 的「出字中」与「等待审批」
+> 两个取消时刻、§14.9 的 UI 侧可见性），已补测试。**测试要求的清单要拿来对，不能拿来读。**
+
 ## 15. 待确认
 
 | 事项 | 默认取值 | 何时重新评估 |
