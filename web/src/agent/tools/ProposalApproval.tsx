@@ -45,7 +45,10 @@ function ProposalCard({ title, args, result, addResult }: CardProps) {
           />
           <div className="agent-proposal-buttons">
             <mdui-button variant="filled" icon="check" onClick={() => addResult({ decision: 'approve' })}>批准</mdui-button>
-            <mdui-button variant="tonal" icon="close" onClick={() => addResult({ decision: 'reject', reason: reason.trim() || undefined })}>拒绝</mdui-button>
+            {/* Outlined, not tonal: one card gets one accent. The app's other proposal pair (App.tsx
+                ProposalCard) is already outlined-reject + filled-apply, and two filled buttons next to
+                a 56px field made the decision read as three equally loud controls. */}
+            <mdui-button variant="outlined" icon="close" onClick={() => addResult({ decision: 'reject', reason: reason.trim() || undefined })}>拒绝</mdui-button>
           </div>
         </div>
       )}

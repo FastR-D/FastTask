@@ -6,6 +6,16 @@ import type { AuditView, ModelProvider, SessionView, User } from './types'
 
 type Section = 'users' | 'models' | 'audit'
 
+// The API speaks English enums; the interface speaks Chinese — the same rule App.tsx states for goal,
+// task and device status. A card caption is read at a glance, and `admin · active` is not one.
+const ROLE: Record<string, string> = { admin: '管理员', member: '成员' }
+const ACCOUNT_STATUS: Record<string, string> = { active: '启用', disabled: '已停用' }
+const PROVIDER_STATUS: Record<string, string> = { active: '可用', disabled: '已停用' }
+
+// Timestamps on this screen sit next to zh-CN ones everywhere else in the app; leaving them to the
+// browser locale mixes 9/23/2026 into a Chinese sentence.
+function stamp(value: string) { return new Date(value).toLocaleString('zh-CN', { hour12: false }) }
+
 export function Admin({ user, onNotice }: { user: User; onNotice: (value: string) => void }) {
   const [section, setSection] = useState<Section>('users')
   return (
@@ -101,7 +111,7 @@ function UserAdmin({ currentID, onNotice }: { currentID: string; onNotice: (valu
         <div className="admin-grid">
           {users.map(item => (
             <mdui-card variant="outlined" className={item.status === 'disabled' ? 'admin-card muted' : 'admin-card'} key={item.id}>
-              <header><div><p className="eyebrow">{item.role} · {item.status}</p><h3>{item.display_name}</h3><small>{item.identifier}</small></div></header>
+              <header><div><p className="eyebrow">{ROLE[item.role] ?? item.role} · {ACCOUNT_STATUS[item.status] ?? item.status}</p><h3>{item.display_name}</h3><small>{item.identifier}</small></div></header>
               <div className="admin-actions">
                 <mdui-button variant="outlined" onClick={() => patchUser(item, { role: item.role === 'admin' ? 'member' : 'admin' }, '角色已更新')} disabled={item.id === currentID}>{item.role === 'admin' ? '设为成员' : '设为管理员'}</mdui-button>
                 <mdui-button variant="outlined" onClick={() => patchUser(item, { status: item.status === 'active' ? 'disabled' : 'active' }, '状态已更新')} disabled={item.id === currentID}>{item.status === 'active' ? '禁用' : '启用'}</mdui-button>
@@ -112,7 +122,7 @@ function UserAdmin({ currentID, onNotice }: { currentID: string; onNotice: (valu
             </mdui-card>
           ))}
         </div>
-        {selected && <section className="session-panel"><h3>{selected.display_name} 的活跃会话</h3>{sessions.length === 0 ? <p>无活跃会话。</p> : sessions.map(session => <div key={session.id}><code>{session.id}</code><span>到期 {new Date(session.expires_at).toLocaleString()}</span></div>)}</section>}
+        {selected && <section className="session-panel"><h3>{selected.display_name} 的活跃会话</h3>{sessions.length === 0 ? <p>无活跃会话。</p> : sessions.map(session => <div key={session.id}><code>{session.id}</code><span>到期 {stamp(session.expires_at)}</span></div>)}</section>}
       </div>
       {resetTarget && <mdui-dialog ref={resetDialogRef} open icon="key" headline="重置密码" description={`为 ${resetTarget.identifier} 设置至少 12 位新密码，旧会话将被全部撤销。`}>
         <mdui-text-field label="新密码（至少12位）" type="password" toggle-password variant="outlined" required minlength={12} value={resetValue} onChange={e => setResetValue(fieldValue(e))} />
@@ -182,9 +192,9 @@ function ProviderAdmin({ onNotice }: { onNotice: (value: string) => void }) {
         <div className="admin-grid">
           {providers.map(provider => (
             <mdui-card variant="outlined" className={provider.is_default ? 'admin-card selected' : 'admin-card'} key={provider.id}>
-              <header><div><p className="eyebrow">{provider.is_default ? '默认' : provider.status}</p><h3>{provider.name}</h3><small>{provider.model_name}</small></div></header>
+              <header><div><p className="eyebrow">{provider.is_default ? '默认' : PROVIDER_STATUS[provider.status] ?? provider.status}</p><h3>{provider.name}</h3><small>{provider.model_name}</small></div></header>
               <p className="provider-url">{provider.base_url}</p>
-              <p>API Key：<code>{provider.api_key_hint || 'not set'}</code></p>
+              <p>API Key：<code>{provider.api_key_hint || '未设置'}</code></p>
               {editing?.id === provider.id ? (
                 <div className="edit-stack">
                   <mdui-text-field label="显示名称" variant="outlined" value={editing.name} onChange={e => setEditing({ ...editing, name: fieldValue(e) })} />
@@ -236,7 +246,7 @@ function AuditAdmin({ onNotice }: { onNotice: (value: string) => void }) {
         <mdui-card variant="outlined" className="audit-item" key={event.id}>
           <header>
             <strong>{event.action}</strong>
-            <time>{new Date(event.created_at).toLocaleString()}</time>
+            <time>{stamp(event.created_at)}</time>
           </header>
           <p>{event.actor_display_name || event.actor_identifier}{event.target_identifier ? ' → ' + (event.target_display_name || event.target_identifier) : ''}</p>
           <code>{event.detail_json}</code>

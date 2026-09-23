@@ -102,6 +102,10 @@ button,input,textarea{font:inherit}
   display:grid;gap:var(--ft-space-4);
   border-radius:var(--mdui-shape-corner-large);
   background:rgb(var(--mdui-color-surface-container-low));
+  /* mdui paints an outlined field's floated-label notch with --mdui-color-background, so on a tinted
+     card that notch is the wrong colour as soon as a label floats (measured rgb(254,247,255) sitting on
+     rgb(247,242,250)). mdui-dialog rebinds the same token internally for exactly this reason. */
+  --mdui-color-background:var(--mdui-color-surface-container-low);
 }
 .login-card h2{
   margin:var(--ft-space-1) 0 0;
@@ -272,8 +276,11 @@ button,input,textarea{font:inherit}
 
 @media (max-width:839.98px){
   .goal-layout{grid-template-columns:1fr}
+  /* Fixed basis, not `min-width`: the item's criteria line is nowrap, so with an auto basis each card
+     is as wide as its own longest line — measured 538 / 319 / 383px in one 368px scroller, i.e. three
+     different card widths and a scroll area four screens long. Equal cards, ellipsised text. */
   .goal-list{max-height:none;display:flex;overflow-x:auto;overscroll-behavior-x:contain}
-  .goal-list mdui-list-item{flex:0 0 auto;min-width:15rem}
+  .goal-list mdui-list-item{flex:0 0 15rem;min-width:0}
   .tree-tools{grid-template-columns:minmax(0,1fr) auto}
   .view-switch{grid-column:1/-1}
   .task-create{grid-template-columns:1fr}

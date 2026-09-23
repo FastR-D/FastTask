@@ -153,9 +153,13 @@
    sideways inside the message instead of pushing the layout wider. */
 .agent-md-table { display: block; min-width: 0; max-width: 100%; overflow-x: auto; }
 .agent-md table { border-collapse: collapse; width: 100%; font-size: var(--mdui-typescale-body-small-size); }
+/* Row rules only. A box around every cell plus a filled header plus zebra striping states the same
+   structure three times, and inside a typeset reply that grid reads as a spreadsheet pasted in from
+   another product. Columns are already separated by padding and alignment. */
 .agent-md th, .agent-md td {
-  padding: var(--ft-space-1) var(--ft-space-3);
-  border: 1px solid rgb(var(--mdui-color-outline-variant));
+  padding: var(--ft-space-1) var(--ft-space-3) var(--ft-space-1) 0;
+  border: 0;
+  border-bottom: 1px solid rgb(var(--mdui-color-outline-variant));
   text-align: start;
   /* The message's `word-break: break-word` would otherwise let a cell collapse
       around its longest token, so the table always "fits" and the scroll
@@ -164,27 +168,25 @@
   word-break: normal;
   overflow-wrap: normal;
 }
-.agent-md th {
-  background: rgb(var(--mdui-color-surface-container-high));
-  font-weight: 600;
-}
-.agent-md tbody tr:nth-child(even) { background: rgb(var(--mdui-color-surface-container-low)); }
+.agent-md th { font-weight: 600; }
+.agent-md tbody tr:last-child td { border-bottom: 0; }
 
 
-/* The user bubble sits on surface-container-high, which is the same token the rules above
-   use for inline code and table headers — inside the bubble those need one step up, or they
-   disappear. Everything else (links, quotes, zebra rows) already contrasts against it. */
-.agent-msg-user .agent-md :not(pre) > code,
-.agent-msg-user .agent-md th { background: rgb(var(--mdui-color-surface-container-highest)); }
+/* The user bubble sits on surface-container-high, which is the same token the rules above use for
+   inline code — inside the bubble it needs one step up, or it disappears. */
+.agent-msg-user .agent-md :not(pre) > code { background: rgb(var(--mdui-color-surface-container-highest)); }
 
-/* Proposal approval card (agent-impl.md §7.1). */
+/* Proposal approval card (agent-impl.md §7.1). A reply is typeset content, so the card that asks for a
+   decision is an outlined block, not a second filled surface inside the message: the border is enough
+   to hold it apart, and it also keeps mdui's outlined-field label notch on the colour it expects
+   (mdui paints that notch with --mdui-color-background, so any tinted surface shows a mismatched
+   patch behind a floated label). */
 .agent-proposal {
   display: grid;
   gap: var(--ft-space-3);
   margin: var(--ft-space-3) 0;
   padding: var(--ft-space-4);
   border-radius: var(--mdui-shape-corner-medium);
-  background: rgb(var(--mdui-color-surface-container-low));
   border: 1px solid rgb(var(--mdui-color-outline-variant));
   color: rgb(var(--mdui-color-on-surface));
 }
@@ -288,15 +290,16 @@
 /* The harness bar (doc/harness.md §3.2, §15): the status line and the host switch sit together because
    they answer one question — where the agent is running, and whether the user wants it somewhere else.
    Every color below is rgb(var(--mdui-color-*)): mdui's color tokens are bare triplets, so a bare var()
-   is not a color and the whole declaration is dropped (ADR-0004 §4.2). */
+   is not a color and the whole declaration is dropped (ADR-0004 §4.2).
+   No rule under the bar: the status line is absent until the probe answers, and a hairline spanning the
+   whole column beneath one 12rem control separates nothing — it just adds a line the eye has to cross
+   before the first message. Spacing (this gap plus the viewport's own padding) does the separating. */
 .agent-harness-bar {
   display: flex;
   flex-wrap: wrap;
   gap: var(--ft-space-2);
   align-items: center;
   justify-content: space-between;
-  padding-block-end: var(--ft-space-2);
-  border-bottom: 1px solid rgb(var(--mdui-color-outline-variant));
 }
 
 /* The status line itself: a degradation is stated, never implied. */
@@ -311,7 +314,9 @@
 }
 
 /* The switch is a setting, so it is compact and always sits at the end of the bar: while the probe is
-   still idle there is no status line, and a lone control floating on the left looks like a mistake. */
+   still idle there is no status line, and a lone control floating on the left looks like a mistake.
+   It is the outlined variant for the same reason — mdui's filled field is the strongest surface in the
+   column, and that weight belongs to the composer, not to a preference most runs never change. */
 .agent-harness-choice {
   flex: 0 1 auto;
   min-width: 8rem;
@@ -403,6 +408,9 @@
   position: relative;
   display: flex;
   align-items: center;
+  /* Where the actions are in flow (a finger has no hover to reveal them) they wrap to their own line
+      instead of squeezing the title into the leftover space of a 15rem column. */
+  flex-wrap: wrap;
   gap: var(--ft-space-1);
   border-radius: var(--mdui-shape-corner-small);
 }
@@ -418,7 +426,9 @@
   display: flex;
   align-items: center;
   gap: var(--ft-space-2);
-  flex: 1;
+  /* 9rem basis: enough of a title to be worth a line, and the trigger for the wrap above — when the
+      row cannot hold this plus the actions, the actions take the next line. */
+  flex: 1 1 9rem;
   min-inline-size: 0;
   padding: var(--ft-space-2);
   border: 0;
@@ -439,13 +449,9 @@
   flex: 1;
 }
 
-.agent-thread-when {
-  font-size: var(--mdui-typescale-label-small-size);
-  color: rgb(var(--mdui-color-on-surface-variant));
-}
-
-/* The row is 15rem wide; four icons in flow would leave the title 33px. They overlay the row's
-   end instead and borrow whatever surface the row is painting, so the title keeps its width. */
+/* With a pointer the row is 15rem wide and four icons in flow would leave the title 33px, so they
+   overlay the row's end there and borrow whatever surface the row is painting (see the media queries
+   below for the touch case, where they go back into flow). */
 .agent-thread-actions {
   position: absolute;
   inset-block: 0;
@@ -458,8 +464,12 @@
   border-radius: var(--mdui-shape-corner-small);
 }
 
+/* mdui-icon's host is `width:1em;height:1em`, and the app's global `*{box-sizing:border-box}` makes
+   padding eat into that box instead of growing it: the 18px glyph overflows and the clickable area stays
+   18px no matter what the padding says. content-box is what actually turns the padding into target. */
 .agent-thread-actions mdui-icon {
   cursor: pointer;
+  box-sizing: content-box;
   font-size: 1.125rem;
   padding: var(--ft-space-1);
   border-radius: var(--mdui-shape-corner-small);
@@ -470,8 +480,11 @@
   color: rgb(var(--mdui-color-on-surface));
 }
 
-/* A pointer has hover, a finger does not: with a pointer the actions appear on the row, with a
-   finger they are always there and carry their own opaque backdrop. */
+/* A pointer has hover, a finger does not. With a pointer the actions stay out of the way and appear on
+   the row, overlaying its end and borrowing whatever surface the row is painting. With a finger there is
+   no reveal, so they join the flow: an always-opaque overlay permanently hides whatever sits under it
+   (measured: 82px of the title on a 400px screen), while in flow the row either keeps them beside the
+   title or wraps them under it, and every icon stays a real 34px target. */
 @media (hover: hover) {
   /* pointer-events has to go with the opacity: the actions overlay the row's click target, so an
      invisible-but-clickable archive/delete icon would sit under the user's cursor. */
@@ -480,8 +493,8 @@
   .agent-thread:focus-within .agent-thread-actions { opacity: 1; pointer-events: auto; }
 }
 @media (hover: none) {
-  .agent-thread-actions { background: rgb(var(--mdui-color-background)); }
-  .agent-thread.active .agent-thread-actions { background: rgb(var(--mdui-color-secondary-container)); }
+  .agent-thread-actions { position: static; padding-inline-start: 0; background: none; }
+  .agent-thread-actions mdui-icon { padding: var(--ft-space-2); }
 }
 
 .agent-thread-empty {
