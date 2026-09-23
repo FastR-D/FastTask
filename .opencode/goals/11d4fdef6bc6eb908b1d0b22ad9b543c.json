@@ -5,7 +5,7 @@
   "objective": "`doc`目录中新增加了功能的文档,你可以用git判断.现在来进行全部代码工作的编写和测试.做完之后进行部署,现在已经有旧版跑在fasttask-server-13的tmux实例中,直接复用这个tmux实例.全部做完之后同步到远程仓库",
   "constraints": [],
   "revision": 1,
-  "status": "active",
+  "status": "paused",
   "requirements": [
     {
       "id": "ceb51306-65ed-4192-92ee-fe4dad348c06",
@@ -21,13 +21,14 @@
   "evidence": [],
   "checks": [],
   "usage": {
-    "turns": 2,
+    "turns": 3,
     "tokens": 298850,
     "cost": 0,
-    "runtimeMs": 54266,
+    "runtimeMs": 86952,
     "seenMessageIDs": [
       "msg_0a0c52349001EG46n43XxRFCIN",
-      "msg_0c48f8673001B9j6oDUzluaaAL"
+      "msg_0c48f8673001B9j6oDUzluaaAL",
+      "msg_0cde4b791001fyurDgnNStd0X8"
     ]
   },
   "revisionTurnBaseline": 0,
@@ -410,9 +411,9 @@
       "next": ""
     }
   ],
-  "storageGeneration": 279,
+  "storageGeneration": 285,
   "createdAt": 1789403668971,
-  "updatedAt": 1790004670154,
+  "updatedAt": 1790160746403,
   "execution": {
     "agent": "build",
     "model": {
@@ -423,18 +424,10 @@
       "contextLimit": 1000000,
       "outputLimit": 131072,
       "autoCompaction": true,
-      "observedAt": 1790004670154,
+      "observedAt": 1790160746403,
       "lastRequestTokens": 288913,
-      "lastInputTokens": 288333
+      "lastInputTokens": 0
     }
   },
-  "stopReason": "Recovering from semantic_verifier infrastructure failure; automatic retry scheduled. semantic verifier unavailable after one automatic timeout retry: semantic verifier timed out after 60000ms",
-  "infrastructureRecovery": {
-    "kind": "semantic_verifier",
-    "reason": "semantic verifier unavailable after one automatic timeout retry: semantic verifier timed out after 60000ms",
-    "attempt": 1,
-    "startedAt": 1789444428707,
-    "nextRetryAt": 1789444443707
-  },
-  "skipNextStallCheck": true
+  "stopReason": "Provider request failed (HTTP 400): <400> ***.***.DataInspectionFailed: Input text data may contain inappropriate content."
 }
