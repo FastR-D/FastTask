@@ -131,6 +131,12 @@ export async function selectMode(forced?: HarnessMode): Promise<{
 规则：
 
 - 管理员或用户在设置中强制指定时，直接采用，不探测。
+  🟢 **该开关已暴露给用户**：对话页状态栏右侧的「运行位置」（自动 / 本机运行 / 服务端运行，
+  `web/src/agent/HarnessStatus.tsx` 的 `HarnessModeControl`）。选择会**清掉本会话的探测缓存**并重新预热，
+  因此切换立即生效，不必刷新。
+  偏好本身存在 `web/src/agent/modePreference.ts`（`localStorage`，键 `fasttask.harness.mode`，
+  `auto` 以「不存这个键」表示），**故意不放在 `web/src/harness/` 里**：§3.1 规则 2 要求宿主层不落任何持久状态，
+  `harness/boundary.test.ts` 会据此扫描该目录。存的是**用户的指令**，不是探测结论，两者不可混为一谈。
 - 否则调用 `getBackendInfo({ surface: 'agent', backend: 'wasm', wasm: <自托管 URL> })`。返回 `backend: 'wasm-jspi'` 则用 WASM 模式；返回 `'unavailable'` 则降级 sidecar，并把 `attempts[].reason`（如 `LIBFX_JSPI_UNAVAILABLE`、`LIBFX_WASM_LOAD_FAILED`）带进降级原因。
 - **探测每个会话做一次，结果只存内存。** 不写 localStorage——浏览器升级会改变能力，缓存会导致长期错判。
 - 探测会编译 2 MB wasm。必须在首次进入对话页**之前**、而不是发送第一条消息时触发，避免首条消息多出编译延迟。
@@ -865,7 +871,7 @@ A 的 Go 侧只是一个带凭据注入的反向代理，权威状态写入推�
 | 审批长轮询超时 | 15 分钟，分段 30 秒 | 观察真实审批时长分布后 |
 | harness token 有效期 | 30 分钟，可续 | 长对话被迫续签过于频繁时 |
 | WASM 模式下的并发运行数 | 1（UI 层禁止并发） | 用户反馈需要并行多线程对话时 |
-| 是否暴露模式切换给普通用户 | 暴露，默认自动 | 若发现用户乱切导致困惑，则收进管理员设置 |
+| 是否暴露模式切换给普通用户 | 🟢 已暴露（对话页状态栏「运行位置」），默认自动 | 若发现用户乱切导致困惑，则收进管理员设置 |
 | 心跳间隔 / 失联阈值 | 10 秒 / 45 秒（§10.4） | 移动端弱网下误判过多时 |
 | harness token 续期策略 | 剩余不足 10 分钟时随心跳下发新令牌 | — |
 

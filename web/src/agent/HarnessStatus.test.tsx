@@ -11,17 +11,26 @@ import type { HarnessStatus } from '../harness'
 
 let listeners: Array<(status: HarnessStatus) => void> = []
 
-vi.mock('../harness', () => ({
-  warmUpHarness: vi.fn(async () => undefined),
-  subscribeHarnessStatus: (listener: (status: HarnessStatus) => void) => {
-    listeners.push(listener)
-    return () => {
-      listeners = listeners.filter(registered => registered !== listener)
-    }
-  },
-}))
+// Only the subscription and the probe are replaced; the preference module stays real, so these tests
+// exercise the same storage round-trip the app does.
+const { warmUp, resetProbe } = vi.hoisted(() => ({ warmUp: vi.fn(async () => undefined), resetProbe: vi.fn() }))
 
-const { HarnessStatusLine, useOnline } = await import('./HarnessStatus')
+vi.mock('../harness', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>()
+  return {
+    ...actual,
+    warmUpHarness: warmUp,
+    resetModeProbe: resetProbe,
+    subscribeHarnessStatus: (listener: (status: HarnessStatus) => void) => {
+      listeners.push(listener)
+      return () => {
+        listeners = listeners.filter(registered => registered !== listener)
+      }
+    },
+  }
+})
+
+const { HarnessModeControl, HarnessStatusLine, useOnline } = await import('./HarnessStatus')
 
 function publish(status: HarnessStatus) {
   act(() => {
@@ -42,6 +51,9 @@ function statusLine(): HTMLElement {
 
 beforeEach(() => {
   listeners = []
+  warmUp.mockClear()
+  resetProbe.mockClear()
+  localStorage.clear()
   setOnline(true)
 })
 
@@ -141,5 +153,62 @@ describe('useOnline', () => {
       setOnline(true)
     })
     expect(result.current).toBe(true)
+  })
+})
+
+// §3.2 lets an admin or a user force a host, and §15 decides that the switch is exposed to ordinary users.
+// What makes it worth a test is the part that is easy to get wrong: choosing a host has to take effect
+// without a reload, which means the session's probe answer is dropped at the same moment.
+describe('the host switch', () => {
+  function select(): HTMLElement {
+    const element = document.querySelector('.agent-harness-choice')
+    if (!element) throw new Error('the host switch did not render')
+    return element as HTMLElement
+  }
+
+  // React sets a custom element's prop as an attribute until the property exists on the instance, and as
+  // the property afterwards, so the current value has to be read from whichever one holds it.
+  function selectedValue(): string {
+    const element = select() as HTMLElement & { value?: string }
+    return String(element.value ?? element.getAttribute('value') ?? '')
+  }
+
+  // mdui-select is a custom element, so it has no native value setter for fireEvent to use. Setting the
+  // property and dispatching the same 'change' event the component fires is what the app sees.
+  function choose(value: string) {
+    const element = select() as HTMLElement & { value?: string }
+    element.value = value
+    act(() => {
+      element.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+  }
+
+  it('shows auto when the user has never chosen', () => {
+    render(<HarnessModeControl />)
+    expect(selectedValue()).toBe('auto')
+  })
+
+  it('shows the choice a previous session stored', () => {
+    localStorage.setItem('fasttask.harness.mode', 'sidecar')
+    render(<HarnessModeControl />)
+    expect(selectedValue()).toBe('sidecar')
+  })
+
+  it('stores the choice, drops the cached probe and re-warms it', () => {
+    render(<HarnessModeControl />)
+    choose('wasm')
+
+    expect(localStorage.getItem('fasttask.harness.mode')).toBe('wasm')
+    expect(selectedValue()).toBe('wasm')
+    // Without this the switch would only apply after a reload, which is not what "force" means.
+    expect(resetProbe).toHaveBeenCalled()
+    expect(warmUp).toHaveBeenCalled()
+  })
+
+  it('clears the setting when the user goes back to auto', () => {
+    localStorage.setItem('fasttask.harness.mode', 'wasm')
+    render(<HarnessModeControl />)
+    choose('auto')
+    expect(localStorage.getItem('fasttask.harness.mode')).toBeNull()
   })
 })
