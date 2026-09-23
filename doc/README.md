@@ -114,11 +114,17 @@ ADR-0001 与 `wiring.md` 的标题沿用历史写法，其中的「fx」指 uber
 | [`req/overall.md`](req/overall.md) | ⚪ 原始需求 | 2026-08-09 | FastResearch 整体设想 |
 | [`plotminder/`](plotminder/) | ⚪ 构想来源 | 2026-09-15 | 决策地图构想。**大部分未被采纳**，采纳与否决的逐条裁决见 `lens.md` §3。不要据此实现任何东西 |
 
+### 2.7 验证记录
+
+| 文档 | 类型 | 更新 | 说明 |
+|---|---|---|---|
+| [`qa-2026-09-23.md`](qa-2026-09-23.md) | 生产 QA / 代码审查记录 | 2026-09-23 | 浏览器实测范围、修复项、自动化验证与未执行的高风险操作 |
+
 ## 3. 当前实现状态速查
 
 截至 2026-09-22：
 
-- **Schema 版本**：5（`migrations/000005_agent_runtime`，新增 Agent Run / Message / MessagePart / RunChunk 运行时表）。
+- **Schema 版本**：8（`migrations/000005_agent_runtime` 至 `000008_agent_attachments`，包括 Agent 运行时、多会话、harness 与图片附件）。
 - **后端**：Go + Gin + Huma v2 + GORM/SQLite，由 fx 组合根装配（`internal/bootstrap`）；`serve` / `worker` / `scheduler` 三个角色可独立运行（`wiring.md` 八步迁移 + §9 已全部落地）。
 - **Agent**：assistant-transport SSE 运行时已落地——多轮工具循环（`agentloop.go`）、只读工具注册表（`agenttool.go`）、任务树/计划提案与 HTTP 处理器内同步审批（`agentapproval.go`、`agenttools_proposal.go`、`agentdailyplan.go`）、断线续流与启动中断回收。六阶段（A–F）全部交付。
 - **前端**：mdui 2.1.5 重写 + assistant-ui 0.15.21 对话区已落地（`web/src/agent/`：`AgentChat` 挂载点、纯 converter、`makeAssistantToolUI` 审批卡片、协商录音格式的语音输入）。

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -108,8 +109,21 @@ func newFakeSidecar(t *testing.T, socket string, healthy bool) *fakeSidecar {
 	return fake
 }
 
+func testSocketPath(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return filepath.Join(t.TempDir(), "sidecar.sock")
+	}
+	dir, err := os.MkdirTemp("/tmp", "ft-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "sidecar.sock")
+}
+
 func TestSidecarClientTalksToTheSocketWithTheSecret(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
+	socket := testSocketPath(t)
 	fake := newFakeSidecar(t, socket, true)
 	client, err := application.NewSidecarClient("unix://"+socket, "shared-secret", 5*time.Second)
 	if err != nil {
@@ -173,7 +187,7 @@ func TestSidecarClientRefusesNonLoopbackEndpoints(t *testing.T) {
 }
 
 func TestSidecarClientReportsUnhealthy(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
+	socket := testSocketPath(t)
 	newFakeSidecar(t, socket, false)
 	client, err := application.NewSidecarClient("unix://"+socket, "secret", 2*time.Second)
 	if err != nil {
@@ -287,7 +301,7 @@ func indexOf(haystack, needle string) int {
 // systemd owns the process, and this one only decides whether the fallback can be offered. What it must
 // NOT do is start a child, signal one, or delete a socket file it did not create.
 func TestExternallyManagedSidecarIsProbedNotOwned(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
+	socket := testSocketPath(t)
 	fake := newFakeSidecar(t, socket, true)
 	supervisor, err := NewSidecar(config.Config{
 		SidecarEnabled: true, SidecarSpawn: false, SidecarSecret: "shared-secret",
