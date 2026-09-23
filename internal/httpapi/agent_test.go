@@ -21,8 +21,15 @@ import (
 func startAgentWorker(t *testing.T, api testAPI) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	go api.worker.Run(ctx)
-	return cancel
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		api.worker.Run(ctx)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // agentSecondToken creates a member user and returns a valid access token, used
