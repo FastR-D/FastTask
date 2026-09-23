@@ -9,7 +9,7 @@ declare let self: ServiceWorkerGlobalScope
 
 import { cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute } from 'workbox-precaching'
 import { NavigationRoute, registerRoute } from 'workbox-routing'
-import { NetworkFirst, NetworkOnly, StaleWhileRevalidate } from 'workbox-strategies'
+import { NetworkFirst, NetworkOnly } from 'workbox-strategies'
 import { CacheableResponsePlugin } from 'workbox-cacheable-response'
 import { ExpirationPlugin } from 'workbox-expiration'
 import { AGENT_RE, SNAPSHOT_RE, userScopedCacheKey } from './pwa/cacheKey'
@@ -42,14 +42,17 @@ registerRoute(new NavigationRoute(async options => {
 // (pwa.md §3.2: "/api/v1/agent/** NetworkOnly，且必须显式排除").
 registerRoute(({ url }) => AGENT_RE.test(url.pathname), new NetworkOnly())
 
-// Per-user read snapshots → StaleWhileRevalidate (pwa.md §3.2). The cache key is
+// Per-user read snapshots → NetworkFirst (pwa.md §3.2). A stale-while-revalidate
+// response can leave a newly mounted goal or plan view showing old data even
+// after the background refresh completes. The cache key is
 // namespaced by the authenticated user so a shared device never serves one
 // user's stale plan/goals/task-tree to another. Only the cache KEY is scoped; the
 // network request is sent unchanged. Bounded by entry count and age.
 registerRoute(
   ({ request, url }) => request.method === 'GET' && SNAPSHOT_RE.test(url.pathname),
-  new StaleWhileRevalidate({
+  new NetworkFirst({
     cacheName: 'ft-api-snapshots',
+    networkTimeoutSeconds: 3,
     plugins: [
       {
         cacheKeyWillBeUsed: async ({ request }) =>
