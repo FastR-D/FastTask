@@ -871,6 +871,19 @@ func (a testAPI) createGoalAndTask(t *testing.T, key string) (persistence.Goal, 
 	return goal, task
 }
 
+func TestGoalRefreshQueriesAfterMutation(t *testing.T) {
+	api := newTestAPI(t)
+	goal, _ := api.createGoalAndTask(t, "refresh-query")
+	list := api.do(t, http.MethodGet, "/api/v1/goals?_refresh=qa", nil, nil)
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), goal.ID) {
+		t.Fatalf("fresh goals=%d %s", list.Code, list.Body.String())
+	}
+	tree := api.do(t, http.MethodGet, "/api/v1/goals/"+goal.ID+"/task-tree?_refresh=qa", nil, nil)
+	if tree.Code != http.StatusOK {
+		t.Fatalf("fresh task tree=%d %s", tree.Code, tree.Body.String())
+	}
+}
+
 func TestLensContract(t *testing.T) {
 	api := newTestAPI(t)
 
