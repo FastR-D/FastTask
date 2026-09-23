@@ -13,10 +13,10 @@
      stretch the whole page past the viewport; 0 lets the column stay at the
      container width and the table's own scroll box absorbs the overflow. */
   min-width: 0;
-  gap: .5rem;
+  gap: var(--ft-space-3);
 }
 
-.agent-loading { padding: 2rem; color: rgb(var(--mdui-color-on-surface-variant)); }
+.agent-loading { padding: var(--ft-space-5); color: rgb(var(--mdui-color-on-surface-variant)); }
 
 .agent-viewport {
   flex: 1 1 auto;
@@ -25,53 +25,52 @@
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: .75rem;
-  padding: .25rem .25rem .5rem;
+  gap: var(--ft-space-4);
+  padding: var(--ft-space-3) 0 var(--ft-space-4);
 }
 
 .agent-empty {
   margin: auto;
   display: grid;
   justify-items: center;
-  gap: .6rem;
-  padding: 2rem 1rem;
+  gap: var(--ft-space-2);
+  padding: var(--ft-space-5) var(--ft-space-4);
   text-align: center;
   color: rgb(var(--mdui-color-on-surface-variant));
 }
-.agent-empty mdui-icon { font-size: 2.4rem; color: rgb(var(--mdui-color-primary)); }
+.agent-empty mdui-icon { font-size: 1.75rem; color: rgb(var(--mdui-color-on-surface-variant)); }
 .agent-empty p {
   max-width: 30rem;
-  font-size: var(--mdui-typescale-body-large-size);
+  font-size: var(--mdui-typescale-body-medium-size);
   line-height: 1.7;
 }
 
 .agent-msg { display: flex; width: 100%; min-width: 0; }
 .agent-msg-user { justify-content: flex-end; }
 .agent-msg-assistant { justify-content: flex-start; }
+/* Both sides share the reading measure; only the user side is a bubble. A model reply is
+   a document — headings, tables, code, an approval card — and wrapping 700px of that in a
+   grey rounded box turns typeset content into a chat sticker (AGENTS.md: assistant-ui). */
 .agent-bubble {
   max-width: min(46rem, 88%);
   /* Flex items default to `min-width: auto`, i.e. they refuse to shrink below
-     their min-content width. Once markdown tables keep their natural width that
-     min-content can exceed the viewport on a 400px screen, and min-width beats
-     max-width — so the bubble would overflow. Zeroing it lets max-width win and
-     the inner scroll containers absorb the overflow instead. */
+      their min-content width. Once markdown tables keep their natural width that
+      min-content can exceed the viewport on a 400px screen, and min-width beats
+      max-width — so the bubble would overflow. Zeroing it lets max-width win and
+      the inner scroll containers absorb the overflow instead. */
   min-width: 0;
-  padding: .6rem .9rem;
-  border-radius: var(--mdui-shape-corner-large);
-  font-size: var(--mdui-typescale-body-medium-size);
-  line-height: 1.65;
+  font-size: var(--mdui-typescale-body-large-size);
+  line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
 }
 .agent-msg-user .agent-bubble {
-  background: rgb(var(--mdui-color-primary));
-  color: rgb(var(--mdui-color-on-primary));
-  border-bottom-right-radius: var(--mdui-shape-corner-extra-small);
-}
-.agent-msg-assistant .agent-bubble {
-  background: rgb(var(--mdui-color-surface-container));
+  padding: var(--ft-space-2) var(--ft-space-3);
+  border-radius: var(--mdui-shape-corner-medium);
+  background: rgb(var(--mdui-color-surface-container-high));
   color: rgb(var(--mdui-color-on-surface));
-  border-bottom-left-radius: var(--mdui-shape-corner-extra-small);
+  font-size: var(--mdui-typescale-body-medium-size);
+  line-height: 1.6;
 }
 
 /* Markdown rendering of model replies (agent/Markdown.tsx). ADR-0004: every
@@ -89,38 +88,39 @@
 .agent-md ol,
 .agent-md blockquote,
 .agent-md .agent-md-table,
-.agent-md pre { margin: 0 0 .6rem; }
-.agent-md ul, .agent-md ol { padding-inline-start: 1.4rem; }
-.agent-md li { margin: .15rem 0; }
-.agent-md li > ul, .agent-md li > ol { margin: .15rem 0; }
+.agent-md pre { margin: 0 0 var(--ft-space-3); }
+.agent-md ul, .agent-md ol { padding-inline-start: var(--ft-space-5); }
+.agent-md li { margin: var(--ft-space-1) 0; }
+.agent-md li > ul, .agent-md li > ol { margin: var(--ft-space-1) 0; }
 /* remark-gfm renders `- [x]` as li.task-list-item holding a disabled checkbox;
    the bullet would otherwise sit behind the box. The class is used rather than
    :has() so the rule does not depend on selector support. */
 .agent-md li.task-list-item { list-style: none; margin-inline-start: -1.1rem; }
-.agent-md li.task-list-item > input[type='checkbox'] { margin-inline-end: .35rem; accent-color: rgb(var(--mdui-color-primary)); }
+.agent-md li.task-list-item > input[type='checkbox'] { margin-inline-end: var(--ft-space-1); accent-color: rgb(var(--mdui-color-primary)); }
 
+/* A reply is read like a document, so the heading ladder has to carry the structure:
+   every step is one mdui typescale token above the next, and body text is body-large. */
 .agent-md h1, .agent-md h2, .agent-md h3,
 .agent-md h4, .agent-md h5, .agent-md h6 {
-  margin: .9rem 0 .4rem;
-  font-weight: var(--mdui-typescale-title-medium-weight, 500);
+  margin: var(--ft-space-5) 0 var(--ft-space-2);
   line-height: 1.35;
   overflow-wrap: break-word;
 }
-.agent-md h1 { font-size: var(--mdui-typescale-headline-small-size); }
-.agent-md h2 { font-size: var(--mdui-typescale-title-large-size); }
-.agent-md h3 { font-size: var(--mdui-typescale-title-medium-size); }
-.agent-md h4, .agent-md h5, .agent-md h6 { font-size: var(--mdui-typescale-title-small-size); }
-.agent-md h2 { padding-block-end: .25rem; border-block-end: 1px solid rgb(var(--mdui-color-outline-variant)); }
+/* mdui's headline weights are 400, which would put an h1 below an h3 in the ladder. */
+.agent-md h1 { font-size: var(--mdui-typescale-headline-medium-size); font-weight: 500; }
+.agent-md h2 { font-size: var(--mdui-typescale-headline-small-size); font-weight: 500; padding-block-end: var(--ft-space-1); border-block-end: 1px solid rgb(var(--mdui-color-outline-variant)); }
+.agent-md h3 { font-size: var(--mdui-typescale-title-large-size); font-weight: 500; }
+.agent-md h4, .agent-md h5, .agent-md h6 { font-size: var(--mdui-typescale-title-medium-size); font-weight: 600; }
 
 .agent-md a { color: rgb(var(--mdui-color-primary)); text-decoration: underline; overflow-wrap: anywhere; }
-.agent-md strong { font-weight: var(--mdui-typescale-label-large-weight, 600); }
+.agent-md strong { font-weight: 600; }
 .agent-md del { color: rgb(var(--mdui-color-on-surface-variant)); }
-.agent-md hr { margin: .8rem 0; border: none; border-block-start: 1px solid rgb(var(--mdui-color-outline-variant)); }
+.agent-md hr { margin: var(--ft-space-4) 0; border: none; border-block-start: 1px solid rgb(var(--mdui-color-outline-variant)); }
 .agent-md img { max-width: 100%; height: auto; border-radius: var(--mdui-shape-corner-small); }
 
 .agent-md blockquote {
-  padding-inline-start: .7rem;
-  border-inline-start: 3px solid rgb(var(--mdui-color-outline-variant));
+  padding-inline-start: var(--ft-space-3);
+  border-inline-start: 2px solid rgb(var(--mdui-color-outline-variant));
   color: rgb(var(--mdui-color-on-surface-variant));
 }
 
@@ -132,7 +132,7 @@
   overflow-wrap: anywhere;
 }
 .agent-md pre {
-  padding: .7rem .8rem;
+  padding: var(--ft-space-3);
   border-radius: var(--mdui-shape-corner-medium);
   background: rgb(var(--mdui-color-surface-container-highest));
   color: rgb(var(--mdui-color-on-surface));
@@ -150,56 +150,40 @@
 }
 
 /* GFM tables cannot shrink to 400px (frontend.md §7), so the block scrolls
-   sideways inside the bubble instead of pushing the layout wider. */
+   sideways inside the message instead of pushing the layout wider. */
 .agent-md-table { display: block; min-width: 0; max-width: 100%; overflow-x: auto; }
 .agent-md table { border-collapse: collapse; width: 100%; font-size: var(--mdui-typescale-body-small-size); }
 .agent-md th, .agent-md td {
-  padding: .35rem .6rem;
+  padding: var(--ft-space-1) var(--ft-space-3);
   border: 1px solid rgb(var(--mdui-color-outline-variant));
   text-align: start;
-  /* The bubble's `word-break: break-word` would otherwise let a cell collapse
-     around its longest token, so the table always "fits" and the scroll
-     container above never engages. Cells keep their natural width (CJK still
-     wraps between characters) and the wrapper scrolls instead. */
+  /* The message's `word-break: break-word` would otherwise let a cell collapse
+      around its longest token, so the table always "fits" and the scroll
+      container above never engages. Cells keep their natural width (CJK still
+      wraps between characters) and the wrapper scrolls instead. */
   word-break: normal;
   overflow-wrap: normal;
 }
 .agent-md th {
   background: rgb(var(--mdui-color-surface-container-high));
-  font-weight: var(--mdui-typescale-label-large-weight, 600);
+  font-weight: 600;
 }
 .agent-md tbody tr:nth-child(even) { background: rgb(var(--mdui-color-surface-container-low)); }
 
-/* The user bubble sits on --mdui-color-primary, so every surface/foreground
-   token the rules above pick (surface-container-high, on-surface-variant,
-   outline-variant, primary links) would land on the wrong side of the contrast
-   pair. Inside it the scheme inverts: on-primary becomes the surface and primary
-   becomes the ink. Solid tokens only — ADR-0004 §4.2 permits no literal color,
-   and neither mdui nor this repo uses rgb() alpha anywhere. */
-.agent-msg-user .agent-md a { color: rgb(var(--mdui-color-on-primary)); }
-.agent-msg-user .agent-md del,
-.agent-msg-user .agent-md blockquote { color: rgb(var(--mdui-color-on-primary)); }
-.agent-msg-user .agent-md blockquote,
-.agent-msg-user .agent-md hr,
-.agent-msg-user .agent-md h2 { border-color: rgb(var(--mdui-color-on-primary)); }
+
+/* The user bubble sits on surface-container-high, which is the same token the rules above
+   use for inline code and table headers — inside the bubble those need one step up, or they
+   disappear. Everything else (links, quotes, zebra rows) already contrasts against it. */
 .agent-msg-user .agent-md :not(pre) > code,
-.agent-msg-user .agent-md pre,
-.agent-msg-user .agent-md th {
-  background: rgb(var(--mdui-color-on-primary));
-  color: rgb(var(--mdui-color-primary));
-}
-.agent-msg-user .agent-md pre code { color: rgb(var(--mdui-color-primary)); }
-.agent-msg-user .agent-md th, .agent-msg-user .agent-md td { border-color: rgb(var(--mdui-color-on-primary)); }
-.agent-msg-user .agent-md tbody tr:nth-child(even) { background: transparent; }
-.agent-msg-user .agent-md li.task-list-item > input[type='checkbox'] { accent-color: rgb(var(--mdui-color-on-primary)); }
+.agent-msg-user .agent-md th { background: rgb(var(--mdui-color-surface-container-highest)); }
 
 /* Proposal approval card (agent-impl.md §7.1). */
 .agent-proposal {
   display: grid;
-  gap: .6rem;
-  margin: .35rem 0;
-  padding: .9rem 1rem;
-  border-radius: var(--mdui-shape-corner-large);
+  gap: var(--ft-space-3);
+  margin: var(--ft-space-3) 0;
+  padding: var(--ft-space-4);
+  border-radius: var(--mdui-shape-corner-medium);
   background: rgb(var(--mdui-color-surface-container-low));
   border: 1px solid rgb(var(--mdui-color-outline-variant));
   color: rgb(var(--mdui-color-on-surface));
@@ -208,7 +192,7 @@
 .agent-proposal-head {
   display: flex;
   align-items: center;
-  gap: .5rem;
+  gap: var(--ft-space-2);
   font-size: var(--mdui-typescale-label-large-size);
 }
 .agent-proposal-head mdui-icon { color: rgb(var(--mdui-color-primary)); }
@@ -216,31 +200,36 @@
 .agent-proposal-body { font-size: var(--mdui-typescale-body-medium-size); line-height: 1.6; }
 .agent-proposal-count { color: rgb(var(--mdui-color-on-surface-variant)); font-size: var(--mdui-typescale-label-large-size); }
 .agent-proposal-reason { font-size: var(--mdui-typescale-body-small-size); color: rgb(var(--mdui-color-on-surface-variant)); }
-.agent-proposal-actions { display: grid; gap: .6rem; }
-.agent-proposal-buttons { display: flex; gap: .5rem; flex-wrap: wrap; }
+/* One row, not three: the optional rejection reason and the two decisions belong to a single
+   act of deciding, and a 56px field stacked above 40px of buttons made the card mostly chrome. */
+.agent-proposal-actions { display: flex; gap: var(--ft-space-2); align-items: center; flex-wrap: wrap; }
+.agent-proposal-actions mdui-text-field { flex: 1 1 14rem; min-width: 0; }
+.agent-proposal-buttons { display: flex; gap: var(--ft-space-2); flex-wrap: wrap; margin-inline-start: auto; }
 
 /* Composer. */
 .agent-composer {
   display: flex;
   align-items: flex-end;
-  gap: .35rem;
-  padding: .4rem;
+  gap: var(--ft-space-1);
+  padding: var(--ft-space-1);
   border-radius: var(--mdui-shape-corner-extra-large);
   background: rgb(var(--mdui-color-surface-container));
   border: 1px solid rgb(var(--mdui-color-outline-variant));
 }
+/* The textarea has no outline of its own, so the pill it lives in is the focus indicator. */
+.agent-composer:focus-within { border-color: rgb(var(--mdui-color-primary)); }
 .agent-input {
   flex: 1 1 auto;
   min-width: 0;
   max-height: 9rem;
-  padding: .6rem .5rem;
+  padding: var(--ft-space-2);
   resize: none;
   border: none;
   outline: none;
   background: transparent;
   color: rgb(var(--mdui-color-on-surface));
   font-family: inherit;
-  font-size: var(--mdui-typescale-body-medium-size);
+  font-size: var(--mdui-typescale-body-large-size);
   line-height: 1.5;
 }
 .agent-input::placeholder { color: rgb(var(--mdui-color-on-surface-variant)); }
@@ -248,125 +237,156 @@
   flex: none;
   display: grid;
   place-items: center;
-  width: 2.4rem;
-  height: 2.4rem;
+  width: 2.5rem;
+  height: 2.5rem;
   border: none;
   cursor: pointer;
   border-radius: var(--mdui-shape-corner-full);
   background: transparent;
   color: rgb(var(--mdui-color-on-surface-variant));
 }
+.agent-composer-btn:hover { background: rgba(var(--mdui-color-on-surface-variant), var(--mdui-state-layer-hover)); }
+.agent-composer-btn:focus-visible { outline: 2px solid rgb(var(--mdui-color-primary)); outline-offset: -2px; }
+.agent-composer-btn:disabled { cursor: default; }
 .agent-send { background: rgb(var(--mdui-color-primary)); color: rgb(var(--mdui-color-on-primary)); }
-.agent-send:disabled { opacity: .4; cursor: default; }
+.agent-send:hover { background: rgb(var(--mdui-color-primary)); }
+.agent-send:disabled { opacity: .4; }
+/* assistant-ui renders Cancel at all times and disables it when nothing is running; a
+   full-contrast control that cannot be used is noise, so it only appears mid-run. */
+.agent-cancel:disabled { display: none; }
 .agent-mic.recording { color: rgb(var(--mdui-color-error)); }
 
 /* Narrow screens (pwa.md §8: usable at 400px, no horizontal scroll). */
 @media (max-width: 599.98px) {
-  .agent-bubble { max-width: 92%; }
+  .agent-bubble { max-width: 100%; }
+  .agent-msg-user .agent-bubble { max-width: 92%; }
   .agent-proposal-buttons mdui-button { flex: 1 1 auto; }
 }
 
+/* The composer's pending attachments: what will be sent has to be visible and removable. */
+.agent-composer-attachment {
+  display: flex;
+  align-items: center;
+  gap: var(--ft-space-1);
+  max-inline-size: 12rem;
+  padding: var(--ft-space-1) var(--ft-space-2);
+  border-radius: var(--mdui-shape-corner-small);
+  background: rgb(var(--mdui-color-surface-container-high));
+  font-size: var(--mdui-typescale-label-medium-size);
+}
+.agent-composer-attachment-name { display: flex; align-items: center; gap: var(--ft-space-1); min-inline-size: 0; overflow: hidden; }
+.agent-composer-attachment-name mdui-icon { flex: none; font-size: 1rem; color: rgb(var(--mdui-color-on-surface-variant)); }
+.agent-composer-attachment-remove {
+  flex: none; display: grid; place-items: center; padding: 2px;
+  border: 0; background: transparent; cursor: pointer;
+  border-radius: var(--mdui-shape-corner-full);
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+.agent-composer-attachment-remove:hover { color: rgb(var(--mdui-color-on-surface)); }
+.agent-composer-attachment-remove mdui-icon { font-size: 1rem; }
+
 /* The harness bar (doc/harness.md §3.2, §15): the status line and the host switch sit together because
-   they answer one question — where the agent is running, and whether the user wants it somewhere else. */
+   they answer one question — where the agent is running, and whether the user wants it somewhere else.
+   Every color below is rgb(var(--mdui-color-*)): mdui's color tokens are bare triplets, so a bare var()
+   is not a color and the whole declaration is dropped (ADR-0004 §4.2). */
 .agent-harness-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--mdui-spacing-small, 4px);
+  gap: var(--ft-space-2);
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid var(--mdui-color-outline-variant);
+  padding-block-end: var(--ft-space-2);
+  border-bottom: 1px solid rgb(var(--mdui-color-outline-variant));
 }
 
 /* The status line itself: a degradation is stated, never implied. */
 .agent-harness {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--mdui-spacing-small, 4px);
+  gap: var(--ft-space-2);
   align-items: center;
-  padding: var(--mdui-spacing-small, 4px) var(--mdui-spacing-medium, 8px);
-  font-size: var(--mdui-typescale-label-medium-size, 12px);
-  color: var(--mdui-color-on-surface-variant);
+  padding: var(--ft-space-1) 0;
+  font-size: var(--mdui-typescale-label-medium-size);
+  color: rgb(var(--mdui-color-on-surface-variant));
 }
 
-/* The switch is a setting, so it is compact: it must not outshout the conversation it belongs to. */
+/* The switch is a setting, so it is compact and always sits at the end of the bar: while the probe is
+   still idle there is no status line, and a lone control floating on the left looks like a mistake. */
 .agent-harness-choice {
   flex: 0 1 auto;
   min-width: 8rem;
   max-width: 12rem;
-  margin-inline-end: var(--mdui-spacing-medium, 8px);
+  margin-inline-start: auto;
 }
 
-.agent-harness.degraded {
-  color: var(--mdui-color-error);
-}
-
-.agent-harness-mode {
-  font-weight: 600;
-}
-
+.agent-harness.degraded { color: rgb(var(--mdui-color-error)); }
+.agent-harness-mode { font-weight: 600; }
 .agent-harness-reason,
 .agent-harness-detail,
 .agent-harness-degraded,
-.agent-harness-error {
-  opacity: 0.85;
-}
+.agent-harness-error { opacity: 0.85; }
 
 /* An offline composer is visibly disabled, not silently broken (doc/harness.md §9.3). */
-.agent-composer.offline {
-  opacity: 0.6;
-}
+.agent-composer.offline { opacity: 0.6; }
 
-/* A chain of thought is folded away by default (doc/chat-features.md §3.4). */
+/* A chain of thought is folded away by default (doc/chat-features.md §3.4) and reads as metadata:
+   smaller, muted, ruled — not as part of the answer. */
 .agent-reasoning {
-  margin: var(--mdui-spacing-small, 4px) 0;
-  border-inline-start: 2px solid var(--mdui-color-outline-variant);
-  padding-inline-start: var(--mdui-spacing-medium, 8px);
-  color: var(--mdui-color-on-surface-variant);
-  font-size: var(--mdui-typescale-body-small-size, 13px);
+  margin: 0 0 var(--ft-space-3);
+  border-inline-start: 2px solid rgb(var(--mdui-color-outline-variant));
+  padding-inline-start: var(--ft-space-3);
+  color: rgb(var(--mdui-color-on-surface-variant));
+  font-size: var(--mdui-typescale-body-small-size);
 }
 
 .agent-reasoning-summary {
   display: flex;
   align-items: center;
-  gap: var(--mdui-spacing-small, 4px);
+  gap: var(--ft-space-2);
   cursor: pointer;
   list-style: none;
 }
+.agent-reasoning-summary:hover { color: rgb(var(--mdui-color-on-surface)); }
+.agent-reasoning-summary:focus-visible { outline: 2px solid rgb(var(--mdui-color-primary)); outline-offset: 2px; }
 
 .agent-reasoning-body {
   white-space: pre-wrap;
-  margin-top: var(--mdui-spacing-small, 4px);
+  margin-top: var(--ft-space-1);
 }
 
 /* Attached images in a sent message. */
 .agent-bubble img {
   max-width: 100%;
-  border-radius: var(--mdui-shape-corner-medium, 12px);
+  border-radius: var(--mdui-shape-corner-medium);
 }
 
 /* Multi-session layout: the conversation list beside the thread (doc/chat-features.md §2). */
 .agent-layout {
   display: flex;
-  gap: var(--mdui-spacing-medium, 8px);
+  gap: var(--ft-space-4);
   align-items: stretch;
   min-height: 0;
+  /* .page-dialogue's only grid track is `auto`, so without this the track is sized by the layout's
+     max-content: a wide markdown table then pushes the whole chat past the viewport. Measured on a
+     400px window before the fix — .agent-layout 466px wide, .app-main scrollWidth 482 vs 400. */
+  min-width: 0;
   flex: 1;
 }
 
 .agent-threads {
   display: flex;
   flex-direction: column;
-  gap: var(--mdui-spacing-small, 4px);
+  gap: var(--ft-space-2);
   inline-size: 15rem;
   flex: 0 0 auto;
-  border-inline-end: 1px solid var(--mdui-color-outline-variant);
-  padding-inline-end: var(--mdui-spacing-medium, 8px);
+  border-inline-end: 1px solid rgb(var(--mdui-color-outline-variant));
+  padding-inline-end: var(--ft-space-3);
   overflow-y: auto;
 }
 
 .agent-threads-head {
   display: flex;
-  gap: var(--mdui-spacing-small, 4px);
+  gap: var(--ft-space-2);
   align-items: center;
 }
 
@@ -380,30 +400,37 @@
 }
 
 .agent-thread {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: var(--mdui-spacing-small, 4px);
-  border-radius: var(--mdui-shape-corner-small, 8px);
+  gap: var(--ft-space-1);
+  border-radius: var(--mdui-shape-corner-small);
 }
 
-.agent-thread.active {
-  background: var(--mdui-color-secondary-container);
-}
+/* The row paints the state, not the button inside it, so the actions can borrow the same
+   surface when they overlay it. */
+.agent-thread:hover, .agent-thread:focus-within { background: rgb(var(--mdui-color-surface-container-low)); }
+.agent-thread.active,
+.agent-thread.active:hover,
+.agent-thread.active:focus-within { background: rgb(var(--mdui-color-secondary-container)); }
 
 .agent-thread-open {
   display: flex;
   align-items: center;
-  gap: var(--mdui-spacing-small, 4px);
+  gap: var(--ft-space-2);
   flex: 1;
   min-inline-size: 0;
-  padding: var(--mdui-spacing-small, 4px);
+  padding: var(--ft-space-2);
   border: 0;
+  border-radius: var(--mdui-shape-corner-small);
   background: transparent;
   color: inherit;
   font: inherit;
+  font-size: var(--mdui-typescale-body-medium-size);
   text-align: start;
   cursor: pointer;
 }
+.agent-thread-open:focus-visible { outline: 2px solid rgb(var(--mdui-color-primary)); outline-offset: -2px; }
 
 .agent-thread-title {
   overflow: hidden;
@@ -413,30 +440,54 @@
 }
 
 .agent-thread-when {
-  font-size: var(--mdui-typescale-label-small-size, 11px);
-  color: var(--mdui-color-on-surface-variant);
+  font-size: var(--mdui-typescale-label-small-size);
+  color: rgb(var(--mdui-color-on-surface-variant));
 }
 
+/* The row is 15rem wide; four icons in flow would leave the title 33px. They overlay the row's
+   end instead and borrow whatever surface the row is painting, so the title keeps its width. */
 .agent-thread-actions {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
   display: flex;
+  align-items: center;
   gap: 2px;
-  opacity: 0;
-}
-
-.agent-thread:hover .agent-thread-actions,
-.agent-thread:focus-within .agent-thread-actions {
-  opacity: 1;
+  padding-inline-start: var(--ft-space-3);
+  background: inherit;
+  border-radius: var(--mdui-shape-corner-small);
 }
 
 .agent-thread-actions mdui-icon {
   cursor: pointer;
-  font-size: 18px;
+  font-size: 1.125rem;
+  padding: var(--ft-space-1);
+  border-radius: var(--mdui-shape-corner-small);
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+.agent-thread-actions mdui-icon:hover {
+  background: rgba(var(--mdui-color-on-surface), var(--mdui-state-layer-hover));
+  color: rgb(var(--mdui-color-on-surface));
+}
+
+/* A pointer has hover, a finger does not: with a pointer the actions appear on the row, with a
+   finger they are always there and carry their own opaque backdrop. */
+@media (hover: hover) {
+  /* pointer-events has to go with the opacity: the actions overlay the row's click target, so an
+     invisible-but-clickable archive/delete icon would sit under the user's cursor. */
+  .agent-thread-actions { opacity: 0; pointer-events: none; }
+  .agent-thread:hover .agent-thread-actions,
+  .agent-thread:focus-within .agent-thread-actions { opacity: 1; pointer-events: auto; }
+}
+@media (hover: none) {
+  .agent-thread-actions { background: rgb(var(--mdui-color-background)); }
+  .agent-thread.active .agent-thread-actions { background: rgb(var(--mdui-color-secondary-container)); }
 }
 
 .agent-thread-empty {
-  padding: var(--mdui-spacing-medium, 8px);
-  color: var(--mdui-color-on-surface-variant);
-  font-size: var(--mdui-typescale-body-small-size, 13px);
+  padding: var(--ft-space-2);
+  color: rgb(var(--mdui-color-on-surface-variant));
+  font-size: var(--mdui-typescale-body-small-size);
 }
 
 .agent-main {
@@ -449,7 +500,7 @@
 
 .agent-attachment {
   max-inline-size: 100%;
-  border-radius: var(--mdui-shape-corner-medium, 12px);
+  border-radius: var(--mdui-shape-corner-medium);
 }
 
 @media (max-width: 720px) {
@@ -461,8 +512,9 @@
   .agent-threads {
     inline-size: auto;
     border-inline-end: 0;
-    border-block-end: 1px solid var(--mdui-color-outline-variant);
+    border-block-end: 1px solid rgb(var(--mdui-color-outline-variant));
     padding-inline-end: 0;
+    padding-block-end: var(--ft-space-2);
     max-block-size: 30vh;
   }
 }
