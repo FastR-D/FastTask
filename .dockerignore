@@ -1,0 +1,32 @@
+# Build context for `docker build .` (see Dockerfile).
+#
+# Two rules decide what is listed here:
+#   1. Never send the host's build artifacts into the image. `web/dist` and `sidecar/dist` are rebuilt
+#      inside their own stages; a stale host bundle copied in by `COPY . .` would silently ship.
+#   2. Never send state or secrets into a layer. `data/` holds a development SQLite database (with real
+#      rows) and `.env` holds secrets; both would be baked into the image history.
+#
+# Anything not matched here reaches the Go stage's `COPY . .`, which is why this file lists directories
+# rather than trying to allowlist sources.
+
+.git
+.github
+.opencode
+.env
+.env.*
+
+bin/
+data/
+backups/
+doc/
+
+web/node_modules/
+web/dist/
+web/dist.new/
+sidecar/node_modules/
+sidecar/dist/
+
+*.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo
