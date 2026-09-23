@@ -138,12 +138,12 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
                 }}
               />
             ) : (
+              // No timestamp in the row: the list is already ordered by recency, and the actions
+              // overlay the row's end — on touch they are permanently opaque, so a date there is
+              // invisible space the title pays for (measured: 56px reserved, title clipped to 115px).
               <button type="button" className="agent-thread-open" onClick={() => onOpen(thread.id)}>
                 <mdui-icon name="forum" />
                 <span className="agent-thread-title">{thread.title}</span>
-                {thread.lastMessageAt && (
-                  <span className="agent-thread-when">{thread.lastMessageAt.toLocaleDateString()}</span>
-                )}
               </button>
             )}
             <span className="agent-thread-actions">

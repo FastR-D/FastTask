@@ -96,6 +96,7 @@ export function HarnessModeControl() {
   return (
     <mdui-select
       className="agent-harness-choice"
+      variant="outlined"
       label="运行位置"
       value={preference}
       onChange={event => choose(fieldValue(event) as ModePreference)}

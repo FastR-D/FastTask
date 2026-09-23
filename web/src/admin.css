@@ -1,10 +1,10 @@
 .admin-tabs{margin-bottom:var(--ft-space-5)}
 .admin-layout{display:grid;grid-template-columns:20rem minmax(0,1fr);gap:var(--ft-space-5);align-items:start}
-.admin-form{
-  padding:var(--ft-space-4);display:grid;gap:var(--ft-space-4);align-content:start;
-  border-radius:var(--mdui-shape-corner-medium);
-  background:rgb(var(--mdui-color-surface-container-low));
-}
+/* The create form is a column of outlined fields, not a tinted panel: the fields already draw their own
+   boxes, so a filled surface behind them is a third boundary — and mdui paints an outlined field's
+   floated-label notch with --mdui-color-background, which on a tinted panel leaves a mismatched patch
+   behind any label that has floated (measured: rgb(254,247,255) on rgb(247,242,250)). */
+.admin-form{display:grid;gap:var(--ft-space-4);align-content:start}
 .admin-form h2{font-size:var(--mdui-typescale-title-medium-size);font-weight:500}
 .admin-form small{color:rgb(var(--mdui-color-on-surface-variant));line-height:1.55;font-size:var(--mdui-typescale-body-small-size)}
 .admin-content{min-width:0;display:grid;gap:var(--ft-space-5)}
@@ -16,7 +16,10 @@
 .admin-card header{display:flex;justify-content:space-between;gap:var(--ft-space-4)}
 .admin-card h3{font-size:var(--mdui-typescale-title-small-size);line-height:var(--mdui-typescale-title-small-line-height);font-weight:500;margin:var(--ft-space-1) 0}
 .admin-card small{color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-small-size)}
-.admin-card p{margin:var(--ft-space-1) 0;font-size:var(--mdui-typescale-body-medium-size)}
+/* Child selector: `.admin-card p` outranks `.eyebrow` and was silently resizing the card's metadata line
+   to the h3's 14px, so the role/status caption read as a second title. */
+.admin-card>p{margin:var(--ft-space-1) 0;font-size:var(--mdui-typescale-body-medium-size)}
+.admin-card .eyebrow{letter-spacing:.04em}
 .admin-actions{display:flex;flex-wrap:wrap;gap:var(--ft-space-2);margin-top:auto}
 .provider-url{word-break:break-all;color:rgb(var(--mdui-color-on-surface-variant))}
 .edit-stack{display:grid;gap:var(--ft-space-3)}
