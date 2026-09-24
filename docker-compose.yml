@@ -1,0 +1,60 @@
+# Production deployment (doc/tech.md §21.5, README「Docker 部署」).
+#
+# Compose reads `.env` from this directory for both interpolation and the container's
+# environment, so the operator's secrets stay in one file that is already gitignored. Two
+# variables in it exist for this file alone: DOCKER_NAME and DOCKER_DATA_PATH.
+#
+# Two values in `.env` are host-shaped and are overridden below, because passing them
+# through unchanged breaks the container in a way that looks like an application bug:
+#
+#   FASTTASK_LISTEN      the host address the reverse proxy targets. Inside a network
+#                        namespace the server has to bind every interface, or the published
+#                        port forwards to nothing; the host-side address belongs in `ports`.
+#   OPENAI_API_BASE_URL  `localhost` inside a container is the container. The gateway is a
+#                        host-published port, so it is reached through the host gateway.
+#
+# The bind mount arrives root-owned and the container runs as the unprivileged `fasttask`
+# user, so the data directory has to belong to that user's uid:gid on the host — see
+# README「Docker 部署」for the one-time chown. Running `--user 0` instead is supported by the
+# entrypoint (it chowns and then drops privileges) but is a repair mode, not the default.
+
+name: ${DOCKER_NAME:-fasttask}
+
+services:
+  fasttask:
+    build:
+      context: .
+      # Pinned in the Dockerfile; override only to track a different FastCAS SDK commit.
+      args:
+        FASTCAS_REF: ${FASTCAS_REF:-676d49b18f700c009f1f491280a93de7da294836}
+        # The default module proxy is not reachable from this network; the host's own Go
+        # toolchain is configured the same way (go env GOPROXY).
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+        # Same reason: the Alpine CDN measured 19s against this mirror's 1s for one index file.
+        APK_MIRROR: ${APK_MIRROR:-mirrors.aliyun.com}
+    image: ${DOCKER_NAME:-fasttask}:local
+    container_name: ${DOCKER_NAME:-fasttask}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      FASTTASK_LISTEN: 0.0.0.0
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL_CONTAINER:-http://host.docker.internal:3000/v1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # Same host address and port the previous bare-binary deployment used, so the reverse
+      # proxy in front of FASTTASK_PUBLIC_URL does not change.
+      - "${FASTTASK_LISTEN:-127.0.0.1}:${FASTTASK_PORT:-10000}:10000"
+    volumes:
+      # One directory holds the database, its WAL, audio awaiting transcription and image
+      # attachments: everything the server writes. Backups go under it too, so the
+      # `fasttask backup` command has somewhere writable that is already owned correctly.
+      - ${DOCKER_DATA_PATH:-/root/dockerData/fasttask}:/var/lib/fasttask
+    # The graceful shutdown budget is 15s (internal/bootstrap/module.go); Docker must wait
+    # longer than that, or a draining server is killed mid-drain.
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
