@@ -144,9 +144,17 @@ export function NotificationAdmin({ onNotice }: { onNotice: (value: string) => v
     await loadTargets()
     await loadMessages()
   }
+  // act runs one mutation, then reloads everything the operator is looking at so no panel
+  // can show a stale revision. A run that returns a string reports its own outcome — the
+  // dispatcher's counts, say — and that replaces the generic message rather than being
+  // overwritten by it a millisecond later.
   async function act(key: string, run: () => Promise<unknown>, done: string) {
     setBusy(key)
-    try { await run(); onNotice(done); await after() } catch (e) { onNotice(errorText(e)) } finally { setBusy('') }
+    try {
+      const result = await run()
+      onNotice(typeof result === 'string' && result ? result : done)
+      await after()
+    } catch (e) { onNotice(errorText(e)) } finally { setBusy('') }
   }
 
   function setting(key: string) { return draft.settings[key] ?? '' }
@@ -207,7 +215,8 @@ export function NotificationAdmin({ onNotice }: { onNotice: (value: string) => v
   function dispatchNow() {
     return act('dispatch', async () => {
       const { data } = await request<NotificationDispatch>('/admin/notifications/dispatch', { method: 'POST', headers: { 'Idempotency-Key': idem() } })
-      onNotice(`本次投递：送达 ${data.sent}，重试 ${data.retried}，失败 ${data.failed}${data.retired ? `，失效接收端 ${data.retired}` : ''}`)
+      if (data.claimed === 0) return '没有到期的通知，队列已空'
+      return `本次投递：送达 ${data.sent}，重试 ${data.retried}，失败 ${data.failed}${data.retired ? `，失效接收端 ${data.retired}` : ''}`
     }, '待发通知已处理')
   }
 
