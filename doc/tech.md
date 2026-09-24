@@ -890,6 +890,76 @@ gateway shim 可在浏览器运行，因此 sidecar **不是必需组件**。
 
 Gin 只信任明确代理地址。不得无条件信任任意 `X-Forwarded-For`、`X-Forwarded-Proto` 和 `X-Real-IP`。安全回调 URL 从配置的 Public URL 构造。
 
+### 21.5 Docker / Compose（实验室主机当前形态）
+
+2026-09-24 起，实验室主机以容器运行生产实例：`docker compose up -d` 一个 `fasttask` 容器，进程内同时承载 HTTP、Worker 和 Scheduler（`serve --with-worker --with-scheduler`），状态落在宿主机一个绑定挂载目录里。§21.2 的 systemd 形态仍然有效，但**两者互斥**：SQLite 单写者约束意味着同一数据库只能被一个实例持有，切换形态前必须确认旧实例已停止。
+
+#### 构建
+
+| 阶段 | 基础镜像 | 产物 |
+|---|---|---|
+| `web` | `node:22.22.2-alpine` | `web/dist`（`npm ci` + `npm run build`） |
+| `fastcas-sdk` | `alpine:3.22` | 按提交固定的 FastCAS Go SDK |
+| `go` | `golang:1.26.8-alpine` | CGO 单二进制 `fasttask` |
+| 运行时 | `alpine:3.22` | 二进制 + 前端产物 + `ca-certificates`/`sqlite-libs`/`su-exec`/`tzdata` |
+
+三个构建约束不是风格选择：
+
+- **FastCAS SDK 必须由构建阶段取回。** `go.mod` 用 `replace` 把 `github.com/FastR-D/FastCAS/sdk/go` 指向 `../FastCAS/sdk/go`，那是开发者机器上的兄弟目录，构建上下文里永远不存在，`COPY . .` 也带不进来。因此有一个专门阶段把它放到 `/src` 相对解析出的同一位置。取回方式是**按提交固定的 tarball 而非 `git clone`**：一次小的 HTTPS GET（带重试）比一次 git 协商更不容易被构建网络打断——实测本网络下 clone 会以 `SSL_read: unexpected eof` 失败。固定提交是因为浮动分支会让上游一次推送改变"FastTask 这个提交"编译出的东西。需要完全离线构建时用 `docker build --build-context fastcas-sdk=/path/to/parent .` 覆盖该阶段，不要改 Dockerfile。
+- **模块代理与 Alpine 源是构建参数。** 默认 `proxy.golang.org` 在本网络不可达，失败表现为 `go mod download` 的 dial timeout，看起来像依赖问题而不是网络问题；默认 Alpine CDN 实测一个 APKINDEX 19s，镜像源 1s，慢到像构建挂死。因此 `GOPROXY`、`APK_MIRROR` 均为 `ARG`，Compose 侧给出本网络的默认值，镜像本身不写死任何单一国家。
+- **`.dockerignore` 决定层的纯净。** 宿主 `web/dist`/`sidecar/dist` 会被各自阶段重建，一份陈旧的宿主产物被 `COPY . .` 带进去就是静默发布旧前端；`data/`（含真实行的开发库）和 `.env`（密钥）一旦进层就留在镜像历史里。
+
+运行时镜像不含 Node，因此**无法承载可选 sidecar**；libfx 的原生插件没有 musl 构建，"顺便装个 node"不是解法。容器部署下 Agent 走浏览器内 WASM Host（§21.4、ADR-0005），需要 sidecar 的部署改用 systemd 形态。
+
+#### 状态与权限
+
+所有可写路径固定在 `/var/lib/fasttask` 下，`WORKDIR` 就是该目录，于是 `fasttask backup` 的相对默认 `backups/` 也落在挂载卷内、就在它快照的数据库旁边：
+
+| 容器路径 | 内容 | 变量 |
+|---|---|---|
+| `/var/lib/fasttask/fasttask.db` | SQLite 主库与 WAL | `FASTTASK_DATABASE` |
+| `/var/lib/fasttask/audio` | 待转写音频临时目录 | `FASTTASK_AUDIO_DIR` |
+| `/var/lib/fasttask/attachments` | 图片附件 | `FASTTASK_ATTACHMENT_DIR` |
+| `/var/lib/fasttask/backups` | `backup` 命令输出 | 相对 `WORKDIR` |
+
+镜像内服务以非特权用户 `fasttask` 运行，而绑定挂载在宿主机上是 root 所有，所以宿主机数据目录必须属于镜像里那个用户的 uid:gid——**从镜像读取，不要凭记忆写死**：`docker run --rm --entrypoint id fasttask:local fasttask`。entrypoint（`deployments/docker/entrypoint.sh`）从服务真正读取的环境变量推导目录、以 `umask 0077` 建好，若以 root 启动则 `chown` 后用 `su-exec` 降权再 `exec`。它不后台化任何进程，保持 PID 1 语义，SIGTERM 才能到达服务（§21.4 说明 shell `&` 会毁掉这一性质）。`--user 0` 只是修复挂载所有权的维修模式，不是默认运行方式。
+
+#### 网络
+
+容器内必须绑 `0.0.0.0`，否则发布端口转发不到进程；宿主侧地址写在 `ports` 里，沿用迁移前裸二进制部署的同一地址端口，`FASTTASK_PUBLIC_URL` 前面的反向代理无需改动。`.env` 中两个宿主视角的值由 Compose 覆盖：`FASTTASK_LISTEN` 改为 `0.0.0.0`，`OPENAI_API_BASE_URL` 从 `localhost` 改为经 `host.docker.internal`（`extra_hosts: host-gateway`）访问宿主网关——容器内的 `localhost` 是容器自己。`FASTTASK_TRUSTED_PROXIES` 仍必须只列真实代理网段，容器化不改变这条约束。
+
+#### 生命周期
+
+| 项 | 值 | 理由 |
+|---|---|---|
+| `HEALTHCHECK` | `GET /health/ready` | 不是 liveness：503 意味着迁移未完成或依赖检查失败，重启解决不了任何一个 |
+| `start-period` | 30s | 覆盖首次迁移 |
+| `stop_grace_period` | 30s | 应用优雅关闭预算 15s（`internal/bootstrap/module.go`），Docker 必须等得更久，否则排水中的服务被拦腰杀掉 |
+| `restart` | `unless-stopped` | 宿主重启后自动回来；容器消失时数据仍在宿主机，可被下一个容器或裸二进制接管 |
+| 日志 | json-file，10MB × 3 | 单实例长期运行的上限，避免日志吃满磁盘 |
+
+#### 迁移与升级
+
+```text
+docker compose build
+-> 首次：宿主 chown 数据目录到镜像 uid:gid
+-> 用旧库升级：docker compose run --rm fasttask backup
+-> docker compose run --rm fasttask migrate   （一次性容器，serve 启动也会自动迁移）
+-> docker compose up -d
+-> /health/ready、/health/version、登录与关键接口烟雾测试
+```
+
+一次性 `migrate` 容器同样需要完整环境：`FASTTASK_ENV=production` 下 `config.Load` 会拒绝默认 `FASTTASK_JWT_SECRET` 和 `FASTTASK_ADMIN_PASSWORD`，缺 `--env-file`/`env_file` 时报的是配置错误，而不是迁移错误。升级前先在**数据副本**上验证迁移（复制到临时目录、`--user 0 --env-file .env` 挂载运行 `migrate`，检查 schema 版本、行数与 `PRAGMA integrity_check`），再对真实数据执行。
+
+#### 已验证事实（2026-09-24，实验室主机）
+
+- 生产库 schema `8 → 10`（依次 `000009_fastcas`、`000010_notifications`），`3 users / 7 goals / 34 tasks / 6 threads` 计数不变，`integrity_check=ok`、`foreign_key_check` 无输出。
+- 容器 `Up (healthy)`，端口由 docker-proxy 绑定在原 `FASTTASK_LISTEN:FASTTASK_PORT`；`/health/live`、`/health/ready`、`/health/version` 正常。
+- 管理员登录、`/me`、`/goals`（按用户正确分域：admin 3 条、stephenzeng 4 条）、用户与后台通知接口均返回正常，新表为空。
+- 线上 OpenAPI 含 15 条通知路径（18 个操作，部分路径多方法）；`/api/v1/auth/fastcas/available` 返回 `{"enabled":false}`（真实 SDK 已链接，生产未配置 CAS Issuer）。
+- 前端产物与本地 `web/dist` 同一 bundle 哈希，且包含后台「通知管理」页面。
+- 容器内 `id` 为 `uid=100(fasttask)`；访问 `http://host.docker.internal:3000/v1/models` 返回 401，即通路可达、仅缺凭据（与宿主机一致）。
+
 ## 22. 备份与恢复
 
 不能在运行中只复制 `fasttask.db` 而忽略 WAL。使用 SQLite Online Backup API、`VACUUM INTO` 或受控 Checkpoint 生成一致性快照。

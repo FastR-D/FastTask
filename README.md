@@ -52,6 +52,9 @@ migrations/                发布用 SQL Migration
 web/                       React 管理界面
 scripts/e2e.mjs            真实 HTTP 用户场景测试
 deployments/systemd/       systemd 样例
+deployments/docker/        容器 entrypoint
+Dockerfile                 多阶段构建（web → go → alpine 运行时）
+docker-compose.yml         生产部署
 doc/                       架构、功能、接口和技术设计
 ```
 
@@ -309,6 +312,8 @@ bin/fasttask migrate
 
 ## tmux 运行
 
+本地或临时运行方式，不是生产形态：生产用下面的 Docker（或 systemd）。tmux 里的裸二进制与容器**不能同时持有同一个数据库**——SQLite 单写者约束，切换前先确认另一边已停止。
+
 ```bash
 tmux new-session -d -s fasttask \
   'cd /root/repo/FastTask && ./bin/fasttask serve --with-worker --with-scheduler'
@@ -321,6 +326,65 @@ tmux kill-session -t fasttask
 ## systemd
 
 样例位于 `deployments/systemd/fasttask.service`。生产部署建议使用专用 `fasttask` 用户，配置 `EnvironmentFile`、最小文件权限、反向代理 TLS 和单实例写入约束。
+
+## Docker 部署
+
+实验室主机的生产形态是容器：`docker compose up -d` 起一个 `fasttask` 容器，进程内同时跑 HTTP、Worker 和 Scheduler，数据落在宿主机一个目录里。设计与取舍见 `doc/tech.md` §21.5。
+
+镜像由仓库根目录的 `Dockerfile` 多阶段构建：Node 构建前端，Go（CGO + SQLite）链接真实 FastCAS SDK 并编译单二进制，运行时基于 alpine，只包含二进制、前端产物和 `tzdata`。镜像内没有 Node，因此不能承载可选 sidecar，Agent 走浏览器内 WASM Host（见「当前外部边界」与 `doc/harness.md` §16）。
+
+### 配置
+
+Compose 直接读取仓库根目录的 `.env`，既用于变量插值也作为容器环境，密钥只存在这一个文件里（已被 `.gitignore` 排除）。其中两个变量只服务于 Compose：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `DOCKER_NAME` | `fasttask` | Compose 项目名、镜像名和容器名 |
+| `DOCKER_DATA_PATH` | `/root/dockerData/fasttask` | 宿主机数据目录，挂载到容器 `/var/lib/fasttask` |
+
+构建期可用 `FASTCAS_REF`、`GOPROXY`、`APK_MIRROR` 覆盖 FastCAS SDK 提交、Go 模块代理和 Alpine 镜像源；`OPENAI_API_BASE_URL_CONTAINER` 覆盖容器内访问宿主 LLM 网关的地址。
+
+`.env` 里有两个值是宿主视角的，Compose 已在容器内覆盖，直接透传会让容器起不来且看起来像应用 Bug：
+
+- `FASTTASK_LISTEN`：容器内必须绑 `0.0.0.0`，否则发布端口转发不到进程；宿主侧地址写在 `ports` 里（默认 `${FASTTASK_LISTEN}:${FASTTASK_PORT}`，与迁移前的裸二进制部署同一地址端口，反向代理无需改动）。
+- `OPENAI_API_BASE_URL`：容器内的 `localhost` 是容器自己，宿主网关经 `host.docker.internal`（`extra_hosts: host-gateway`）访问。
+
+容器内所有可写路径都已固定到 `/var/lib/fasttask` 下：数据库、WAL、待转写音频、图片附件，以及 `fasttask backup` 的默认 `backups/` 输出。工作目录就是状态目录。
+
+### 首次部署
+
+```bash
+docker compose build
+
+# 绑定挂载在宿主机上是 root 所有，容器以非特权 fasttask 用户运行。
+# uid:gid 从镜像里读，不要凭记忆写死：
+docker run --rm --entrypoint id fasttask:local fasttask
+chown -R 100:101 "$DOCKER_DATA_PATH" && chmod 750 "$DOCKER_DATA_PATH"
+
+# 用旧数据库升级时先备份，再迁移；serve 启动也会自动迁移，
+# 但显式 migrate 能在服务对外之前看到迁移结果。
+docker compose run --rm fasttask backup
+docker compose run --rm fasttask migrate
+
+docker compose up -d
+curl -sS http://127.0.0.1:10000/health/ready     # {"status":"ready"}
+curl -sS http://127.0.0.1:10000/health/version
+```
+
+首次迁移前请先在数据副本上验证：把 `fasttask.db` 复制到一个临时目录，用 `docker run --rm --user 0 --env-file .env -v <临时目录>:/var/lib/fasttask fasttask:local migrate` 跑一遍，确认 schema 版本、行数与 `PRAGMA integrity_check`，再动真实数据。`--user 0` 只用于修复挂载目录所有权，entrypoint 仍会在启动服务前降权到 `fasttask`。
+
+### 日常运维
+
+```bash
+docker compose ps                       # 状态与 healthcheck 结果
+docker compose logs -f fasttask         # json-file，单文件 10MB、保留 3 个
+docker compose exec fasttask fasttask backup
+docker compose exec fasttask fasttask doctor
+docker compose restart fasttask         # SIGTERM，30s 宽限（应用排水预算 15s）
+docker compose down                     # 保留数据目录
+```
+
+升级：`docker compose build && docker compose run --rm fasttask migrate && docker compose up -d`。`restart: unless-stopped`，宿主重启后容器自动回来；容器不存活时数据目录仍在宿主机上，可直接被下一个容器或裸二进制接管。
 
 ## 当前外部边界
 
