@@ -19,7 +19,8 @@ FastTask 是一个面向研究生和科研人员的长期目标推进系统。�
 - FastResearch Panel 只读摘要接口。
 - 任务坐标透镜、周复盘与可选的目标地图。
 - FastInsight、FastNews、FastRead、FastWrite 通用外部导入收件箱，支持来源去重、用户审批和任务转换。
-- 统一后台管理平台：管理员用户、活跃会话、OpenAI-compatible 模型 Provider 和后续管理模块入口。
+- 通知系统：Telegram 机器人、Bark、FCM 和 APNs 四个通道，持久投递队列、退避重试、地址失效退役和投递日志。
+- 统一后台管理平台：管理员用户、活跃会话、OpenAI-compatible 模型 Provider、通知通道与接收端，以及后续管理模块入口。
 - 可选 FastRead/FastWrite 健康探测，不影响 FastTask Readiness。
 - Gin + Huma v2，自动生成 OpenAPI 和 API 文档。
 - SQLite WAL、版本化 SQL Migration、一致性备份和恢复验证。
@@ -43,6 +44,7 @@ internal/agent/            ChatProvider 端口、OpenAI-compatible LLM Adapter �
 internal/application/      用例、领域编排、Worker
 internal/domain/           核心业务规则
 internal/httpapi/          Gin + Huma HTTP 契约
+internal/notify/           通知 Notifier Port 与 Telegram / Bark / FCM / APNs 适配器
 internal/persistence/      GORM Record、SQLite、Migration
 internal/platform/auth/    密码、JWT、Session 和 Refresh Token
 internal/scheduler/        租约、Outbox 和清理维护任务
@@ -112,6 +114,10 @@ go run ./cmd/fasttask serve --with-worker --with-scheduler
 | `FASTTASK_FASTREAD_URL` | 空 | 可选 FastRead Base URL，例如直接后端 `http://127.0.0.1:8483` 或 Docker/Nginx `http://127.0.0.1:3015` |
 | `FASTTASK_FASTWRITE_URL` | 空 | 可选 FastWrite Base URL，例如 `http://127.0.0.1:3003` |
 | `FASTTASK_INTEGRATION_TIMEOUT_MS` | `2000` | 外部健康探测超时，范围 100 至 10000 毫秒 |
+| `FASTTASK_NOTIFICATION_ENABLED` | `true` | 通知总开关；关闭后配置仍可读，投递空转 |
+| `FASTTASK_NOTIFICATION_TIMEOUT_MS` | `10000` | 单次提供方调用超时，范围 1000 至 60000 毫秒 |
+| `FASTTASK_NOTIFICATION_BATCH` | `20` | 一次投递排水认领的消息数，范围 1 至 100 |
+| `FASTTASK_NOTIFICATION_RETENTION_HOURS` | `336` | 投递日志保留时长（小时），范围 1 至 2160 |
 | `OPENAI_API_BASE_URL` | 空 | OpenAI-compatible `/v1` Base URL |
 | `OPENAI_MODEL` | 空 | 模型名 |
 | `OPENAI_API_KEY` | 空 | API Key |
@@ -232,12 +238,18 @@ FASTTASK_REAL_LLM_TEST=1 go test ./internal/agent -run TestRealConfiguredModel -
 node scripts/e2e.mjs
 ```
 
-脚本实际完成：登录、目标创建和幂等重放、LLM 任务树作业、提案确认、每日计划、最小行动完成、底层任务状态校验、同日重规划 Revision 2、对话 Agent、设备 Poll/304 和 Panel 摘要。
+脚本实际完成：登录、目标创建和幂等重放、LLM 任务树作业、提案确认、每日计划、最小行动完成、底层任务状态校验、同日重规划 Revision 2、对话 Agent、设备 Poll/304、Panel 摘要，以及通知通道创建、凭据校验、接收端登记、广播、立即投递和投递记录核对。
 
 若测试服务不在 `10000` 端口：
 
 ```bash
 FASTTASK_E2E_URL=http://127.0.0.1:10001 node scripts/e2e.mjs
+```
+
+通知段默认把通道指向一个不可达地址，因此不需要真实提供方即可跑完整条链路（断言凭据校验如实报告失败、消息被认领并进入退避重试）。指向一个会应答的替身（Telegram Bot API 或 Bark 的形状）即断言真实送达：
+
+```bash
+FASTTASK_E2E_PROVIDER=http://127.0.0.1:18099 node scripts/e2e.mjs
 ```
 
 ## 关键业务语义
@@ -260,7 +272,9 @@ FASTTASK_E2E_URL=http://127.0.0.1:10001 node scripts/e2e.mjs
 
 ### 后台管理有独立授权边界
 
-`/api/v1/admin/*` 只允许数据库中当前状态为 active、role 为 admin 的用户访问。用户禁用、密码重置和会话撤销会立即撤销刷新与访问会话；最后一名活跃管理员不能被降级或禁用。用户变更、Provider 变更和默认模型切换写入 `admin_audit_events`。
+`/api/v1/admin/*` 只允许数据库中当前状态为 active、role 为 admin 的用户访问。用户禁用、密码重置和会话撤销会立即撤销刷新与访问会话；最后一名活跃管理员不能被降级或禁用。用户变更、Provider 变更、默认模型切换，以及通知通道与接收端的创建、修改、删除、凭据校验、试发和广播，都写入 `admin_audit_events`。审计记录只写「谁改了什么」，不写填写的凭据或设备地址。
+
+通知凭据（Bot Token、服务账号 JSON、`.p8` 私钥）与接收端地址（Chat ID、Bark Device Key、FCM 注册 Token、APNs Device Token）都用 `FASTTASK_PROVIDER_ENCRYPTION_KEY` 派生的 AES-GCM 密钥加密入库，接口只返回掩码提示，永不回显明文；编辑时留空即保留原凭据。地址按设备凭据同等对待：持有 FCM Token 就等于拥有向该设备推送的能力。详见 [`doc/notification.md`](doc/notification.md) §7。
 
 ## 数据库和备份
 
@@ -283,7 +297,7 @@ bin/fasttask backup --output backups/fasttask.db
 
 ### Schema 版本
 
-当前 `ExpectedSchemaVersion = 5`（migration `000005_agent_runtime`，新增 Agent Run / Message / MessagePart / RunChunk 运行时表；`000004_task_coords` 新增 `task_coords` 表）。
+当前 `ExpectedSchemaVersion = 10`（`000009_fastcas` 新增可选统一身份的三张表，`000010_notifications` 新增 `notification_channels`、`notification_targets` 和 `notification_messages`）。
 
 `serve` 启动时会自动执行 Migration。若用旧二进制创建的数据库直接跑新二进制而没有迁移，`/health/ready` 会返回 `503`，此时先执行：
 
@@ -291,7 +305,7 @@ bin/fasttask backup --output backups/fasttask.db
 bin/fasttask migrate
 ```
 
-升级前建议先 `bin/fasttask backup`。坐标只落在新表，不修改 `tasks` 结构，既有数据不受影响。
+升级前建议先 `bin/fasttask backup`。坐标、身份与通知都只落在新表，不修改既有表结构，既有数据不受影响。
 
 ## tmux 运行
 
@@ -316,6 +330,7 @@ tmux kill-session -t fasttask
 - 墨水屏：后端 Poll 契约已完成，真实硬件固件不在本仓库范围内，可按 OpenAPI 接入。
 - FastResearch 工具：已实现 `/api/v1/imports` 通用收件箱。用户或带 `imports:write` Scope 的服务可导入候选事项；用户可通过 ETag 审批后创建或关联 Task。带 `imports:read` Scope 的服务只能读取被代表用户的导入事项。
 - 集成状态：管理员可调用 `GET /api/v1/integrations/status` 查看 FastRead/FastWrite 可选健康探测结果，并明确 FastInsight/FastNews CLI Runner 尚未实现。
+- 通知：已实现 Telegram 机器人、Bark、FCM HTTP v1 和 APNs HTTP/2 四个提供方，凭据与地址加密存储，投递走带租约与退避的持久队列。浏览器 Web Push、邮件和飞书尚未实现；FCM 与 APNs 的真实设备端（注册 Token 的取得）不在本仓库范围内，客户端按 `POST /api/v1/notifications/targets` 登记即可。
 
 ## 设计文档
 
@@ -325,6 +340,7 @@ tmux kill-session -t fasttask
 - `doc/tech.md`
 - [`doc/lens.md`](doc/lens.md)：决策透镜、周复盘与目标地图的产品判断
 - [`doc/lens-impl.md`](doc/lens-impl.md)：决策透镜的可执行实现规格
+- [`doc/notification.md`](doc/notification.md)：通知系统——四个提供方的契约、加密存储、队列与退避投递、后台管理界面
 - [`doc/integration/README.md`](doc/integration/README.md)：FastInsight、FastNews、FastRead、FastWrite 对接与协作总览
 
 ### Agent、组合根、前端与 PWA（已实现）

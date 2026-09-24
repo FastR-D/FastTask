@@ -23,6 +23,11 @@ type Worker struct {
 	providerResolver func(ctx context.Context) (agent.Provider, agent.Transcriber, error)
 	agentRunner      *AgentService
 	handlers         map[string]JobHandler
+	// dispatchNotifications drains the notification queue. It is optional: delivery is the
+	// scheduler's job, and this is only the fallback for a role that runs without one
+	// (doc/notification.md §5).
+	dispatchNotifications func(ctx context.Context) error
+	lastNotificationDrain time.Time
 }
 
 // WithAgentRunner attaches the agent runtime so the worker can execute
@@ -40,6 +45,14 @@ func (w *Worker) WithJobHandlers(handlers []JobHandler) *Worker {
 	if len(handlers) > 0 {
 		w.handlers = handlerMap(handlers)
 	}
+	return w
+}
+
+// WithNotificationDispatcher attaches the fallback notification drain. The worker polls
+// every 300 ms and a notification is not that urgent, so the drain runs at most once per
+// notificationDrainInterval; the queue itself decides what is due.
+func (w *Worker) WithNotificationDispatcher(dispatch func(ctx context.Context) error) *Worker {
+	w.dispatchNotifications = dispatch
 	return w
 }
 
@@ -74,8 +87,28 @@ func (w *Worker) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			_ = w.RunOnce(ctx)
+			w.drainNotifications(ctx)
 		}
 	}
+}
+
+// notificationDrainInterval is how often the worker's fallback pass looks at the
+// notification queue.
+const notificationDrainInterval = 5 * time.Second
+
+// drainNotifications is the rate-limited fallback pass. It is deliberately silent: a
+// provider that is down must not stop the worker from executing agent jobs, and the
+// messages stay queued for the next pass.
+func (w *Worker) drainNotifications(ctx context.Context) {
+	if w.dispatchNotifications == nil {
+		return
+	}
+	now := time.Now()
+	if !w.lastNotificationDrain.IsZero() && now.Sub(w.lastNotificationDrain) < notificationDrainInterval {
+		return
+	}
+	w.lastNotificationDrain = now
+	_ = w.dispatchNotifications(ctx)
 }
 
 func (w *Worker) RunOnce(ctx context.Context) error {

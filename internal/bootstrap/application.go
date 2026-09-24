@@ -39,8 +39,20 @@ type appParams struct {
 
 // NewApp builds the application aggregate with the provider encryption key and
 // the collected job materializers.
+//
+// The notification settings are applied here rather than passed into the constructor
+// because the aggregate is built the same way in every role (doc/wiring.md §2 rule 2:
+// a plain constructor, no fx types), and delivery tuning is the composition root's
+// business, not the application's.
 func NewApp(p appParams) *application.App {
-	return application.NewWithSecret(p.Store, p.Config.ProviderEncryptionKey, p.Materializers...)
+	app := application.NewWithSecret(p.Store, p.Config.ProviderEncryptionKey, p.Materializers...)
+	app.NotificationService.WithSettings(application.NotificationSettings{
+		Enabled:   !p.Config.NotificationsDisabled,
+		Timeout:   p.Config.NotificationTimeout,
+		Batch:     p.Config.NotificationBatch,
+		Retention: p.Config.NotificationRetention,
+	})
+	return app
 }
 
 // NewAgentService builds the agent runtime over the App. It is shared by the HTTP endpoints

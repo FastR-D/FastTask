@@ -263,6 +263,7 @@ func (s *runSession) failRun(code string, cause error) (map[string]any, error) {
 	_ = s.emitSet(protocol.IsRunningPath(), false)
 	_ = s.saveState()
 	_ = s.svc.repo.SetRunStatus(s.ctx, s.userID, s.run.ID, persistence.RunFailed, code, cause.Error())
+	notifyRunFailed(s.ctx, s.svc.app, s.run, code, cause.Error())
 	return nil, cause
 }
 

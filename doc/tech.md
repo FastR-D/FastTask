@@ -79,7 +79,9 @@ Huma v2 用于：
 
 #### 微信集成
 
-FastTask 不是微信小程序配套后端，当前无微信登录或订阅消息需求，因此不继承微信 Token、模板 ID 和 Client。未来通知通过通用 `Notifier` Port 扩展。
+FastTask 不是微信小程序配套后端，当前无微信登录或订阅消息需求，因此不继承微信 Token、模板 ID 和 Client。
+
+当初为通知预留的通用 `Notifier` Port 已经落地为 `internal/notify`：一个 `Sender` 接口（`Kind` / `Verify` / `Send`）加四个适配器（Telegram 机器人、Bark、FCM HTTP v1、APNs HTTP/2），新增提供方只需加一个文件和一个 `NewSender` 分支，表结构、应用层和接口都不变。约束见 [`notification.md`](notification.md) §3，其中两条来自本节 §12：客户端按服务持有并复用连接、拒绝跟随重定向，错误消息只带提供方自己的诊断，不带含凭据的 URL。
 
 ## 3. Go Module 与包管理
 
@@ -530,6 +532,8 @@ Jitter 可使用非安全随机数；认证 Token 必须使用 `crypto/rand`。
 ### 11.5 Outbox
 
 Outbox 用于 Panel 摘要更新、未来通知和跨项目事件。业务写和 Outbox Event 同事务提交；消费者至少一次处理，按 Event ID 幂等。
+
+通知没有走 Outbox，而是自带一张队列表 `notification_messages`（[`notification.md`](notification.md) §5）。两者形状相同（同事务写入、至少一次、按行幂等），但通知需要 Outbox 没有的三样东西：按接收端扇出后的**每行重试计数与退避**、崩溃后靠 `run_after` 租约恢复的**认领语义**，以及可查询的**投递日志**。把这些塞进 `outbox_events` 会让 Panel 摘要事件的消费者面对一堆与自己无关的列。
 
 ## 12. HTTP Client
 

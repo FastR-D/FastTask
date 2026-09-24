@@ -724,6 +724,9 @@ func (s *AgentService) driveViaSidecar(ctx context.Context, job persistence.Agen
 // Worker's own bookkeeping sees it too.
 func (s *AgentService) failHarnessRun(ctx context.Context, run *persistence.AgentRun, code, message string) error {
 	_ = s.repo.SetRunStatus(ctx, run.UserID, run.ID, persistence.RunFailed, code, message)
+	// This path never reached a session, so runSession.failRun — the other failure funnel —
+	// will not announce it.
+	notifyRunFailed(ctx, s.app, run, code, message)
 	return fmt.Errorf("%s: %s", code, message)
 }
 

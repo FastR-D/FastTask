@@ -431,6 +431,17 @@ Repository -> HTTP DTO
 
 Panel 和其他项目不得直接读取 FastTask SQLite 文件。
 
+### 7.9 Notification
+
+职责：
+
+- 管理管理员配置的通知通道（Telegram 机器人、Bark、FCM、APNs）及其加密凭据。
+- 管理用户在各通道上的接收端地址，地址按设备凭据同等对待。
+- 维护持久投递队列：认领、退避重试、租约恢复、地址失效退役和日志裁剪。
+- 在业务事务提交之后，把「需要用户在别处做一件事」的事件扇出到其接收端。
+
+适配器在 `internal/notify`，是 [`tech.md`](tech.md) §2.3 预留的通用 `Notifier` Port；应用层只决定通知谁、通知什么。通知是礼貌而非不变量：发送失败不回滚业务，也不让一次运行失败。详见 [`notification.md`](notification.md)。
+
 ## 8. 核心数据模型
 
 以下是逻辑模型，最终字段以 Migration 和 Domain 定义为准。
@@ -456,6 +467,9 @@ Panel 和其他项目不得直接读取 FastTask SQLite 文件。
 | `agent_jobs` | `type`, `status`, `subject_id`, `subject_revision`, `input`, `output`, `lease` | 持久化 Agent 作业 |
 | `outbox_events` | `event_type`, `payload`, `status`, `lease` | 可靠异步事件 |
 | `devices` | `user_id`, `type`, `token_hash`, `status`, `last_seen_at` | 墨水屏设备 |
+| `notification_channels` | `provider`, `endpoint`, `settings_json`, `secret_ciphertext`, `status`, `last_check_status` | 管理员配置的通知通道，见 [`notification.md`](notification.md) §2.1 |
+| `notification_targets` | `user_id`, `channel_id`, `address_ciphertext`, `address_hash`, `address_hint`, `status`, `failure_count` | 一个用户在一个通道上的可达地址 |
+| `notification_messages` | `topic`, `title`, `status`, `attempts`, `run_after`, `provider_message_id`, `last_error` | 投递队列，同时是投递日志 |
 | `idempotency_records` | `principal`, `key`, `request_hash`, `response` | 写请求幂等 |
 
 主要关系：

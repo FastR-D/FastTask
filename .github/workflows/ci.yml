@@ -66,6 +66,11 @@ jobs:
           /tmp/fasttask migrate
           sqlite3 "$FASTTASK_DATABASE" '.tables' | tr ' ' '\n' | grep -qx agent_threads
           sqlite3 "$FASTTASK_DATABASE" '.tables' | tr ' ' '\n' | grep -qx agent_attachments
+          # The notification tables are the newest migration's; a migration that is present in
+          # internal/persistence/migrations but missing from the release copy would pass every
+          # unit test and still leave a deployment without them.
+          sqlite3 "$FASTTASK_DATABASE" '.tables' | tr ' ' '\n' | grep -qx notification_channels
+          sqlite3 "$FASTTASK_DATABASE" '.tables' | tr ' ' '\n' | grep -qx notification_messages
           sqlite3 "$FASTTASK_DATABASE" 'select count(*) from schema_migrations'
 
       # §19: the binary must actually open SQLite, serve, and round-trip a write.

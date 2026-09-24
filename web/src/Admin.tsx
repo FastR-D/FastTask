@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import './admin.css'
-import { idem, request } from './api'
+import { idem, request, resourceETag } from './api'
 import { fieldValue, useMduiEvent } from './mdui-react'
+import { NotificationAdmin } from './Notifications'
 import type { AuditView, ModelProvider, SessionView, User } from './types'
 
-type Section = 'users' | 'models' | 'audit'
+type Section = 'users' | 'models' | 'notifications' | 'audit'
 
 // The API speaks English enums; the interface speaks Chinese — the same rule App.tsx states for goal,
 // task and device status. A card caption is read at a glance, and `admin · active` is not one.
@@ -29,10 +30,12 @@ export function Admin({ user, onNotice }: { user: User; onNotice: (value: string
       <mdui-tabs className="admin-tabs" value={section} onChange={e => setSection(fieldValue(e) as Section)}>
         <mdui-tab value="users" icon="group">用户管理</mdui-tab>
         <mdui-tab value="models" icon="hub">模型管理</mdui-tab>
+        <mdui-tab value="notifications" icon="notifications">通知管理</mdui-tab>
         <mdui-tab value="audit" icon="history">审计日志</mdui-tab>
       </mdui-tabs>
       {section === 'users' && <UserAdmin currentID={user.id} onNotice={onNotice} />}
       {section === 'models' && <ProviderAdmin onNotice={onNotice} />}
+      {section === 'notifications' && <NotificationAdmin onNotice={onNotice} />}
       {section === 'audit' && <AuditAdmin onNotice={onNotice} />}
     </section>
   )
@@ -70,7 +73,7 @@ function UserAdmin({ currentID, onNotice }: { currentID: string; onNotice: (valu
   }
   async function patchUser(target: User, body: Record<string, unknown>, message: string) {
     try {
-      await request('/admin/users/' + target.id, { method: 'PATCH', headers: { 'If-Match': etag('user', target.id, target.revision) }, body: JSON.stringify(body) })
+      await request('/admin/users/' + target.id, { method: 'PATCH', headers: { 'If-Match': resourceETag('user', target.id, target.revision) }, body: JSON.stringify(body) })
       onNotice(message); loadUsers()
     } catch (e) { onNotice(errorText(e)) }
   }
@@ -161,7 +164,7 @@ function ProviderAdmin({ onNotice }: { onNotice: (value: string) => void }) {
     try {
       const body: Record<string, unknown> = { name: editing.name, base_url: editing.base_url, model_name: editing.model_name, transcription_model: editing.transcription_model }
       if (apiKey) body.api_key = apiKey
-      await request('/admin/model-providers/' + editing.id, { method: 'PATCH', headers: { 'If-Match': etag('provider', editing.id, editing.revision) }, body: JSON.stringify(body) })
+      await request('/admin/model-providers/' + editing.id, { method: 'PATCH', headers: { 'If-Match': resourceETag('provider', editing.id, editing.revision) }, body: JSON.stringify(body) })
       setEditing(null); setApiKey(''); onNotice('Provider 已更新'); load()
     } catch (e) { onNotice(errorText(e)) }
   }
@@ -256,5 +259,4 @@ function AuditAdmin({ onNotice }: { onNotice: (value: string) => void }) {
   )
 }
 
-function etag(kind: string, id: string, revision: number) { return '"' + kind + '_' + id + '_rev_' + revision + '"' }
 function errorText(error: unknown) { return error instanceof Error ? error.message : '操作失败' }

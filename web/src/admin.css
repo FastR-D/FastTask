@@ -43,3 +43,34 @@
   .admin-layout{grid-template-columns:1fr}
   .admin-grid{grid-template-columns:1fr}
 }
+
+/* ===== 后台 · 通知 =====
+   接收端和投递记录是表格型信息，不是展示卡片：一行一条，hairline 分组，
+   操作靠右。染色面板只会增加第三层边界（同 .session-panel 的取舍）。 */
+.notify-toolbar{display:flex;flex-wrap:wrap;gap:var(--ft-space-2);justify-content:flex-end}
+.notify-panel{padding-top:var(--ft-space-4);display:grid;gap:var(--ft-space-3);border-top:1px solid rgb(var(--mdui-color-outline-variant))}
+.notify-panel>header{display:grid;gap:var(--ft-space-1)}
+.notify-panel h3{font-size:var(--mdui-typescale-title-small-size);font-weight:500}
+.notify-form{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr) minmax(0,1fr) auto;gap:var(--ft-space-3);align-items:end}
+.notify-rows{list-style:none;margin:0;padding:0;display:grid;gap:0}
+.notify-rows li{
+  padding:var(--ft-space-3) 0;display:grid;gap:var(--ft-space-1);
+  border-bottom:1px solid rgb(var(--mdui-color-outline-variant));
+  font-size:var(--mdui-typescale-body-medium-size);
+}
+.notify-rows li:last-child{border-bottom:0}
+.notify-rows li.muted{opacity:.6}
+.notify-row-main{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--ft-space-2) var(--ft-space-3)}
+.notify-row-main strong{font-size:var(--mdui-typescale-title-small-size);font-weight:500}
+.notify-row-main span,.notify-row-main time{color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-small-size)}
+.notify-row-main code{font-size:var(--mdui-typescale-label-small-size);color:rgb(var(--mdui-color-on-surface-variant))}
+.notify-row-actions{display:flex;flex-wrap:wrap;gap:var(--ft-space-1)}
+.notify-row-actions mdui-button{--mdui-typescale-label-large-size:var(--mdui-typescale-label-medium-size)}
+.notify-check{margin:var(--ft-space-1) 0;font-size:var(--mdui-typescale-body-small-size);color:rgb(var(--mdui-color-on-surface-variant));display:grid;gap:var(--ft-space-1)}
+/* 失败原因是操作信息，需要看见；但它不是标题，所以只用错误色，不加背景。 */
+.notify-error{color:rgb(var(--mdui-color-error));font-size:var(--mdui-typescale-body-small-size);word-break:break-word}
+.notify-rows li.failed .notify-row-main strong{color:rgb(var(--mdui-color-error))}
+@media (max-width:839.98px){
+  .notify-form{grid-template-columns:1fr}
+  .notify-toolbar{justify-content:flex-start}
+}

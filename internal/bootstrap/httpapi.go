@@ -48,6 +48,7 @@ var HTTPModule = fx.Module("httpapi",
 		fx.Annotate(httpapi.NewImportRoutes, fx.ResultTags(`group:"routes"`)),
 		fx.Annotate(httpapi.NewIntegrationStatusRoutes, fx.ResultTags(`group:"routes"`)),
 		fx.Annotate(httpapi.NewAdminRoutes, fx.ResultTags(`group:"routes"`)),
+		fx.Annotate(httpapi.NewNotificationRoutes, fx.ResultTags(`group:"routes"`)),
 		// The harness registrar needs the agent runtime as well as the shared route
 		// dependencies (doc/interface.md §20.2).
 		fx.Annotate(httpapi.NewHarnessRoutes, fx.ResultTags(`group:"routes"`)),

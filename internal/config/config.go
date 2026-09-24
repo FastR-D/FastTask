@@ -66,6 +66,22 @@ type Config struct {
 
 	FastCASIssuer, FastCASClientID, FastCASClientSecret, FastCASRedirectURI string
 	FastCASLoopbackHTTP                                                     bool
+
+	// Notification delivery (doc/notification.md §8). The channels and their credentials
+	// live in the database and are managed from the admin UI; these are the process-level
+	// knobs, and they are the only notification settings an operator sets by environment.
+	//
+	// The switch is spelled in the negative on purpose. FASTTASK_NOTIFICATION_ENABLED
+	// defaults to true, and a Config built as a literal — every test, and any future
+	// embedder — must not silently turn delivery off, because a notification system that
+	// quietly stops notifying is the failure nobody notices.
+	NotificationsDisabled bool
+	// NotificationTimeout bounds one provider call.
+	NotificationTimeout time.Duration
+	// NotificationBatch is how many messages one dispatcher pass claims.
+	NotificationBatch int
+	// NotificationRetention is how long a finished delivery stays in the log.
+	NotificationRetention time.Duration
 }
 
 func Load() (Config, error) {
@@ -75,6 +91,18 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	integrationTimeoutMS, err := envInt("FASTTASK_INTEGRATION_TIMEOUT_MS", 2000)
+	if err != nil {
+		return Config{}, err
+	}
+	notificationTimeoutMS, err := envInt("FASTTASK_NOTIFICATION_TIMEOUT_MS", 10000)
+	if err != nil {
+		return Config{}, err
+	}
+	notificationBatch, err := envInt("FASTTASK_NOTIFICATION_BATCH", 20)
+	if err != nil {
+		return Config{}, err
+	}
+	notificationRetentionHours, err := envInt("FASTTASK_NOTIFICATION_RETENTION_HOURS", 336)
 	if err != nil {
 		return Config{}, err
 	}
@@ -119,6 +147,11 @@ func Load() (Config, error) {
 		FastCASClientSecret: env("FASTTASK_FASTCAS_CLIENT_SECRET", ""),
 		FastCASRedirectURI:  env("FASTTASK_FASTCAS_REDIRECT_URI", ""),
 		FastCASLoopbackHTTP: envBool("FASTTASK_FASTCAS_LOOPBACK_HTTP", false),
+
+		NotificationsDisabled: !envBool("FASTTASK_NOTIFICATION_ENABLED", true),
+		NotificationTimeout:   time.Duration(notificationTimeoutMS) * time.Millisecond,
+		NotificationBatch:     notificationBatch,
+		NotificationRetention: time.Duration(notificationRetentionHours) * time.Hour,
 	}
 	fastcasFields := 0
 	for _, value := range []string{c.FastCASIssuer, c.FastCASClientID, c.FastCASClientSecret, c.FastCASRedirectURI} {
@@ -145,6 +178,15 @@ func Load() (Config, error) {
 		// Nobody would be able to authenticate: an externally started sidecar cannot be handed a secret
 		// this process invented at boot, so the deployment has to supply the one both sides read.
 		return Config{}, errors.New("FASTTASK_SIDECAR_SECRET is required when FASTTASK_SIDECAR_SPAWN is false")
+	}
+	if c.NotificationTimeout < time.Second || c.NotificationTimeout > time.Minute {
+		return Config{}, errors.New("FASTTASK_NOTIFICATION_TIMEOUT_MS must be between 1000 and 60000")
+	}
+	if c.NotificationBatch < 1 || c.NotificationBatch > 100 {
+		return Config{}, errors.New("FASTTASK_NOTIFICATION_BATCH must be between 1 and 100")
+	}
+	if c.NotificationRetention < time.Hour || c.NotificationRetention > 90*24*time.Hour {
+		return Config{}, errors.New("FASTTASK_NOTIFICATION_RETENTION_HOURS must be between 1 and 2160")
 	}
 	if c.Environment == "production" && (strings.Contains(c.JWTSecret, "development") || c.AdminPassword == "fasttask-admin") {
 		return Config{}, errors.New("production requires non-default FASTTASK_JWT_SECRET and FASTTASK_ADMIN_PASSWORD")

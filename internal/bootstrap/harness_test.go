@@ -60,7 +60,7 @@ func TestSchedulerReapsLostHarnessHosts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	maintenance, err := NewScheduler(store, agent)
+	maintenance, err := NewScheduler(store, app, agent)
 	if err != nil {
 		t.Fatal(err)
 	}

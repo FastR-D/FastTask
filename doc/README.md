@@ -1,6 +1,6 @@
 # FastTask 文档索引
 
-> 索引更新：2026-09-23（第五轮：Phase 0 spike 完成，拓扑定案，**文档可交付**）  
+> 索引更新：2026-09-24（第六轮：通知系统接入，新增 [`notification.md`](notification.md)）  
 > 用途：供人和 agent 快速定位文档，并判断哪些描述**已经是代码事实**、哪些是**尚未实现的目标状态**
 
 ## 0.0 术语消歧（最高优先级，先读这条）
@@ -44,6 +44,7 @@ ADR-0001 与 `wiring.md` 的标题沿用历史写法，其中的「fx」指 uber
 | 做 PWA | [`pwa.md`](pwa.md) | `frontend.md` |
 | 改 HTTP 接口 | [`interface.md`](interface.md) | 实现中的 Huma Operation 定义 |
 | 改任务坐标 / 周复盘 / 目标地图 | [`lens.md`](lens.md) → [`lens-impl.md`](lens-impl.md) | — |
+| 接通知 / 推送提醒 / 加一个推送提供方 | [`notification.md`](notification.md) | [`interface.md`](interface.md) §21、[`tech.md`](tech.md) §2.3 |
 | 理解产品语义与业务规则 | [`func.md`](func.md) | `req/this.md` |
 | 理解架构边界与分层 | [`arch.md`](arch.md) | `tech.md` |
 | 对接 FastResearch 其他工具 | [`integration/README.md`](integration/README.md) | `integration/contract.md` |
@@ -94,6 +95,7 @@ ADR-0001 与 `wiring.md` 的标题沿用历史写法，其中的「fx」指 uber
 | [`frontend.md`](frontend.md) | 🟢 已实现 | 2026-09-23 | 132 | §1、§6 mdui 实测现状 + §2–§5 assistant-ui 接入（workflow A/B 均落地）。§4 的多会话接线按 [`chat-features.md`](chat-features.md) §2.1.1 的取舍实现（未用 `useRemoteThreadListRuntime`）|
 | [`harness.md`](harness.md) | 🟢 已实现 | 2026-09-23 | 964 | libfx 双宿主 harness：模式探测、AI Gateway 适配层、工具导出、审批长轮询、sidecar、八阶段交付。§16.6 是真机端到端验证记录 |
 | [`chat-features.md`](chat-features.md) | 🟢 已实现 | 2026-09-23 | 365 | 多会话持久化、思考过程、图片附件。§2.1.1 记录了多会话的实际接线取舍（未用 `useRemoteThreadListRuntime`）|
+| [`notification.md`](notification.md) | 🟢 已实现 | 2026-09-24 | 260 | Telegram / Bark / FCM / APNs 四个提供方、通道与接收端的加密存储、队列与退避投递、后台管理界面。§13 是验证记录 |
 
 ### 2.5 外部工具对接（已实现的部分）
 
@@ -125,11 +127,12 @@ ADR-0001 与 `wiring.md` 的标题沿用历史写法，其中的「fx」指 uber
 
 截至 2026-09-22：
 
-- **Schema 版本**：8（`migrations/000005_agent_runtime` 至 `000008_agent_attachments`，包括 Agent 运行时、多会话、harness 与图片附件）。
+- **Schema 版本**：10（`migrations/000005_agent_runtime` 至 `000008_agent_attachments` 的 Agent 运行时、多会话、harness 与图片附件，`000009_fastcas` 的可选统一身份，`000010_notifications` 的通知三表）。
 - **后端**：Go + Gin + Huma v2 + GORM/SQLite，由 fx 组合根装配（`internal/bootstrap`）；`serve` / `worker` / `scheduler` 三个角色可独立运行（`wiring.md` 八步迁移 + §9 已全部落地）。
 - **Agent**：assistant-transport SSE 运行时已落地——多轮工具循环（`agentloop.go`）、只读工具注册表（`agenttool.go`）、任务树/计划提案与 HTTP 处理器内同步审批（`agentapproval.go`、`agenttools_proposal.go`、`agentdailyplan.go`）、断线续流与启动中断回收。六阶段（A–F）全部交付。
 - **前端**：mdui 2.1.5 重写 + assistant-ui 0.15.21 对话区已落地（`web/src/agent/`：`AgentChat` 挂载点、纯 converter、`makeAssistantToolUI` 审批卡片、协商录音格式的语音输入）。
 - **PWA**：可安装——manifest、injectManifest Service Worker（按用户隔离缓存键的离线只读快照）、access token 内存 + refresh token 持久化、`static()` 以正确 Content-Type 提供 `sw.js`/`manifest.webmanifest`。五个阻塞项全部修复。
+- **通知**：四个提供方（Telegram 机器人、Bark、FCM、APNs）已接入，通道与接收端在后台「通知管理」直接管理；凭据与地址加密入库且永不回显，投递走带租约与退避的持久队列，由调度器排水、Worker 兜底。见 [`notification.md`](notification.md)。
 
 ### 3.1 已完成：libfx harness 迁移（🟢 2026-09-23）
 

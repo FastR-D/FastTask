@@ -66,6 +66,9 @@ type (
 	importRoutes            struct{ RouteDeps }
 	integrationStatusRoutes struct{ RouteDeps }
 	adminRoutes             struct{ RouteDeps }
+	// notificationRoutes covers both halves of the notification surface: a user's own
+	// subscriptions and the administrator's console (doc/notification.md §9).
+	notificationRoutes struct{ RouteDeps }
 	// harnessRoutes needs the agent runtime in addition to the shared dependencies: the
 	// harness endpoints are the agent service's HTTP surface (doc/interface.md §20.2).
 	harnessRoutes struct {
@@ -90,6 +93,7 @@ func NewPanelRoutes(d RouteDeps) RouteRegistrar             { return panelRoutes
 func NewImportRoutes(d RouteDeps) RouteRegistrar            { return importRoutes{d} }
 func NewIntegrationStatusRoutes(d RouteDeps) RouteRegistrar { return integrationStatusRoutes{d} }
 func NewAdminRoutes(d RouteDeps) RouteRegistrar             { return adminRoutes{d} }
+func NewNotificationRoutes(d RouteDeps) RouteRegistrar      { return notificationRoutes{d} }
 
 // NewHarnessRoutes builds the harness registrar (doc/interface.md §20.2).
 func NewHarnessRoutes(d RouteDeps, agent *application.AgentService) RouteRegistrar {
@@ -105,6 +109,6 @@ func BuiltinRouteRegistrars(d RouteDeps, agent *application.AgentService) []Rout
 		authRoutes{d}, meRoutes{d}, goalRoutes{d}, taskRoutes{d}, taskTreeRoutes{d},
 		lensRoutes{d}, planRoutes{d}, sessionRoutes{d}, conversationRoutes{d},
 		jobRoutes{d}, deviceRoutes{d}, panelRoutes{d}, importRoutes{d},
-		integrationStatusRoutes{d}, adminRoutes{d},
+		integrationStatusRoutes{d}, adminRoutes{d}, notificationRoutes{d},
 	}, NewHarnessRoutes(d, agent))
 }

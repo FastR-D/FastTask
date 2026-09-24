@@ -46,6 +46,14 @@ func NewWorker(p workerParams) *application.Worker {
 	worker.WithProviderResolver(ProviderResolver(p.App, p.Config))
 	worker.WithAgentRunner(p.Agent)
 	worker.WithJobHandlers(p.Handlers)
+	// Delivery belongs to the scheduler. A deployment that runs `serve --with-worker`
+	// without one would otherwise queue notifications nobody ever sends, so the worker
+	// drains the same queue as a fallback — the claim is a conditional update, so the
+	// two are safe to run together (doc/notification.md §5).
+	worker.WithNotificationDispatcher(func(ctx context.Context) error {
+		_, err := p.App.NotificationService.DispatchDue(ctx, 0)
+		return err
+	})
 	return worker
 }
 
