@@ -95,7 +95,7 @@ ADR-0001 与 `wiring.md` 的标题沿用历史写法，其中的「fx」指 uber
 | [`frontend.md`](frontend.md) | 🟢 已实现 | 2026-09-23 | 132 | §1、§6 mdui 实测现状 + §2–§5 assistant-ui 接入（workflow A/B 均落地）。§4 的多会话接线按 [`chat-features.md`](chat-features.md) §2.1.1 的取舍实现（未用 `useRemoteThreadListRuntime`）|
 | [`harness.md`](harness.md) | 🟢 已实现 | 2026-09-23 | 964 | libfx 双宿主 harness：模式探测、AI Gateway 适配层、工具导出、审批长轮询、sidecar、八阶段交付。§16.6 是真机端到端验证记录 |
 | [`chat-features.md`](chat-features.md) | 🟢 已实现 | 2026-09-23 | 365 | 多会话持久化、思考过程、图片附件。§2.1.1 记录了多会话的实际接线取舍（未用 `useRemoteThreadListRuntime`）|
-| [`notification.md`](notification.md) | 🟢 已实现 | 2026-09-24 | 260 | Telegram / Bark / FCM / APNs 四个提供方、通道与接收端的加密存储、队列与退避投递、后台管理界面。§13 是验证记录 |
+| [`notification.md`](notification.md) | 🟢 已实现 | 2026-09-24 | 261 | Telegram / Bark / FCM / APNs 四个提供方、通道与接收端的加密存储、队列与退避投递、后台管理界面。§13 是验证记录 |
 
 ### 2.5 外部工具对接（已实现的部分）
 

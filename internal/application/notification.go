@@ -846,13 +846,12 @@ func (s *NotificationService) httpClient() *http.Client {
 	return s.client
 }
 
-// targetRef is one row of the (target, channel) join the publisher and the dispatcher
-// both need.
+// targetRef is one row of the (target, channel) join the publisher and the broadcaster
+// both need. The join exists for the channel's status, not for its columns.
 type targetRef struct {
 	ID        string
 	UserID    string
 	ChannelID string
-	Provider  string
 }
 
 // activeTargets lists the targets a message can be queued for: this user's, on a
@@ -860,7 +859,7 @@ type targetRef struct {
 func (s *NotificationService) activeTargets(ctx context.Context, userID, channelID string) ([]targetRef, error) {
 	var targets []targetRef
 	query := s.Store.DB.WithContext(ctx).Table("notification_targets AS t").
-		Select("t.id AS id, t.user_id AS user_id, t.channel_id AS channel_id, c.provider AS provider").
+		Select("t.id AS id, t.user_id AS user_id, t.channel_id AS channel_id").
 		Joins("JOIN notification_channels c ON c.id = t.channel_id").
 		Where("t.user_id = ? AND t.status = 'active' AND c.status = 'active'", userID)
 	if channelID != "" {
