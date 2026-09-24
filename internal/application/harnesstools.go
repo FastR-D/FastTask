@@ -385,6 +385,9 @@ func (s *harnessTools) parkForApproval(ctx context.Context, sess *runSession, ru
 	if err := s.repo().SetRunStatus(ctx, run.UserID, run.ID, persistence.RunAwaitingApproval, "", ""); err != nil {
 		return HarnessToolOutcome{}, err
 	}
+	// The run is parked and the host is about to block on a long poll. A user who closed
+	// the tab has no other way to learn a decision is waiting (§7, doc/notification.md §10).
+	notifyProposalPending(ctx, s.svc.app, run, result.Proposal)
 	return HarnessToolOutcome{Status: "pending", ProposalID: proposalID, Result: result.Result}, nil
 }
 

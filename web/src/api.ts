@@ -195,6 +195,11 @@ export function request<T>(path: string, init: RequestInit = {}) { return execut
 
 export function idem() { return crypto.randomUUID() }
 
+// resourceETag builds the strong validator the API's If-Match expects. It lives here,
+// not in a component, because two admin surfaces edit revisioned resources and a
+// hand-built string in either would drift from the server's format silently.
+export function resourceETag(kind: string, id: string, revision: number) { return `"${kind}_${id}_rev_${revision}"` }
+
 export async function login(identifier: string, password: string) {
   const { data } = await request<{access_token:string;refresh_token:string;user:User}>('/auth/login', { method: 'POST', body: JSON.stringify({ identifier, password }) })
   storeAccess(data.access_token)

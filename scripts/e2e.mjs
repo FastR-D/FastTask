@@ -161,6 +161,49 @@ async function main() {
   const panel = await call('/api/v1/panel/summary', { token })
   assert(panel.response.status === 200 && panel.data.core_total <= 3, 'panel summary failed')
 
+  // 通知通道：后台建通道、验证凭据、登记接收端、广播、立即投递、读投递记录。
+  // 默认指向一个不可达地址，所以不需要真实提供方就能跑完整条链路；把
+  // FASTTASK_E2E_PROVIDER 指向一个会应答的替身（Telegram Bot API 或 Bark 的形状）
+  // 即断言真实送达。
+  const providerBase = process.env.FASTTASK_E2E_PROVIDER || 'http://127.0.0.1:9'
+  const botToken = `123456789:AA-e2e-token-${suffix}`
+  const badChannel = await call('/api/v1/admin/notifications/channels', { method: 'POST', token, headers: { 'Idempotency-Key': `e2e-notify-bad-${suffix}` }, body: { name: `缺令牌 ${suffix}`, provider: 'telegram' } })
+  assert(badChannel.response.status === 422, `a channel without a credential returned ${badChannel.response.status}`)
+  assert(String(badChannel.data.detail).includes('bot token'), `the provider diagnosis was dropped: ${badChannel.data.detail}`)
+
+  const notifyChannel = await call('/api/v1/admin/notifications/channels', { method: 'POST', token, headers: { 'Idempotency-Key': `e2e-notify-${suffix}` }, body: { name: `场景机器人 ${suffix}`, provider: 'telegram', endpoint: providerBase, secret: botToken } })
+  assert(notifyChannel.response.status === 201, `channel creation failed: ${notifyChannel.response.status}`)
+  assert(notifyChannel.data.secret_set === true && !JSON.stringify(notifyChannel.data).includes(botToken), 'the credential was echoed back to the client')
+  const channelList = await call('/api/v1/admin/notifications/channels', { token })
+  assert(channelList.response.status === 200 && channelList.data.items.some(item => item.id === notifyChannel.data.id), 'the new channel is not listed')
+
+  const credentialCheck = await call(`/api/v1/admin/notifications/channels/${notifyChannel.data.id}/verification`, { method: 'POST', token, headers: { 'Idempotency-Key': `e2e-notify-verify-${suffix}` } })
+  assert(credentialCheck.response.status === 200, `verification returned ${credentialCheck.response.status}`)
+  assert(typeof credentialCheck.data.verified === 'boolean' && (credentialCheck.data.verified || credentialCheck.data.detail), 'verification reported neither an outcome nor a reason')
+
+  const recipient = await call('/api/v1/admin/notifications/targets', { method: 'POST', token, headers: { 'Idempotency-Key': `e2e-notify-target-${suffix}` }, body: { user_id: login.data.user.id, channel_id: notifyChannel.data.id, address: '-1001234567890', label: '场景接收端' } })
+  assert(recipient.response.status === 201 && recipient.data.address_hint === '…7890', `target registration failed: ${JSON.stringify(recipient.data)}`)
+  assert(!JSON.stringify(recipient.data).includes('-1001234567890'), 'the device address was echoed back to the client')
+
+  const broadcast = await call('/api/v1/admin/notifications/broadcast', { method: 'POST', token, headers: { 'Idempotency-Key': `e2e-notify-broadcast-${suffix}` }, body: { title: '场景广播', body: '端到端验证通知投递' } })
+  assert(broadcast.response.status === 200 && broadcast.data.queued >= 1, `broadcast queued ${broadcast.data?.queued}`)
+  const dispatched = await call('/api/v1/admin/notifications/dispatch', { method: 'POST', token, headers: { 'Idempotency-Key': `e2e-notify-dispatch-${suffix}` } })
+  assert(dispatched.response.status === 200 && dispatched.data.claimed >= 1, `dispatch claimed ${dispatched.data?.claimed}`)
+
+  const deliveries = await call('/api/v1/admin/notifications/messages?limit=20', { token })
+  const delivery = deliveries.data.items.find(item => item.title === '场景广播')
+  assert(delivery, 'the broadcast left no delivery record')
+  assert(delivery.attempts >= 1, 'the dispatcher never attempted the queued message')
+  if (process.env.FASTTASK_E2E_PROVIDER) {
+    assert(delivery.status === 'sent', `the reachable provider did not accept the message: ${delivery.status} ${delivery.last_error}`)
+  }
+
+  const ownTargets = await call('/api/v1/notifications/targets', { token })
+  assert(ownTargets.response.status === 200 && ownTargets.data.items.some(item => item.id === recipient.data.id), 'a user cannot see their own subscription')
+
+  assert((await call(`/api/v1/admin/notifications/targets/${recipient.data.id}`, { method: 'DELETE', token })).response.status === 204, 'target deletion failed')
+  assert((await call(`/api/v1/admin/notifications/channels/${notifyChannel.data.id}`, { method: 'DELETE', token })).response.status === 204, 'channel deletion failed')
+
   console.log(JSON.stringify({
     result: 'PASS',
     goal_id: goal.data.id,
@@ -170,6 +213,7 @@ async function main() {
     daily_completion_preserved_task: true,
     device_etag_304: true,
     panel_summary: true,
+    notification_channel: { provider: notifyChannel.data.provider, verified: credentialCheck.data.verified, delivery: delivery.status, attempts: delivery.attempts },
     lens: lens.id,
     agent_coord_source: agentNode.source,
     user_coord_revision: coord.data.revision,

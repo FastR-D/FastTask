@@ -1345,3 +1345,53 @@ CI 必须：
 | **`GET /agent/runs/{run_id}/approvals/{proposal_id}`** | 长轮询分段响应，Huma 无对应语义 |
 
 这五个端点的 OpenAPI 描述手工维护。**其余新增端点一律走 Huma**，不得借这条例外绕开契约。
+
+## 21. 通知（🟢 已实现）
+
+> 上位文档：[`notification.md`](notification.md)。本节只定**接口契约**；投递语义、退避、租约与提供方判定以该文档为准。字段级仍以 Huma 生成的 OpenAPI 为事实来源。
+
+### 21.1 认证分层
+
+两种主体，不可混用：
+
+| 主体 | 用于 | 说明 |
+|---|---|---|
+| 用户 Bearer | `/notifications/*` | 只能读写**自己**的接收端与投递记录；作用域来自 Token，请求体里没有 `user_id` 字段可填 |
+| 管理员 Bearer | `/admin/notifications/*` | 通道、任意用户的接收端、全站投递记录、广播与手动排水 |
+
+跨用户访问别人的接收端返回 **404**，不是 403：403 会确认该 id 存在。
+
+### 21.2 用户自助
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/notifications/channels` | 可订阅的通道，只含 `active` 的；不含凭据 |
+| GET | `/notifications/targets` | 我的接收端；`?status=` 可过滤 |
+| POST | `/notifications/targets` | 登记一个地址，`201`。同地址重复登记**复活原行**而不是冲突 |
+| PATCH | `/notifications/targets/{target_id}` | 改备注/状态/地址，需 `If-Match` |
+| DELETE | `/notifications/targets/{target_id}` | `204`，级联删除该接收端的投递历史 |
+| POST | `/notifications/targets/{target_id}/test` | 给自己发一条测试，落一条投递记录 |
+| GET | `/notifications/messages` | 我的投递记录；`?status=&topic=&limit=` |
+
+### 21.3 后台
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET / POST | `/admin/notifications/channels` | 列表（含接收端计数）/ 创建（`201`） |
+| PATCH / DELETE | `/admin/notifications/channels/{channel_id}` | 需 `If-Match` / `204`，级联删除接收端与历史 |
+| POST | `/admin/notifications/channels/{channel_id}/verification` | 校验凭据；**不改动 `revision`**，所以客户端的 ETag 继续有效 |
+| POST | `/admin/notifications/channels/{channel_id}/test` | 向一个未登记地址试发，不落任何行 |
+| GET / POST | `/admin/notifications/targets` | 列表（`?user_id=&channel_id=&status=`）/ 为任意用户登记 |
+| PATCH / DELETE | `/admin/notifications/targets/{target_id}` | 需 `If-Match` / `204` |
+| POST | `/admin/notifications/targets/{target_id}/test` | 向已登记接收端试发，落一条记录 |
+| GET | `/admin/notifications/messages` | 全站投递日志，带用户名与通道名 |
+| POST | `/admin/notifications/broadcast` | 向所有在用接收端排队一条消息，返回 `{ queued }` |
+| POST | `/admin/notifications/dispatch` | 立即排水一次，返回 `{ claimed, sent, retried, failed, retired }` |
+
+### 21.4 三条契约规则
+
+1. **凭据只进不出。**创建/更新通道时提交 `secret`，任何响应里只有 `secret_hint` 与 `secret_set`；更新时不带 `secret` 即保留原值。接收端同理：提交 `address`，回来的是 `address_hint`。地址对 FCM/APNs/Bark 而言就是设备凭据。
+2. **配置错误是 422，并带提供方自己的诊断**（例如 `validation failed: telegram: a bot token is required`）。保存通道时服务端会用对应适配器做一次不发网络请求的结构校验，所以填错的通道存不进去。
+3. **校验与试发都是 200，不是 500。**凭据不对、提供方不可达属于「检查成功、结论是否定」，结论在 `verified` / `delivered` 与 `detail` 里；只有通道不存在才是 404。
+
+写操作全部接受 `Idempotency-Key`；`PATCH` 全部要求 `If-Match`（缺失时 Huma 以 422 拒绝，处理层自身的前置条件检查返回 428）。

@@ -53,7 +53,7 @@ FastTask 不以收集全部待办和安排全部时间为目标，而是：
 
 - 流式语音识别、语音播报和免确认语音操作。
 - FastNews、FastRead、FastWrite、FastInsight 的通用事项导入或结果引用已实现；FastLabs、FastPPT 和专用双向适配器仍待后续确认。
-- 浏览器、飞书、邮件或移动推送提醒。
+- 移动与桌面推送提醒已实现：Telegram 机器人、Bark、FCM、APNs 四个通道，管理员在后台配置凭据、登记接收端、验证与试发，见 [`notification.md`](notification.md)。浏览器 Web Push、飞书与邮件仍待后续。
 - 团队共享目标和协作权限。
 - 墨水屏写回完成状态。
 - 附件、图片和复杂成果管理。

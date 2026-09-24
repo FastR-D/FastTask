@@ -47,10 +47,12 @@ type App struct {
 	*GoalService
 	*PlanService
 	*ProgressService
+	*NotificationService
+	*NotificationTargetService
 }
 
 func New(store *persistence.Store) *App {
-	return newApp(store, nil, nil)
+	return newApp(store, "", nil)
 }
 
 // NewWithSecret builds the aggregate with the provider encryption key. The
@@ -58,21 +60,28 @@ func New(store *persistence.Store) *App {
 // "job_materializers" value group (wiring.md §5); callers that pass none (harden,
 // tests) get the builtins, preserving the historical two-argument behaviour.
 func NewWithSecret(store *persistence.Store, secret string, materializers ...JobMaterializer) *App {
-	return newApp(store, deriveSecretKey(secret), materializers)
+	return newApp(store, secret, materializers)
 }
 
-// newApp assembles the aggregate with the given (possibly nil) provider key. It
-// preserves the historical New vs NewWithSecret behaviour exactly: New passes a
-// nil key (encryption fails closed), NewWithSecret always derives one. Services
-// with cross-aggregate composition (§4.1) are constructed in dependency order:
-// IntegrationService needs GoalService.createTaskTx, ProgressService needs
+// newApp assembles the aggregate from the operator's secret. It preserves the
+// historical New vs NewWithSecret behaviour exactly: New passes an empty secret, so
+// every derived key is nil and encryption fails closed; NewWithSecret always derives
+// one. Each secret store derives its own key from its own label (secrets.go), so a
+// model-provider ciphertext and a notification credential are never interchangeable.
+// Services with cross-aggregate composition (§4.1) are constructed in dependency
+// order: IntegrationService needs GoalService.createTaskTx, ProgressService needs
 // PlanService.satisfyItemTx.
-func newApp(store *persistence.Store, secretKey []byte, materializers []JobMaterializer) *App {
+func newApp(store *persistence.Store, secret string, materializers []JobMaterializer) *App {
+	var providerKey, notificationKey []byte
+	if secret != "" {
+		providerKey, notificationKey = deriveSecretKey(secret), deriveNotificationKey(secret)
+	}
 	goals := NewGoalService(store)
 	plans := NewPlanService(store)
+	notifications := NewNotificationService(store, notificationKey)
 	return &App{
 		Store:              store,
-		ProviderService:    NewProviderService(store, secretKey),
+		ProviderService:    NewProviderService(store, providerKey),
 		LensService:        NewLensService(store),
 		DeviceService:      NewDeviceService(store),
 		IntegrationService: NewIntegrationService(store, goals),
@@ -81,6 +90,9 @@ func newApp(store *persistence.Store, secretKey []byte, materializers []JobMater
 		GoalService:        goals,
 		PlanService:        plans,
 		ProgressService:    NewProgressService(store, plans),
+
+		NotificationService:       notifications,
+		NotificationTargetService: NewNotificationTargetService(store, notificationKey, notifications),
 	}
 }
 

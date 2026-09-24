@@ -151,8 +151,8 @@ func TestServeRoleServesRegistrarRoutes(t *testing.T) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	// One path from each of three different registrars collected via group:"routes".
-	for _, path := range []string{`"/auth/login"`, `"/daily-plans"`, `"/integrations/status"`} {
+	// One path from each of several different registrars collected via group:"routes".
+	for _, path := range []string{`"/auth/login"`, `"/daily-plans"`, `"/integrations/status"`, `"/notifications/targets"`, `"/admin/notifications/channels"`} {
 		if !bytes.Contains(body, []byte(path)) {
 			t.Fatalf("fx-assembled OpenAPI missing registrar path %s; the routes value group did not register it", path)
 		}

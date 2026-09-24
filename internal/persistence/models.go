@@ -479,3 +479,91 @@ type AgentRunChunk struct {
 	ChunkJSON string    `json:"chunk_json"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+// NotificationChannel is one provider an administrator configured (doc/notification.md §3).
+// Provider is one of the four adapters internal/notify builds; SettingsJSON is that
+// adapter's non-secret configuration, and SecretCiphertext is its credential — a Telegram
+// bot token, an FCM service-account key, an APNs .p8 key — encrypted with the same AES-GCM
+// key that protects model-provider API keys. Bark needs no credential, so the ciphertext
+// may legitimately be empty for it.
+//
+// LastCheckStatus is the outcome of the last credential check an administrator ran; it is
+// diagnostic and never gates delivery.
+type NotificationChannel struct {
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	Provider         string     `json:"provider"`
+	Endpoint         string     `json:"endpoint"`
+	SettingsJSON     string     `json:"-"`
+	SecretCiphertext string     `json:"-"`
+	SecretHint       string     `json:"secret_hint"`
+	Status           string     `json:"status"`
+	LastCheckAt      *time.Time `json:"last_check_at,omitempty"`
+	LastCheckStatus  string     `json:"last_check_status"`
+	LastError        string     `json:"last_error,omitempty"`
+	Revision         int        `json:"revision"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+// NotificationTarget is one address a user can be reached at on one channel: a Telegram
+// chat id, a Bark device key, an FCM registration token, an APNs device token.
+//
+// The address is a credential — an FCM token in hand is the ability to push to somebody's
+// phone — so only its ciphertext, its hash and a masked hint are stored. The hash is what
+// makes the one-registration-per-address rule exact (migration 000010's unique index) and
+// the hint is what a person recognises the target by.
+//
+// Status "invalid" is written by the dispatcher when a provider permanently rejects the
+// address, which is how an uninstalled app stops being retried forever.
+type NotificationTarget struct {
+	ID                string     `json:"id"`
+	UserID            string     `json:"-"`
+	ChannelID         string     `json:"channel_id"`
+	Label             string     `json:"label"`
+	AddressCiphertext string     `json:"-"`
+	AddressHash       string     `json:"-"`
+	AddressHint       string     `json:"address_hint"`
+	Status            string     `json:"status"`
+	FailureCount      int        `json:"failure_count"`
+	LastError         string     `json:"last_error,omitempty"`
+	LastSentAt        *time.Time `json:"last_sent_at,omitempty"`
+	Revision          int        `json:"revision"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+// NotificationMessage is one queued or finished delivery (doc/notification.md §5). The row
+// is both the queue and the audit trail: `status` and `run_after` decide when a dispatcher
+// may claim it, `attempts` and `max_attempts` bound the retries, and `provider_message_id`
+// is the provider's own id so a delivery can be traced on their side.
+type NotificationMessage struct {
+	ID                string     `json:"id"`
+	UserID            string     `json:"user_id"`
+	ChannelID         string     `json:"channel_id"`
+	TargetID          string     `json:"target_id"`
+	Topic             string     `json:"topic"`
+	Title             string     `json:"title"`
+	Body              string     `json:"body"`
+	URL               string     `json:"url"`
+	PayloadJSON       string     `json:"payload_json"`
+	Status            string     `json:"status"`
+	Attempts          int        `json:"attempts"`
+	MaxAttempts       int        `json:"max_attempts"`
+	ProviderMessageID string     `json:"provider_message_id,omitempty"`
+	LastError         string     `json:"last_error,omitempty"`
+	RunAfter          time.Time  `json:"run_after"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	SentAt            *time.Time `json:"sent_at,omitempty"`
+}
+
+// Notification message statuses. A claimed row stays "sending" with run_after as its lease
+// expiry, so a dispatcher that died mid-send leaves a row that becomes due again instead of
+// one nobody will ever look at.
+const (
+	NotificationQueued  = "queued"
+	NotificationSending = "sending"
+	NotificationSent    = "sent"
+	NotificationFailed  = "failed"
+)
