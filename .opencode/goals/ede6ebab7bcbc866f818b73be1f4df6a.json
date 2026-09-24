@@ -36,15 +36,9 @@
     "maxCost": 0,
     "maxRuntimeMs": 0
   },
-  "progressRevision": 128,
-  "observedProgressRevision": 0,
+  "progressRevision": 134,
+  "observedProgressRevision": 134,
   "progressFingerprints": [
-    "shell:867af3d77bcb731ae01146bf69f3011d04983c42fe75276b4c28a622d4b3a562",
-    "shell:1de700c29687cae34561545f50d3c8b3d9afe88e04cc11069f8a6dc6e4ce9464",
-    "shell:eb72b74d01d1331745e0796c042f48ef7c351d4e22887d455e97cb457c557810",
-    "shell:4f1bd599afdcbdd1c9de6e383e77b253ba14dbecd12de782b2a97e95d1441e1b",
-    "shell:697370719d92e7e12314f1bb8c3668c8b60a007c3f7c7aeffd47a88c6bc38f87",
-    "shell:baf4e41b1e262602392bb42240aa62098247e375862e12c3419cd767e892dad4",
     "shell:52724ab295ab48579888dbeb7efcac483b9d935b4ab58a97de53911d770485a6",
     "shell:e498ee08796750d3b77ea7671fcb5231ce15a5bef056d55a491d5f315187ced5",
     "shell:cb05045eab5ef90bdeb47c1b9aaf4629eb5735519bea31ef698aa7ab456c5e75",
@@ -166,45 +160,16 @@
     "shell:7b0c1c65740e004fbdce08f03a823cfa1236e8f80f4f521f8cc1ccc005f5c7bb",
     "shell:4f720b44d98b948b6c7d375a55e90eb19c54a11d9229aa5e5525e46bdd0ef146",
     "shell:754e115b24209fc70061b03d21e9f9f4927c4fd66381a3510dca0693cd0c32f6",
-    "shell:dd24f85393e4f820cf8bc6ecd5ac15567c74ae868e95e32968d3b6bbb34deacb"
+    "shell:dd24f85393e4f820cf8bc6ecd5ac15567c74ae868e95e32968d3b6bbb34deacb",
+    "shell:150c29bd5aefb131767136c6213f0a22e56f0c61ab551d5ff5fccf5bcdf7ed60",
+    "shell:4140a96ab2133e1766050c7a1df15b38c0b9d187d50416b48b03030a38f43286",
+    "shell:1f4cb4c19a0b82bbbe8afc0e3b501789b03805011b76ab799a323a523f7edd5b",
+    "shell:9cff12cdd18778c917ee9236a8ba6c7aba56d4677ef0dfe76d43767c953ee369",
+    "shell:385e9f306ba1e342c7a7141e4190fb8d514ba5032390f17534ecd4f08fe20273",
+    "shell:e8b3020f9688d787bb331215c95c3a489db8133e1a0f045e1db9a00e9488e880"
   ],
   "stalledTurns": 0,
   "progressNotes": [
-    {
-      "time": 1790185875611,
-      "summary": "[host:tool:bash] Goal-owned shell command completed.",
-      "next": ""
-    },
-    {
-      "time": 1790186074743,
-      "summary": "[host:tool:bash] Goal-owned shell command completed.",
-      "next": ""
-    },
-    {
-      "time": 1790186166134,
-      "summary": "[host:tool:bash] Goal-owned shell command completed.",
-      "next": ""
-    },
-    {
-      "time": 1790186202043,
-      "summary": "[host:tool:bash] Goal-owned shell command completed.",
-      "next": ""
-    },
-    {
-      "time": 1790186235395,
-      "summary": "[host:tool:bash] Goal-owned shell command completed.",
-      "next": ""
-    },
-    {
-      "time": 1790186263639,
-      "summary": "[host:tool:bash] Goal-owned shell command completed.",
-      "next": ""
-    },
-    {
-      "time": 1790186276773,
-      "summary": "[host:tool:bash] Goal-owned shell command completed.",
-      "next": ""
-    },
     {
       "time": 1790186278559,
       "summary": "[host:tool:bash] Goal-owned shell command completed.",
@@ -419,11 +384,46 @@
       "time": 1790188899711,
       "summary": "[host:tool:bash] Goal-owned shell command completed.",
       "next": ""
+    },
+    {
+      "time": 1790188995697,
+      "summary": "[host:tool:bash] Goal-owned shell command completed.",
+      "next": ""
+    },
+    {
+      "time": 1790189029414,
+      "summary": "[host:tool:bash] Goal-owned shell command completed.",
+      "next": ""
+    },
+    {
+      "time": 1790189049728,
+      "summary": "[host:tool:bash] Goal-owned shell command completed.",
+      "next": ""
+    },
+    {
+      "time": 1790189091740,
+      "summary": "Polish pass applied, verified on the built artifact, deployed and pushed. Deleted chrome: harness-bar 840x1px rule + its padding (bar 65->56px), markdown table cell borders/header band/zebra (row hairlines only, first column flush with the measure) and the user-bubble override that existed for the header band, .agent-proposal's filled surface (border only, which also fixes mdui's --mdui-color-background label notch), the thread-row date element and its CSS (it was covered permanently on touch and truncated the title to 115px; title now 179px), .admin-form's tint/radius/padding, and the two touch backdrop rules. Corrected: .admin-card p -> .admin-card>p so the caption is 12px under a 14px title instead of matching it; mdui-icon targets were 18x18 because global border-box made padding eat the glyph box, now content-box + 34px with a finger and in flow with wrap; raw enums admin/active/provider status mapped to Chinese per App.tsx's own rule; full 36-char job id abbreviated like the subject id; mobile goal cards 538/319/383px -> three equal 240px; harness select and the chat reject button moved to the weaker variants; .login-card rebinds --mdui-color-background the way mdui-dialog does. Verification on the built bundle served through the Go static path: 31/31 rendered assertions, 21 scenes with zero horizontal overflow at 1440 light/dark and 400, dark-mode notch/table/proposal spot checks, 166 web tests (169 at rebased HEAD), tsc -b, go build pre-rebase. Deployment: production switched to index-Cii9LK4N.js / index-kp8iHCLh.css with no backend restart; /, both assets, sw.js, fx-core.wasm, manifest and /health/ready all 200 on the public URL; served JS sha256 equals the on-disk file and the copy the assertions ran against; rollback bundle rebuilt from efe3da2 and hash-verified into backups/web-dist-efe3da2-before-polish. Repo synced: pushed c918b5a/af4b144/129ba98/a7837f7 to origin/main, branch in sync. Note recorded in doc/qa-2026-09-24.md: rebasing pulled upstream e81f449 (FastCAS frontend), whose backend cannot be built here (go.mod replaces the SDK with ../FastCAS/sdk/go, absent; go build fails on e81f449 alone in a detached worktree), so the deployed bundle is built from 10ddca2 and deliberately excludes the CAS frontend rather than shipping a login entry point that calls routes the running binary does not have.",
+      "next": "Attempt verified completion: rendered review + one deletion-led polish pass + verification + deployment switch + repo push are all done and recorded in doc/qa-2026-09-24.md."
+    },
+    {
+      "time": 1790189109978,
+      "summary": "[host:tool:bash] Goal-owned shell command completed.",
+      "next": ""
+    },
+    {
+      "time": 1790189134650,
+      "summary": "[host:tool:bash] Goal-owned shell command completed.",
+      "next": ""
+    },
+    {
+      "time": 1790189159016,
+      "summary": "[host:tool:bash] Goal-owned shell command completed.",
+      "next": ""
     }
   ],
-  "storageGeneration": 302,
+  "storageGeneration": 319,
   "createdAt": 1790181780980,
-  "updatedAt": 1790188971100,
+  "updatedAt": 1790189562419,
   "execution": {
     "agent": "build",
     "model": {
@@ -434,10 +434,18 @@
       "contextLimit": 1000000,
       "outputLimit": 131072,
       "autoCompaction": true,
-      "observedAt": 1790188971100,
+      "observedAt": 1790189562419,
       "lastRequestTokens": 12002,
       "lastInputTokens": 11815
     }
   },
-  "stopReason": "Recovering from provider_retry infrastructure failure; automatic retry scheduled. OpenCode reported session.status=retry for an active Goal turn."
+  "stopReason": "Recovering from semantic_verifier infrastructure failure; automatic retry scheduled. semantic verifier unavailable after one automatic timeout retry: semantic verifier timed out after 60000ms",
+  "infrastructureRecovery": {
+    "kind": "semantic_verifier",
+    "reason": "semantic verifier unavailable after one automatic timeout retry: semantic verifier timed out after 60000ms",
+    "attempt": 1,
+    "startedAt": 1790189561434,
+    "nextRetryAt": 1790189576434
+  },
+  "skipNextStallCheck": true
 }
