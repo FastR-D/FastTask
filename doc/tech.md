@@ -953,6 +953,10 @@ docker compose build
 
 #### 已验证事实（2026-09-24，实验室主机）
 
+2026-09-24T14:38:35Z 在宿主上复测并记录：`docker compose ps` 为 `container=fasttask image=fasttask:local status=Up (healthy) ports=10.22.33.15:10000->10000/tcp`；容器内 `id` 为 `uid=100(fasttask)`，`FASTTASK_LISTEN=0.0.0.0`，`FASTTASK_DATABASE=/var/lib/fasttask/fasttask.db`，`FASTTASK_PUBLIC_URL=https://task.fast.0x535a.cn`，`FASTTASK_TRUSTED_PROXIES=10.22.33.0/24`。`http://10.22.33.15:10000/health/ready` 与 `https://task.fast.0x535a.cn/health/ready` 都返回 `{"status":"ready"}`，公网首页引用 `assets/index-DFGJ0URA.js`。`/root/dockerData/fasttask/fasttask.db` 为 `schema=10 users=3 goals=7 tasks=34`，`PRAGMA integrity_check` 返回 `ok`。`HEAD` 与 `origin/main` 都是 `adb3562bb527f0db10062990cd6c84f9e58d13e4`。
+
+
+
 - 生产库 schema `8 → 10`（依次 `000009_fastcas`、`000010_notifications`），`3 users / 7 goals / 34 tasks / 6 threads` 计数不变，`integrity_check=ok`、`foreign_key_check` 无输出。
 - 容器 `Up (healthy)`，端口由 docker-proxy 绑定在原 `FASTTASK_LISTEN:FASTTASK_PORT`；`/health/live`、`/health/ready`、`/health/version` 正常。
 - 管理员登录、`/me`、`/goals`（按用户正确分域：admin 3 条、stephenzeng 4 条）、用户与后台通知接口均返回正常，新表为空。
