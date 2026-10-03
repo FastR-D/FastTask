@@ -113,7 +113,7 @@ go run ./cmd/fasttask serve --with-worker --with-scheduler
 | `FASTTASK_ADMIN_USER` | `admin` | 首次启动管理员账号 |
 | `FASTTASK_ADMIN_PASSWORD` | `fasttask-admin` | 首次启动管理员密码 |
 | `FASTTASK_ADMIN_NAME` | `FastTask Admin` | 管理员显示名 |
-| `FASTTASK_PANEL_JWT_SECRET` | 与 JWT Secret 相同 | Panel/外部 Worker 短期 Service JWT 签名密钥 |
+| `FASTTASK_PANEL_JWT_SECRET` | 与 JWT Secret 相同 | Panel/外部 Worker 短期 Service JWT 签名密钥；单独设置时至少 24 字符 |
 | `FASTTASK_FASTREAD_URL` | 空 | 可选 FastRead Base URL，例如直接后端 `http://127.0.0.1:8483` 或 Docker/Nginx `http://127.0.0.1:3015` |
 | `FASTTASK_FASTWRITE_URL` | 空 | 可选 FastWrite Base URL，例如 `http://127.0.0.1:3003` |
 | `FASTTASK_INTEGRATION_TIMEOUT_MS` | `2000` | 外部健康探测超时，范围 100 至 10000 毫秒 |

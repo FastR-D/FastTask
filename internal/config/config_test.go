@@ -85,3 +85,25 @@ func TestSidecarStartTimeoutHasAFloor(t *testing.T) {
 		t.Fatal("Load accepted a sidecar start timeout below 1s")
 	}
 }
+
+func TestPanelSecretIsHeldToTheJWTRule(t *testing.T) {
+	setEnv(t, map[string]string{"FASTTASK_PANEL_JWT_SECRET": "short"})
+	if _, err := Load(); err == nil {
+		t.Fatal("Load accepted a 5-character panel secret")
+	}
+	setEnv(t, map[string]string{
+		"FASTTASK_ENV":              "production",
+		"FASTTASK_PANEL_JWT_SECRET": "local-development-secret-change-me",
+	})
+	if _, err := Load(); err == nil {
+		t.Fatal("production accepted the development panel secret")
+	}
+	setEnv(t, map[string]string{"FASTTASK_PANEL_JWT_SECRET": ""})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PanelJWTSecret != cfg.JWTSecret {
+		t.Fatal("an unset panel secret no longer falls back to the JWT secret")
+	}
+}

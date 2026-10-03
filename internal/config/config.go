@@ -191,6 +191,14 @@ func Load() (Config, error) {
 	if c.Environment == "production" && (strings.Contains(c.JWTSecret, "development") || c.AdminPassword == "fasttask-admin") {
 		return Config{}, errors.New("production requires non-default FASTTASK_JWT_SECRET and FASTTASK_ADMIN_PASSWORD")
 	}
+	// The panel secret signs service tokens that act on a user's behalf (imports, agent-job callbacks),
+	// so a separately configured one is held to the same rule as the JWT secret.
+	if len(c.PanelJWTSecret) < 24 {
+		return Config{}, errors.New("FASTTASK_PANEL_JWT_SECRET must contain at least 24 characters")
+	}
+	if c.Environment == "production" && strings.Contains(c.PanelJWTSecret, "development") {
+		return Config{}, errors.New("production requires a non-default FASTTASK_PANEL_JWT_SECRET")
+	}
 	if c.Environment == "production" && (len(c.ProviderEncryptionKey) < 32 || strings.Contains(c.ProviderEncryptionKey, "development") || c.ProviderEncryptionKey == c.JWTSecret) {
 		return Config{}, errors.New("production requires a unique FASTTASK_PROVIDER_ENCRYPTION_KEY with at least 32 characters")
 	}
