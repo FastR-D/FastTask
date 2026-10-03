@@ -17,6 +17,25 @@ import {
 // without a reload. Archive and delete are visually distinct on purpose — one keeps every row and the other
 // takes the runs, messages, checkpoint and attachments with it (§2.5).
 
+// The row actions are bare icons so they can sit over the row's end without a button's 40px box. They
+// still have to be reachable and operable from the keyboard: the CSS already reveals them on
+// focus-within, which only helps if they can take focus.
+function actionProps(label: string, run: () => void) {
+  return {
+    title: label,
+    'aria-label': label,
+    role: 'button',
+    tabIndex: 0,
+    onClick: run,
+    onKeyDown: (event: { key: string; preventDefault: () => void }) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        run()
+      }
+    },
+  }
+}
+
 type Props = {
   activeId: string | null
   onOpen: (threadId: string | null) => void
@@ -162,14 +181,13 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
               </button>
             )}
             <span className="agent-thread-actions">
-              <mdui-icon name="edit" title="重命名" onClick={() => { setEditing(thread.id); setDraft(thread.title) }} />
-              <mdui-icon name="auto_awesome" title="按首条消息生成标题" onClick={() => void autoTitle(thread)} />
+              <mdui-icon name="edit" {...actionProps('重命名', () => { setEditing(thread.id); setDraft(thread.title) })} />
+              <mdui-icon name="auto_awesome" {...actionProps('按首条消息生成标题', () => void autoTitle(thread))} />
               <mdui-icon
                 name={thread.archived ? 'unarchive' : 'archive'}
-                title={thread.archived ? '取消归档' : '归档'}
-                onClick={() => void toggleArchived(thread)}
+                {...actionProps(thread.archived ? '取消归档' : '归档', () => void toggleArchived(thread))}
               />
-              <mdui-icon name="delete" title="删除（不可撤销）" onClick={() => void remove(thread)} />
+              <mdui-icon name="delete" {...actionProps('删除（不可撤销）', () => void remove(thread))} />
             </span>
           </li>
         ))}

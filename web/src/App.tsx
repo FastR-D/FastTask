@@ -148,13 +148,13 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
         <mdui-tooltip content={`${user?.display_name || '加载中'} · ${user?.timezone || ''}`} placement="left">
           <span className="rail-avatar">{user?.display_name?.slice(0, 1) || 'F'}</span>
         </mdui-tooltip>
-        <mdui-button-icon icon="logout" onClick={onLogout}/>
+        <mdui-button-icon icon="logout" aria-label="退出登录" onClick={onLogout}/>
       </div>
     </mdui-navigation-rail>
     <mdui-top-app-bar className="app-bar">
-      <mdui-button-icon icon="menu" onClick={() => setDrawerOpen(true)}/>
+      <mdui-button-icon icon="menu" aria-label="打开导航" onClick={() => setDrawerOpen(true)}/>
       <mdui-top-app-bar-title>FastTask · {currentLabel}</mdui-top-app-bar-title>
-      <mdui-button-icon icon="logout" onClick={onLogout}/>
+      <mdui-button-icon icon="logout" aria-label="退出登录" onClick={onLogout}/>
     </mdui-top-app-bar>
     <mdui-layout-main className="app-main">
       <div className={tab==='dialogue' ? 'page page-dialogue' : 'page'}>
