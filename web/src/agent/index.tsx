@@ -5,7 +5,7 @@ import {
   MessagePrimitive,
   ThreadPrimitive,
 } from '@assistant-ui/react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { request } from '../api'
 import { createImageAttachmentAdapter } from './attachments'
 import { HarnessModeControl, HarnessStatusLine, useOnline } from './HarnessStatus'
@@ -65,12 +65,17 @@ function keyOf(view: View): string {
 }
 
 export function AgentChat({ goalId, onNotice }: { goalId: string | null; onNotice?: (message: string) => void }) {
-  const notify = onNotice ?? (() => {})
+  // Every callback handed down is stable. The conversation below must not re-render because this
+  // component did (see Conversation), so nothing passed to it may change identity on a re-render.
+  const noticeRef = useRef(onNotice)
+  noticeRef.current = onNotice
+  const notify = useCallback((message: string) => noticeRef.current?.(message), [])
   const [view, setView] = useState<View>({ kind: 'latest' })
   const [threadId, setThreadId] = useState<string | null>(null)
 
   // A finished run gives the thread a title and moves it to the top of the list; bumping this re-reads it.
   const [revision, setRevision] = useState(0)
+  const threadChanged = useCallback(() => setRevision(value => value + 1), [])
   const activeId = view.kind === 'thread' ? view.id : threadId
 
   return (
@@ -88,7 +93,7 @@ export function AgentChat({ goalId, onNotice }: { goalId: string | null; onNotic
           goalId={goalId}
           onNotice={notify}
           onThreadId={setThreadId}
-          onThreadChanged={() => setRevision(value => value + 1)}
+          onThreadChanged={threadChanged}
         />
       </div>
     </div>
@@ -150,7 +155,12 @@ function AgentConversation({
   )
 }
 
-function Conversation({
+// Memoised on purpose, and its props must stay stable: assistant-ui's useAssistantTransportRuntime builds
+// a new in-memory thread-list adapter on every render of the component that calls it, and a new adapter
+// resets the thread to initialState. Re-rendering this component after a run finished — which the
+// thread-list refresh did — wiped the reply the user had just watched stream in. State that changes while
+// a conversation is open lives in the runtime, never in this component or its props.
+const Conversation = memo(function Conversation({
   initialState,
   onNotice,
   onThreadChanged,
@@ -199,7 +209,7 @@ function Conversation({
       </ThreadPrimitive.Root>
     </AssistantRuntimeProvider>
   )
-}
+})
 
 function UserMessage() {
   return (
