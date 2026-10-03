@@ -1,6 +1,7 @@
 import { unstable_useComposerInput } from '@assistant-ui/react'
 import { useRef, useState } from 'react'
 import { idem, request } from '../api'
+import { waitJob } from '../jobs'
 import type { Job } from '../types'
 import { negotiateRecordingMime } from './audio'
 
@@ -88,12 +89,3 @@ export function VoiceButton({ onNotice }: { onNotice: (message: string) => void 
   )
 }
 
-// waitJob polls a job until it reaches a terminal state (mirrors App.tsx's helper).
-async function waitJob(id: string): Promise<Job> {
-  for (let i = 0; i < 40; i++) {
-    await new Promise(resolve => setTimeout(resolve, 250))
-    const { data } = await request<Job>(`/agent-jobs/${id}`)
-    if (['succeeded', 'failed', 'cancelled'].includes(data.status)) return data
-  }
-  throw new Error('转写超时，请稍后重试')
-}

@@ -8,6 +8,7 @@ import { GoalMapView, Review } from './Lens'
 import { PwaUpdate } from './PwaUpdate'
 import { AgentChat } from './agent'
 import { localDateInTimezone } from './date'
+import { waitJob } from './jobs'
 
 type Tab = 'today' | 'goals' | 'dialogue' | 'jobs' | 'review' | 'devices' | 'admin' | 'account'
 
@@ -375,6 +376,5 @@ function Devices({ onNotice, timezone }: { onNotice:(s:string)=>void; timezone?:
   </section>
 }
 
-async function waitJob(id:string){for(let i=0;i<30;i++){await new Promise(r=>setTimeout(r,250));const {data}=await request<Job>(`/agent-jobs/${id}`);if(['succeeded','failed','cancelled'].includes(data.status))return data}throw new Error('作业仍在运行，请稍后刷新')}
 function etag(kind:string,id:string,revision:number){return `"${kind}_${id}_rev_${revision}"`}
 function errorText(error:unknown){return error instanceof Error?error.message:'操作失败'}
