@@ -1138,11 +1138,25 @@ func audioExtension(filename string) string {
 }
 
 func (s jobRoutes) RegisterRoutes(api huma.API) {
-	type listInput struct{}
-	register(api, "list-agent-jobs", http.MethodGet, "/agent-jobs", "List agent jobs", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.AgentJob], error) {
+	type listInput struct {
+		// Jobs accumulate for as long as an account is used and each carries its full output, while
+		// the queue page polls this list; it returns the most recent ones.
+		Limit int `query:"limit" minimum:"1" maximum:"200" default:"100"`
+	}
+	register(api, "list-agent-jobs", http.MethodGet, "/agent-jobs", "List recent agent jobs", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.AgentJob], error) {
+		limit := input.Limit
+		if limit <= 0 {
+			limit = 100
+		}
 		var items []persistence.AgentJob
-		s.app.Store.DB.Where("user_id = ?", principal(ctx).UserID).Order("created_at DESC").Find(&items)
+		if err := s.app.Store.DB.WithContext(ctx).Where("user_id = ?", principal(ctx).UserID).Order("created_at DESC").Limit(limit + 1).Find(&items).Error; err != nil {
+			return nil, mapError(err)
+		}
 		out := &listResponse[persistence.AgentJob]{}
+		out.Body.HasMore = len(items) > limit
+		if out.Body.HasMore {
+			items = items[:limit]
+		}
 		out.Body.Items = items
 		return out, nil
 	})

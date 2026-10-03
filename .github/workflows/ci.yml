@@ -84,6 +84,7 @@ jobs:
           # unit test and still leave a deployment without them.
           sqlite3 "$FASTTASK_DATABASE" '.tables' | tr ' ' '\n' | grep -qx notification_channels
           sqlite3 "$FASTTASK_DATABASE" '.tables' | tr ' ' '\n' | grep -qx notification_messages
+          sqlite3 "$FASTTASK_DATABASE" "select name from sqlite_master where type='index'" | grep -qx idx_agent_jobs_user_created
           sqlite3 "$FASTTASK_DATABASE" 'select count(*) from schema_migrations'
 
       # §19: the binary must actually open SQLite, serve, and round-trip a write.

@@ -315,7 +315,7 @@ cp backups/fasttask.db /var/lib/fasttask/fasttask.db && chmod 600 /var/lib/fastt
 
 ### Schema 版本
 
-当前 `ExpectedSchemaVersion = 10`（`000009_fastcas` 新增可选统一身份的三张表，`000010_notifications` 新增 `notification_channels`、`notification_targets` 和 `notification_messages`）。
+当前 `ExpectedSchemaVersion = 11`（`000009_fastcas` 新增可选统一身份的三张表，`000010_notifications` 新增 `notification_channels`、`notification_targets` 和 `notification_messages`，`000011_query_indexes` 只为高频查询补索引，不改表、不改数据）。
 
 `serve` 启动时会自动执行 Migration。若用旧二进制创建的数据库直接跑新二进制而没有迁移，`/health/ready` 会返回 `503`，此时先执行：
 
