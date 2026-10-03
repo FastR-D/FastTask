@@ -32,7 +32,12 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
-	dsn := path + "?_busy_timeout=5000&_foreign_keys=on&_journal_mode=WAL&_synchronous=NORMAL"
+	// _txlock=immediate: every transaction takes the write lock at BEGIN. FastTask's transactions are
+	// read-modify-write (revision checks, job claims, token rotation); a deferred one that read before
+	// another writer committed cannot upgrade, and SQLite fails it at once with "database is locked"
+	// without consulting busy_timeout. BEGIN IMMEDIATE waits for the lock under busy_timeout instead.
+	// Plain reads outside a transaction are unaffected and still run concurrently under WAL.
+	dsn := path + "?_busy_timeout=5000&_foreign_keys=on&_journal_mode=WAL&_synchronous=NORMAL&_txlock=immediate"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
