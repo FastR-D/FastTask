@@ -402,3 +402,9 @@ button,input,textarea{font:inherit}
 }
 .pwa-update>span{flex:1 1 auto;min-width:0}
 .pwa-update mdui-button-icon{color:rgb(var(--mdui-color-inverse-on-surface))}
+
+/* ===== 账号认证 ===== */
+.account-body{display:grid;gap:var(--ft-space-3);max-width:36rem}
+.account-body .meta{color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-small-size)}
+.account-state{font-size:var(--mdui-typescale-title-small-size);font-weight:var(--mdui-typescale-title-small-weight)}
+.account-state .meta{font-weight:400}

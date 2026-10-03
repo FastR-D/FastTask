@@ -109,7 +109,7 @@ export function Review({ onNotice }: { onNotice: (value: string) => void }) {
           {empty ? (
             <div className="empty-state">
               <h2>本周没有记录到有效专注时间</h2>
-              <p>{review.summary.text}完成一次专注或记录一条推进证据后，这里会出现四区分布与停滞提醒。</p>
+              <p>完成一次专注或记录一条推进证据后，这里会出现四区分布与停滞提醒。</p>
             </div>
           ) : (
             <>
