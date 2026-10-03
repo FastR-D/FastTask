@@ -68,7 +68,11 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 		// wasm-unsafe-eval is what lets the browser host compile fx-core.wasm; without it a
 		// script-src of 'self' blocks WebAssembly instantiation and the agent silently degrades
 		// (doc/harness.md §9). It is narrower than unsafe-eval: no JS eval is permitted.
-		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+		// Fonts and icons are self-hosted (@fontsource), so no third-party style or font origin is
+		// allowed: the refresh token lives in localStorage, and every origin this policy admits is one
+		// more place a script or stylesheet could be served from. form-action closes the one sink
+		// default-src does not cover.
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		switch {
 		case strings.HasPrefix(c.Request.URL.Path, "/assets/"):
 			c.Header("Cache-Control", "public, max-age=31536000, immutable")

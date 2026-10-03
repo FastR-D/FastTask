@@ -177,4 +177,8 @@ func TestSecurityPolicyAllowsWasm(t *testing.T) {
 	if strings.Contains(policy, "script-src 'self' 'unsafe-eval'") {
 		t.Fatalf("CSP widened to unsafe-eval, which permits arbitrary JS eval: %q", policy)
 	}
+	// Everything the page loads is same-origin; no third-party origin may creep back in.
+	if strings.Contains(policy, "https://") || strings.Contains(policy, "http://") {
+		t.Fatalf("CSP admits a third-party origin: %q", policy)
+	}
 }
