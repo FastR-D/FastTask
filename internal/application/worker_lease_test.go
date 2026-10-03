@@ -89,3 +89,23 @@ func TestWorkerStopsAnAttemptWhoseLeaseWasLost(t *testing.T) {
 		t.Fatal("attempt kept running after its lease was lost")
 	}
 }
+
+func TestPendingJobsAreBoundedPerUser(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	for i := 0; i < MaxPendingJobsPerUser; i++ {
+		if _, err := f.app.CreateJob(ctx, f.user.ID, "task_tree_generation", "goal", f.goal.ID, 4, map[string]any{}); err != nil {
+			t.Fatalf("job %d refused: %v", i+1, err)
+		}
+	}
+	if _, err := f.app.CreateJob(ctx, f.user.ID, "task_tree_generation", "goal", f.goal.ID, 4, map[string]any{}); !errors.Is(err, ErrTooManyJobs) {
+		t.Fatalf("job past the bound: err=%v", err)
+	}
+	// Finishing one makes room again.
+	if err := f.store.DB.Model(&persistence.AgentJob{}).Where("user_id = ?", f.user.ID).Limit(1).Update("status", "succeeded").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.app.CreateJob(ctx, f.user.ID, "task_tree_generation", "goal", f.goal.ID, 4, map[string]any{}); err != nil {
+		t.Fatalf("room was not freed: %v", err)
+	}
+}

@@ -17,8 +17,10 @@ import (
 )
 
 var (
-	ErrNotFound             = errors.New("resource not found")
-	ErrConflict             = errors.New("resource conflict")
+	ErrNotFound = errors.New("resource not found")
+	ErrConflict = errors.New("resource conflict")
+	// ErrTooManyJobs refuses a job while its owner already has MaxPendingJobsPerUser unfinished ones.
+	ErrTooManyJobs          = errors.New("too many unfinished jobs; wait for some to finish")
 	ErrRevision             = errors.New("revision mismatch")
 	ErrPrecondition         = errors.New("precondition required")
 	ErrValidation           = errors.New("validation failed")

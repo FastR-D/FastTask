@@ -38,10 +38,30 @@ func (a *JobService) CreateJob(ctx context.Context, userID, jobType, subjectType
 	}
 	now := persistence.Now()
 	job := persistence.AgentJob{ID: persistence.NewID("job"), UserID: userID, Type: jobType, Status: "queued", SubjectType: subjectType, SubjectID: subjectID, BaseRevision: baseRevision, InputJSON: string(encoded), MaxAttempts: 3, RunAfter: now, Revision: 1, CreatedAt: now, UpdatedAt: now}
-	if err := a.Store.DB.WithContext(ctx).Create(&job).Error; err != nil {
+	if err := a.enqueue(ctx, &job); err != nil {
 		return nil, err
 	}
 	return &job, nil
+}
+
+// MaxPendingJobsPerUser bounds one account's unfinished jobs. The worker serves the queue oldest first
+// across all users, so without a bound one account submitting in a loop — a script, or a stuck client —
+// would push every other user's plan and task-tree generation behind its backlog.
+const MaxPendingJobsPerUser = 10
+
+// enqueue inserts a job unless its owner is already at the pending bound. The count and the insert share
+// one (immediate) transaction, so concurrent submissions cannot both slip under the bound.
+func (a *JobService) enqueue(ctx context.Context, job *persistence.AgentJob) error {
+	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		var pending int64
+		if err := tx.Model(&persistence.AgentJob{}).Where("user_id = ? AND status IN ('queued','running')", job.UserID).Count(&pending).Error; err != nil {
+			return err
+		}
+		if pending >= MaxPendingJobsPerUser {
+			return ErrTooManyJobs
+		}
+		return tx.Create(job).Error
+	})
 }
 
 func (a *JobService) RetryJob(ctx context.Context, userID, id string, expected int) (*persistence.AgentJob, error) {
@@ -62,7 +82,7 @@ func (a *JobService) RetryJob(ctx context.Context, userID, id string, expected i
 	job.ErrorCode, job.ErrorMessage, job.OutputJSON, job.LockedBy, job.RunTokenHash = "", "", "", "", ""
 	job.LockedUntil, job.StartedAt, job.FinishedAt = nil, nil, nil
 	job.RunAfter, job.CreatedAt, job.UpdatedAt = now, now, now
-	if err := a.Store.DB.WithContext(ctx).Create(&job).Error; err != nil {
+	if err := a.enqueue(ctx, &job); err != nil {
 		return nil, err
 	}
 	return &job, nil

@@ -1904,6 +1904,8 @@ func mapError(err error) error {
 		return huma.Error422UnprocessableEntity(err.Error())
 	case errors.Is(err, application.ErrStaleAgentAttempt):
 		return huma.Error409Conflict("stale agent attempt")
+	case errors.Is(err, application.ErrTooManyJobs):
+		return huma.Error429TooManyRequests(err.Error())
 	case errors.Is(err, application.ErrForbidden):
 		return huma.Error403Forbidden("administrator permission required")
 	default:
