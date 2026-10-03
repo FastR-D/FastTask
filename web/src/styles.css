@@ -199,7 +199,7 @@ button,input,textarea{font:inherit}
 .goal-layout{display:grid;grid-template-columns:18rem minmax(0,1fr);gap:var(--ft-space-5);align-items:start}
 .goal-list{border:1px solid rgb(var(--mdui-color-outline-variant));border-radius:var(--mdui-shape-corner-medium);max-height:70vh;overflow-y:auto}
 .goal-item-text{display:flex;flex-direction:column;min-width:0}
-.goal-item-text b{overflow:hidden;text-overflow:ellipsis;font-weight:var(--mdui-typescale-title-small-weight)}
+.goal-item-text b{overflow:hidden;text-overflow:ellipsis;font-weight:var(--mdui-typescale-title-small-weight);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow-wrap:anywhere}
 .goal-item-text small{color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-small-size);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .goal-status{width:.5rem;height:.5rem;flex:none;border-radius:var(--mdui-shape-corner-full);background:rgb(var(--mdui-color-outline));margin-right:var(--ft-space-3)}
 .goal-status.active{background:rgb(var(--mdui-color-primary))}
@@ -257,22 +257,28 @@ button,input,textarea{font:inherit}
 }
 .task-create{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) auto;gap:var(--ft-space-3);align-items:center}
 
+/* A proposal waits for a decision, so it stands out from the task list — but it is not an error.
+   A tinted surface and a primary rule carry "needs you"; red is reserved for an operation that
+   removes work. */
 .proposal-card{
   padding:var(--ft-space-4);display:grid;gap:var(--ft-space-3);
-  border:1px solid rgb(var(--mdui-color-error));
-  background:rgb(var(--mdui-color-error-container));
-  color:rgb(var(--mdui-color-on-error-container));
+  border:1px solid rgb(var(--mdui-color-outline-variant));
+  border-left:3px solid rgb(var(--mdui-color-primary));
+  background:rgb(var(--mdui-color-surface-container-low));
+  color:rgb(var(--mdui-color-on-surface));
   border-radius:var(--mdui-shape-corner-medium);
 }
-.proposal-card .eyebrow{color:inherit;opacity:.75}
+.proposal-card .eyebrow{color:rgb(var(--mdui-color-primary))}
 .proposal-card h3{
   font-size:var(--mdui-typescale-title-large-size);
   line-height:var(--mdui-typescale-title-large-line-height);
   font-weight:500;
 }
-.proposal-op{display:grid;grid-template-columns:5.5rem minmax(0,1fr);gap:var(--ft-space-1) var(--ft-space-3);padding:var(--ft-space-3) 0;border-top:1px solid rgba(var(--mdui-color-outline),.4)}
-.proposal-op b{color:rgb(var(--mdui-color-error));font-size:var(--mdui-typescale-label-large-size);text-transform:uppercase}
-.proposal-op small{grid-column:2;opacity:.8;font-size:var(--mdui-typescale-body-small-size)}
+.proposal-op{display:grid;grid-template-columns:3.5rem minmax(0,1fr);gap:var(--ft-space-1) var(--ft-space-3);padding:var(--ft-space-3) 0;border-top:1px solid rgb(var(--mdui-color-outline-variant))}
+.proposal-op b{color:rgb(var(--mdui-color-primary));font-size:var(--mdui-typescale-label-large-size);font-weight:var(--mdui-typescale-label-large-weight)}
+.proposal-op b.op-supersede{color:rgb(var(--mdui-color-error))}
+.proposal-op span{overflow-wrap:anywhere}
+.proposal-op small{grid-column:2;color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-small-size)}
 
 @media (max-width:839.98px){
   .goal-layout{grid-template-columns:1fr}

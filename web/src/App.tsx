@@ -240,12 +240,19 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
   useMduiEvent(createDialogRef, 'close', () => setShowCreate(false))
   const [goalDraft,setGoalDraft]=useState({title:'',criteria:'',target:'',description:''})
   const [taskDraft,setTaskDraft]=useState({title:'',criteria:'',minimum:''})
-	async function load(goal=selected, fresh=false){const refresh=fresh?`?_refresh=${idem()}`:'';const g=await request<{items:Goal[]}>(`/goals${refresh}`);setGoals(g.data.items);const t=await request<{items:Task[]}>('/tasks').catch(()=>null);if(t)setTasks(t.data.items);const active=goal||g.data.items[0]||null;if(!selected&&active)setSelected(active);if(active){const response=await request<TaskTree>(`/goals/${active.id}/task-tree${refresh}`);setTree(response.data);setTreeETag(response.etag||etag('tree',active.id,response.data.revision))}}
+  // One mutation at a time: a second click on 创建 / 添加 / 确认应用 while the first is in flight would
+  // otherwise send a duplicate (fresh idempotency key) or a request against a revision about to change.
+  const [busy,setBusy]=useState<''|'goal'|'task'|'agent'|'proposal'>('')
+  // The tree shown must belong to the goal selected last: switching goals quickly must not let the
+  // slower response for the previous goal land under the new goal's heading.
+  const latestGoal=useRef('')
+	async function load(goal=selected, fresh=false){const refresh=fresh?`?_refresh=${idem()}`:'';const g=await request<{items:Goal[]}>(`/goals${refresh}`);setGoals(g.data.items);const t=await request<{items:Task[]}>('/tasks').catch(()=>null);if(t)setTasks(t.data.items);const active=goal||g.data.items[0]||null;if(!selected&&active)setSelected(active);if(active){latestGoal.current=active.id;const response=await request<TaskTree>(`/goals/${active.id}/task-tree${refresh}`);if(latestGoal.current!==active.id)return;setTree(response.data);setTreeETag(response.etag||etag('tree',active.id,response.data.revision))}}
+  async function guarded(kind:'goal'|'task'|'agent'|'proposal',action:()=>Promise<void>){if(busy)return;setBusy(kind);try{await action()}finally{setBusy('')}}
   useEffect(()=>{load().catch(e=>onNotice(errorText(e)))},[])
-  async function createGoal(){if(!goalDraft.title.trim()||!goalDraft.criteria.trim())return;try{const {data:goal}=await request<Goal>('/goals',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({title:goalDraft.title,description:goalDraft.description,success_criteria:goalDraft.criteria,target_date:goalDraft.target||null})});setShowCreate(false);setGoalDraft({title:'',criteria:'',target:'',description:''});setSelected(goal);onNotice('目标已创建');await load(goal,true)}catch(e){onNotice(errorText(e))}}
-  async function addTask(){if(!selected||!taskDraft.title.trim()||!taskDraft.criteria.trim()||!taskDraft.minimum.trim())return;try{await request('/tasks',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({goal_id:selected.id,type:'task',title:taskDraft.title,description:'',success_criteria:taskDraft.criteria,minimum_action:taskDraft.minimum,estimate_minutes:50,priority:70,position:tasks.length})});setTaskDraft({title:'',criteria:'',minimum:''});onNotice('任务已加入目标树');await load(selected,true)}catch(e){onNotice(errorText(e))}}
-	async function askAgent(revision=false){if(!selected)return;try{const path=revision?'revision-jobs':'generation-jobs';const headers:Record<string,string>={'Idempotency-Key':idem()};if(revision)headers['If-Match']=treeETag;const instruction=revision?revisionInstruction:'生成三层以内的可执行任务树，每个任务必须有最小行动';const {data}=await request<Job>(`/goals/${selected.id}/task-tree/${path}`,{method:'POST',headers,body:JSON.stringify({instruction})});onNotice(`作业 ${data.id} 已进入队列`);const job=await waitJob(data.id);if(job.status!=='succeeded')throw new Error(job.error_message||'Agent 作业失败');await load(selected,true);setRevisionInstruction('')}catch(e){onNotice(errorText(e))}}
-	async function decide(proposal:Proposal,apply:boolean){if(!selected)return;try{if(apply){await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/application`,{method:'POST',headers:{'If-Match':treeETag,'Idempotency-Key':idem()}});onNotice('提案已确认并应用')}else{await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/rejection`,{method:'PUT',headers:{'If-Match':etag('proposal',proposal.id,proposal.revision)}});onNotice('提案已拒绝')}await load(selected,true)}catch(e){onNotice(errorText(e))}}
+  async function createGoal(){if(!goalDraft.title.trim()||!goalDraft.criteria.trim())return;await guarded('goal',async()=>{try{const {data:goal}=await request<Goal>('/goals',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({title:goalDraft.title,description:goalDraft.description,success_criteria:goalDraft.criteria,target_date:goalDraft.target||null})});setShowCreate(false);setGoalDraft({title:'',criteria:'',target:'',description:''});setSelected(goal);onNotice('目标已创建');await load(goal,true)}catch(e){onNotice(errorText(e))}})}
+  async function addTask(){if(!selected||!taskDraft.title.trim()||!taskDraft.criteria.trim()||!taskDraft.minimum.trim())return;await guarded('task',async()=>{try{await request('/tasks',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({goal_id:selected.id,type:'task',title:taskDraft.title,description:'',success_criteria:taskDraft.criteria,minimum_action:taskDraft.minimum,estimate_minutes:50,priority:70,position:tasks.length})});setTaskDraft({title:'',criteria:'',minimum:''});onNotice('任务已加入目标树');await load(selected,true)}catch(e){onNotice(errorText(e))}})}
+	async function askAgent(revision=false){if(!selected)return;await guarded('agent',async()=>{try{const path=revision?'revision-jobs':'generation-jobs';const headers:Record<string,string>={'Idempotency-Key':idem()};if(revision)headers['If-Match']=treeETag;const instruction=revision?revisionInstruction:'生成三层以内的可执行任务树，每个任务必须有最小行动';const {data}=await request<Job>(`/goals/${selected.id}/task-tree/${path}`,{method:'POST',headers,body:JSON.stringify({instruction})});onNotice(`作业 ${data.id} 已进入队列`);const job=await waitJob(data.id);if(job.status!=='succeeded')throw new Error(job.error_message||'Agent 作业失败');await load(selected,true);setRevisionInstruction('')}catch(e){onNotice(errorText(e))}})}
+	async function decide(proposal:Proposal,apply:boolean){if(!selected)return;await guarded('proposal',async()=>{try{if(apply){await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/application`,{method:'POST',headers:{'If-Match':treeETag,'Idempotency-Key':idem()}});onNotice('提案已确认并应用')}else{await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/rejection`,{method:'PUT',headers:{'If-Match':etag('proposal',proposal.id,proposal.revision)}});onNotice('提案已拒绝')}await load(selected,true)}catch(e){onNotice(errorText(e))}})}
   return <section className="goals-page"><header className="page-head"><div className="title-block"><p className="eyebrow">{goals.length} 个长期目标</p><h1>目标树</h1></div><div className="head-side"><mdui-button variant="filled" icon={showCreate?'close':'add'} onClick={()=>setShowCreate(v=>!v)}>新建目标</mdui-button></div></header>
     {showCreate&&<mdui-dialog ref={createDialogRef} className="goal-dialog" open headline="新建目标" description="长期目标定义方向，验收标准决定什么才算完成。">
       <div className="form-stack">
@@ -255,7 +262,7 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
         <mdui-text-field label="背景与约束" variant="outlined" rows={3} value={goalDraft.description} onInput={e=>setGoalDraft(d=>({...d,description:fieldValue(e)}))}/>
       </div>
       <mdui-button slot="action" onClick={()=>setShowCreate(false)}>取消</mdui-button>
-      <mdui-button slot="action" variant="filled" disabled={!goalDraft.title.trim()||!goalDraft.criteria.trim()} onClick={createGoal}>创建</mdui-button>
+      <mdui-button slot="action" variant="filled" disabled={!goalDraft.title.trim()||!goalDraft.criteria.trim()||busy==='goal'} loading={busy==='goal'} onClick={createGoal}>创建</mdui-button>
     </mdui-dialog>}
 		<div className="goal-layout">
       <mdui-list className="goal-list">
@@ -266,8 +273,8 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
         {goals.length===0&&<p className="empty">先建立第一个长期目标。</p>}
       </mdui-list>
 		<div className="tree-panel">{selected?<>
-      <div className="tree-head"><div><p className="meta">{GOAL_STATUS[selected.status]??selected.status} · 修订 {tree?.revision??0}{selected.target_date?` · 目标日期 ${selected.target_date}`:''}</p><h2>{selected.title}</h2><p>{selected.success_criteria}</p></div><mdui-button variant="tonal" icon="auto_awesome" onClick={()=>askAgent(false)}>让 Agent 拆解</mdui-button></div>
-      {tree?.proposals.map(proposal=><ProposalCard key={proposal.id} proposal={proposal} onApply={()=>decide(proposal,true)} onReject={()=>decide(proposal,false)}/>)}
+      <div className="tree-head"><div><p className="meta">{GOAL_STATUS[selected.status]??selected.status} · 修订 {tree?.revision??0}{selected.target_date?` · 目标日期 ${selected.target_date}`:''}</p><h2>{selected.title}</h2><p>{selected.success_criteria}</p></div><mdui-button variant="tonal" icon="auto_awesome" disabled={busy==='agent'} loading={busy==='agent'} onClick={()=>askAgent(false)}>让 Agent 拆解</mdui-button></div>
+      {tree?.proposals.map(proposal=><ProposalCard key={proposal.id} proposal={proposal} busy={busy==='proposal'} onApply={()=>decide(proposal,true)} onReject={()=>decide(proposal,false)}/>)}
       <div className="tree-tools">
         <mdui-segmented-button-group className="view-switch" selects="single" value={view} onChange={e=>setView(fieldValue(e) as 'list'|'map')}>
           <mdui-segmented-button value="list" icon="list">列表</mdui-segmented-button>
@@ -275,25 +282,38 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
         </mdui-segmented-button-group>
         <div className="revision-request">
           <mdui-text-field variant="outlined" label="修订指令" value={revisionInstruction} onInput={e=>setRevisionInstruction(fieldValue(e))} placeholder="例如：把实验任务拆小，并移到当前里程碑下"/>
-          <mdui-button variant="outlined" icon="edit_note" onClick={()=>askAgent(true)} disabled={!revisionInstruction.trim()}>生成修订提案</mdui-button>
+          <mdui-button variant="outlined" icon="edit_note" onClick={()=>askAgent(true)} disabled={!revisionInstruction.trim()||busy==='agent'}>生成修订提案</mdui-button>
         </div>
       </div>
       {view==='map'?<GoalMapView goal={selected} onNotice={onNotice} onOpenTask={id=>{setFocusTask(id);setView('list')}}/>:<div className="task-stack">{tasks.filter(t=>t.goal_id===selected.id).map(task=><mdui-card key={task.id} variant="outlined" className={`task-card${task.status==='completed'?' done':''}${focusTask===task.id?' focused':''}`}>
         <span className={`task-status ${task.status}`} role="img" aria-label={TASK_STATUS[task.status]??task.status}/>
         <div><h3>{task.title}{task.type==='milestone'&&<span className="task-type">里程碑</span>}</h3><p>{task.success_criteria}</p>{task.status==='blocked'?<small className="blocked">受阻{task.blocked_reason?` · ${task.blocked_reason}`:''}</small>:task.status!=='completed'&&<small>下一步 · {task.minimum_action}</small>}</div>
         <strong>P{task.priority}</strong>
-      </mdui-card>)}</div>}
+      </mdui-card>)}{tasks.every(t=>t.goal_id!==selected.id)&&!tree?.proposals.length&&<p className="empty">这个目标还没有任务。在下面手工添加，或让 Agent 拆解出第一版任务树。</p>}</div>}
       <div className="task-create">
         <mdui-text-field variant="outlined" label="任务" value={taskDraft.title} onInput={e=>setTaskDraft(d=>({...d,title:fieldValue(e)}))} placeholder="手工添加一个真实任务"/>
         <mdui-text-field variant="outlined" label="完成标准" value={taskDraft.criteria} onInput={e=>setTaskDraft(d=>({...d,criteria:fieldValue(e)}))} placeholder="完成标准"/>
         <mdui-text-field variant="outlined" label="最小行动" value={taskDraft.minimum} onInput={e=>setTaskDraft(d=>({...d,minimum:fieldValue(e)}))} placeholder="5-15 分钟最小行动"/>
-        <mdui-button variant="tonal" icon="add" disabled={!taskDraft.title.trim()||!taskDraft.criteria.trim()||!taskDraft.minimum.trim()} onClick={addTask}>添加</mdui-button>
+        <mdui-button variant="tonal" icon="add" disabled={!taskDraft.title.trim()||!taskDraft.criteria.trim()||!taskDraft.minimum.trim()||busy==='task'} loading={busy==='task'} onClick={addTask}>添加</mdui-button>
       </div>
     </>:<div className="empty">选择一个目标查看任务树。</div>}</div></div>
   </section>
 }
 
-function ProposalCard({proposal,onApply,onReject}:{proposal:Proposal;onApply:()=>void;onReject:()=>void}){let operations:Record<string,unknown>[]=[];try{operations=JSON.parse(proposal.patch_json)}catch{return null}return <mdui-card variant="outlined" className="proposal-card"><p className="eyebrow">AGENT PROPOSAL · BASE REV {proposal.base_revision}</p><h3>待确认的任务树变更</h3>{operations.map((operation,index)=><div className="proposal-op" key={index}><b>{String(operation.op||'create')}</b><span>{String(operation.title||operation.target_id||'未命名变更')}</span><small>{String(operation.minimum_action||operation.success_criteria||'')}</small></div>)}<div className="actions"><mdui-button variant="outlined" onClick={onReject}>拒绝</mdui-button><mdui-button variant="filled" onClick={onApply}>确认应用</mdui-button></div></mdui-card>}
+// The operations a proposal carries, in the user's language. Removal is the only one that can lose
+// work, so it is the only one marked with the error colour.
+const PROPOSAL_OPS: Record<string,string> = { create: '新增', update: '修改', move: '移动', supersede: '废弃' }
+
+function ProposalCard({proposal,busy,onApply,onReject}:{proposal:Proposal;busy:boolean;onApply:()=>void;onReject:()=>void}){
+  let operations:Record<string,unknown>[]=[]
+  try{const parsed:unknown=JSON.parse(proposal.patch_json);if(!Array.isArray(parsed))return null;operations=parsed.filter((op):op is Record<string,unknown>=>typeof op==='object'&&op!==null)}catch{return null}
+  return <mdui-card variant="outlined" className="proposal-card">
+    <p className="eyebrow">Agent 提案 · 基于修订 {proposal.base_revision}</p>
+    <h3>待确认的任务树变更</h3>
+    {operations.map((operation,index)=>{const op=String(operation.op||'create');return <div className="proposal-op" key={index}><b className={`op-${op}`}>{PROPOSAL_OPS[op]??op}</b><span>{String(operation.title||operation.target_id||'未命名变更')}</span>{Boolean(operation.minimum_action||operation.success_criteria)&&<small>{String(operation.minimum_action||operation.success_criteria)}</small>}</div>})}
+    <div className="actions"><mdui-button variant="outlined" disabled={busy} onClick={onReject}>拒绝</mdui-button><mdui-button variant="filled" disabled={busy} loading={busy} onClick={onApply}>确认应用</mdui-button></div>
+  </mdui-card>
+}
 
 type JobFilter = 'active' | 'queued' | 'running' | 'all' | 'failed' | 'succeeded'
 
