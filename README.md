@@ -296,7 +296,20 @@ PRAGMA synchronous=NORMAL
 bin/fasttask backup --output backups/fasttask.db
 ```
 
-备份命令使用 SQLite `VACUUM INTO` 生成一致性文件并执行 `PRAGMA integrity_check`。
+备份命令使用 SQLite `VACUUM INTO` 生成一致性文件，然后只读打开**备份文件本身**执行 `PRAGMA integrity_check` 并核对 Schema 版本；校验失败的文件会被删除。备份文件权限为 `0600`（其中有密码哈希和加密的 Provider 凭据），已存在的目标文件不会被覆盖。
+
+恢复：
+
+```bash
+bin/fasttask backup --verify backups/fasttask.db   # 恢复前确认备份完整且 Schema 与当前二进制一致
+# 停止服务（SQLite 单写者），保留旧库以便回退
+mv /var/lib/fasttask/fasttask.db /var/lib/fasttask/fasttask.db.before-restore
+rm -f /var/lib/fasttask/fasttask.db-wal /var/lib/fasttask/fasttask.db-shm
+cp backups/fasttask.db /var/lib/fasttask/fasttask.db && chmod 600 /var/lib/fasttask/fasttask.db
+# 启动服务后检查 /health/ready
+```
+
+旧 WAL 必须与旧库一起移走：留下的 `-wal` 文件属于另一个数据库，会在下次打开时被回放到恢复的文件上。
 
 ### Schema 版本
 

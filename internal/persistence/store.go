@@ -306,20 +306,63 @@ func (s *Store) Ready(ctx context.Context) error {
 	return s.DB.WithContext(ctx).Raw("SELECT 1").Scan(&result).Error
 }
 
+// Backup writes a consistent snapshot with VACUUM INTO and then verifies the snapshot itself — not
+// the live database, which says nothing about whether the copy is readable. The file holds password
+// hashes, encrypted provider secrets and every user's data, so it is created owner-only, and a backup
+// that fails verification is removed rather than left behind looking like a good one.
 func (s *Store) Backup(ctx context.Context, destination string) error {
 	if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
 		return err
 	}
+	if _, err := os.Stat(destination); err == nil {
+		return fmt.Errorf("backup destination %s already exists", destination)
+	}
+	// VACUUM INTO creates the file with the process umask; reserve it first with owner-only mode so
+	// the snapshot is never readable by others, not even briefly.
+	file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
 	escaped := strings.ReplaceAll(destination, "'", "''")
 	if err := s.DB.WithContext(ctx).Exec("VACUUM INTO '" + escaped + "'").Error; err != nil {
+		_ = os.Remove(destination)
 		return err
 	}
-	var integrity string
-	if err := s.DB.WithContext(ctx).Raw("PRAGMA integrity_check").Scan(&integrity).Error; err != nil {
+	if err := os.Chmod(destination, 0o600); err != nil {
+		_ = os.Remove(destination)
 		return err
+	}
+	if err := VerifyBackup(ctx, destination); err != nil {
+		_ = os.Remove(destination)
+		return err
+	}
+	return nil
+}
+
+// VerifyBackup opens a backup read-only and checks that it is an intact FastTask database at the
+// schema this build expects, so a restore is known to work before it is needed.
+func VerifyBackup(ctx context.Context, path string) error {
+	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro&_foreign_keys=on")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var integrity string
+	if err := db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
+		return fmt.Errorf("verify backup: %w", err)
 	}
 	if integrity != "ok" {
-		return fmt.Errorf("integrity check failed: %s", integrity)
+		return fmt.Errorf("backup integrity check failed: %s", integrity)
+	}
+	var version int
+	if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version); err != nil {
+		return fmt.Errorf("verify backup schema: %w", err)
+	}
+	if version != ExpectedSchemaVersion {
+		return fmt.Errorf("backup is at schema %d, want %d", version, ExpectedSchemaVersion)
 	}
 	return nil
 }

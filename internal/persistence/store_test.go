@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -397,6 +398,35 @@ func TestBackupCreatesReadableDatabase(t *testing.T) {
 	}
 	if integrity != "ok" {
 		t.Fatalf("integrity = %s", integrity)
+	}
+}
+
+func TestBackupIsOwnerOnlyAndRefusesToOverwrite(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+	destination := filepath.Join(t.TempDir(), "backup.db")
+	if err := store.Backup(context.Background(), destination); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("backup mode=%o, want 600", mode)
+	}
+	if err := store.Backup(context.Background(), destination); err == nil {
+		t.Fatal("backup overwrote an existing file")
+	}
+}
+
+func TestVerifyBackupRejectsADamagedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "damaged.db")
+	if err := os.WriteFile(path, []byte("this is not a sqlite database at all, just bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBackup(context.Background(), path); err == nil {
+		t.Fatal("damaged backup verified")
 	}
 }
 

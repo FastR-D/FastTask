@@ -7,6 +7,7 @@ import (
 
 	"github.com/FastR-D/FastTask/internal/bootstrap"
 	"github.com/FastR-D/FastTask/internal/config"
+	"github.com/FastR-D/FastTask/internal/persistence"
 	"github.com/spf13/cobra"
 )
 
@@ -17,7 +18,9 @@ var (
 )
 
 func main() {
-	root := &cobra.Command{Use: "fasttask", Short: "Long-term goal and daily focus system"}
+	// A failed migration or a refused configuration is a runtime error, not a usage error: print it
+	// once, without the flag listing burying it.
+	root := &cobra.Command{Use: "fasttask", Short: "Long-term goal and daily focus system", SilenceUsage: true, SilenceErrors: true}
 	root.AddCommand(serveCommand(), workerCommand(), schedulerCommand(), migrateCommand(), backupCommand(), doctorCommand(), hardenCommand(), versionCommand())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -75,8 +78,17 @@ func migrateCommand() *cobra.Command {
 }
 
 func backupCommand() *cobra.Command {
-	var output string
+	var output, verify string
 	cmd := &cobra.Command{Use: "backup", Short: "Create a consistent SQLite backup", RunE: func(cmd *cobra.Command, args []string) error {
+		if verify != "" {
+			// Checking a backup before restoring it needs no server configuration and must not touch the
+			// live database.
+			if err := persistence.VerifyBackup(cmd.Context(), verify); err != nil {
+				return err
+			}
+			fmt.Printf("ok %s\n", verify)
+			return nil
+		}
 		cfg, err := config.Load()
 		if err != nil {
 			return err
@@ -89,6 +101,7 @@ func backupCommand() *cobra.Command {
 		return nil
 	}}
 	cmd.Flags().StringVarP(&output, "output", "o", "", "backup destination")
+	cmd.Flags().StringVar(&verify, "verify", "", "verify an existing backup file (integrity and schema version) instead of creating one")
 	return cmd
 }
 
