@@ -385,6 +385,14 @@ func (s *harnessTokens) rebuildSummary(ctx context.Context, run *persistence.Age
 	}
 	if assistantIdx < 0 {
 		assistantIdx = len(wire) - 1
+	} else {
+		// The run's own message is the prompt the host sends; the summary is what came before it. A
+		// thread whose first message this is has no history, so there is nothing to compress and the
+		// context is not degraded — reporting it was telling every new conversation it had lost context.
+		if assistantIdx == 0 {
+			return ""
+		}
+		assistantIdx--
 	}
 	history := s.svc.rebuildModelContext(ctx, run.UserID, wire, assistantIdx)
 	// Keep the tail: the oldest turns are the ones a summary may lose.

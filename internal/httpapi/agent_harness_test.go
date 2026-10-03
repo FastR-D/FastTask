@@ -411,6 +411,30 @@ func TestApprovalWaitTimesOut(t *testing.T) {
 	streamResponse(t, responses)
 }
 
+// A new conversation has no checkpoint because it has no history, not because one was lost. Its first
+// grant must not tell the user their context was compressed, and must not repeat the user's own message
+// into the instructions as "history".
+func TestFirstTurnIsNotReportedAsDegraded(t *testing.T) {
+	stub := newModelStub(t, stubTurn{text: "回答。"})
+	api := newHarnessAPI(t, stub)
+	runID, responses := startHarnessRun(t, api, "全新的问题")
+	grant := api.do(t, http.MethodPost, "/api/v1/agent/runs", map[string]any{"run_id": runID}, nil)
+	if grant.Code != http.StatusOK {
+		t.Fatalf("grant=%d %s", grant.Code, grant.Body.String())
+	}
+	var body map[string]any
+	decode(t, grant, &body)
+	if degraded, _ := body["context_degraded"].(bool); degraded {
+		t.Fatalf("first turn reported as degraded: %#v", body["context_degraded"])
+	}
+	if instructions, _ := body["instructions"].(string); strings.Contains(instructions, "历史上下文摘要") || strings.Contains(instructions, "全新的问题") {
+		t.Fatalf("first-turn instructions carry a history summary: %q", instructions)
+	}
+	host := newHarnessClient(t, api, runID)
+	host.drive(1)
+	streamResponse(t, responses)
+}
+
 // TestCheckpointVersionSkewDegrades covers §6.3 and §14.7: a checkpoint written by another libfx
 // version is not handed back, the instructions carry a rebuilt summary instead, and the grant says so
 // so the UI can tell the user their history was compressed.
