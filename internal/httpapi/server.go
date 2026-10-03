@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/netip"
 	"os"
 	"path"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FastR-D/FastTask/internal/application"
@@ -1740,8 +1742,30 @@ func acceptedEncodings(header string) []string {
 // the login throttle by sending the header itself.
 func clientAddress() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Request = c.Request.WithContext(platformauth.WithClientIP(c.Request.Context(), c.ClientIP()))
+		client := c.ClientIP()
+		warnUntrustedProxy(c, client)
+		c.Request = c.Request.WithContext(platformauth.WithClientIP(c.Request.Context(), client))
 		c.Next()
+	}
+}
+
+var untrustedProxies sync.Map
+
+// warnUntrustedProxy logs, once per peer, a private or loopback peer that sends X-Forwarded-For but is
+// not in FASTTASK_TRUSTED_PROXIES. That is almost always the deployment's own reverse proxy (behind
+// Docker it is the bridge gateway), and until it is trusted every user shares its address — in the
+// login throttle, the access log and the rate of everything keyed by client. Public peers are not
+// remembered, so a client cannot grow the set.
+func warnUntrustedProxy(c *gin.Context, client string) {
+	if c.GetHeader("X-Forwarded-For") == "" || client != c.RemoteIP() {
+		return
+	}
+	addr, err := netip.ParseAddr(client)
+	if err != nil || !(addr.IsPrivate() || addr.IsLoopback()) {
+		return
+	}
+	if _, seen := untrustedProxies.LoadOrStore(client, true); !seen {
+		slog.Warn("ignoring X-Forwarded-For from a peer that is not a trusted proxy; if it is your reverse proxy, add it to FASTTASK_TRUSTED_PROXIES or every user shares its address", "peer", client)
 	}
 }
 

@@ -364,6 +364,8 @@ Compose 直接读取仓库根目录的 `.env`，既用于变量插值也作为�
 - `FASTTASK_LISTEN`：容器内必须绑 `0.0.0.0`，否则发布端口转发不到进程；宿主侧地址写在 `ports` 里（默认 `${FASTTASK_LISTEN}:${FASTTASK_PORT}`，与迁移前的裸二进制部署同一地址端口，反向代理无需改动）。
 - `OPENAI_API_BASE_URL`：容器内的 `localhost` 是容器自己，宿主网关经 `host.docker.internal`（`extra_hosts: host-gateway`）访问。
 
+还有一个值需要按容器网络改写：`FASTTASK_TRUSTED_PROXIES`。经发布端口进入的连接，在容器里看到的对端是 Docker 网桥网关（如 `172.18.0.1`），不是宿主上的反向代理，因此裸二进制时代的值（`10.22.33.0/24`）在容器里不再匹配，`X-Forwarded-For` 会被忽略，所有用户共用网关这一个地址——登录限速、访问日志都按这个地址计。服务会在日志里打印一次 `ignoring X-Forwarded-For from a peer that is not a trusted proxy … peer=172.18.0.1` 提示这种情况。修正方法：在 `.env` 里把网关所在网段加进去，例如 `FASTTASK_TRUSTED_PROXIES=172.16.0.0/12`。**前提**是发布端口只绑在反向代理才能访问的地址上（`127.0.0.1` 或内网地址）：经 docker-proxy 进来的直连客户端同样显示为网关地址，若端口对公网开放，信任网关就等于允许任何人伪造来源 IP。
+
 容器内所有可写路径都已固定到 `/var/lib/fasttask` 下：数据库、WAL、待转写音频、图片附件，以及 `fasttask backup` 的默认 `backups/` 输出。工作目录就是状态目录。
 
 ### 首次部署

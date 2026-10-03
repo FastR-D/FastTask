@@ -91,3 +91,31 @@ func TestPanicIsLoggedWithRequestIDAndHiddenFromClient(t *testing.T) {
 		t.Fatal("query string reached the log")
 	}
 }
+
+func TestUntrustedPrivateProxyIsReportedOnce(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	gin.SetMode(gin.ReleaseMode)
+	engine := gin.New()
+	if err := engine.SetTrustedProxies([]string{"127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	engine.Use(clientAddress())
+	engine.GET("/x", func(c *gin.Context) { c.String(http.StatusOK, c.ClientIP()) })
+	for i := 0; i < 3; i++ {
+		request := httptest.NewRequest(http.MethodGet, "/x", nil)
+		request.RemoteAddr = "172.18.0.1:40000"
+		request.Header.Set("X-Forwarded-For", "203.0.113.50")
+		response := httptest.NewRecorder()
+		engine.ServeHTTP(response, request)
+		if response.Body.String() != "172.18.0.1" {
+			t.Fatalf("an untrusted peer chose its own client address: %s", response.Body.String())
+		}
+	}
+	if got := strings.Count(logs.String(), "not a trusted proxy"); got != 1 {
+		t.Fatalf("warned %d times, want once:\n%s", got, logs.String())
+	}
+}

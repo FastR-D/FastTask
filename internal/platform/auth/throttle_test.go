@@ -47,25 +47,45 @@ func TestThrottleBlocksOneClientWithoutLockingOutOthers(t *testing.T) {
 	}
 }
 
-func TestThrottleBackoffGrowsAndIsCapped(t *testing.T) {
+func TestThrottleBackoffDoublesWithinAWindow(t *testing.T) {
 	throttle, clock := newTestThrottle()
-	var lastBlock time.Duration
-	for round := 0; round < 12; round++ {
+	key := ruleAccountClient.prefix + "198.51.100.7\x00victim"
+	want := throttleBaseBlock
+	for round := 0; round < 4; round++ {
 		for {
 			if _, ok := throttle.begin("victim", "198.51.100.7"); !ok {
 				break
 			}
 		}
-		entry := throttle.entries[ruleAccountClient.prefix+"198.51.100.7\x00victim"]
-		block := entry.blockedUntil.Sub(clock.now)
-		if block < lastBlock || block > ruleAccountClient.maxBlock {
-			t.Fatalf("round %d: block %s after %s (cap %s)", round, block, lastBlock, ruleAccountClient.maxBlock)
+		entry := throttle.entries[key]
+		if block := entry.blockedUntil.Sub(clock.now); block != want {
+			t.Fatalf("round %d: block %s, want %s", round, block, want)
 		}
-		lastBlock = block
 		clock.now = entry.blockedUntil.Add(time.Millisecond)
+		want *= 2
 	}
-	if lastBlock != ruleAccountClient.maxBlock {
-		t.Fatalf("backoff settled at %s, want the cap %s", lastBlock, ruleAccountClient.maxBlock)
+}
+
+func TestThrottleBlockIsCapped(t *testing.T) {
+	throttle, clock := newTestThrottle()
+	key := ruleAccountClient.prefix + "198.51.100.7\x00victim"
+	throttle.entries[key] = &throttleEntry{failures: 40, windowStart: clock.now, lastSeen: clock.now}
+	throttle.begin("victim", "198.51.100.7")
+	if block := throttle.entries[key].blockedUntil.Sub(clock.now); block != ruleAccountClient.maxBlock {
+		t.Fatalf("block %s, want the cap %s", block, ruleAccountClient.maxBlock)
+	}
+}
+
+// Failures spread over a working day must not add up to a lockout: the count restarts each window.
+func TestThrottleCountRestartsEachWindow(t *testing.T) {
+	throttle, clock := newTestThrottle()
+	for day := 0; day < 20; day++ {
+		for i := 0; i < ruleAccountClient.threshold-1; i++ {
+			if _, ok := throttle.begin("typo-prone", "203.0.113.1"); !ok {
+				t.Fatalf("window %d: blocked after %d failures", day, i)
+			}
+		}
+		clock.now = clock.now.Add(throttleWindow + time.Second)
 	}
 }
 

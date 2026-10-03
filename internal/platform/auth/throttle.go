@@ -15,7 +15,7 @@ import (
 //
 //   - account+client: the ordinary case, one client guessing one account. Blocks quickly.
 //   - client:         one client spraying many accounts. A higher threshold, so a shared NAT that
-//     mistypes a few passwords is not locked out.
+//     mistypes a few passwords is not locked out; counts restart every throttleWindow.
 //   - account:        many clients guessing one account. The highest threshold. This is the one key an
 //     attacker can use to lock a real user out, so it only slows a distributed attack down and never
 //     blocks for long; the account+client key is what stops a single source.
@@ -32,6 +32,7 @@ type loginThrottle struct {
 
 type throttleEntry struct {
 	failures     int
+	windowStart  time.Time
 	blockedUntil time.Time
 	lastSeen     time.Time
 }
@@ -44,11 +45,16 @@ type throttleRule struct {
 
 var (
 	ruleAccountClient = throttleRule{prefix: "ac:", threshold: 5, maxBlock: 15 * time.Minute}
-	ruleClient        = throttleRule{prefix: "c:", threshold: 30, maxBlock: 15 * time.Minute}
+	ruleClient        = throttleRule{prefix: "c:", threshold: 50, maxBlock: 15 * time.Minute}
 	ruleAccount       = throttleRule{prefix: "a:", threshold: 50, maxBlock: 2 * time.Minute}
 )
 
 const (
+	// throttleWindow is the counting window. Failures are counted from the first one in the window
+	// and start again from zero once it has passed (unless the key is blocked at that moment). A
+	// count that only reset after idle time would let a lab's ordinary typos — many people behind one
+	// NAT address, or one untrusted reverse proxy — accumulate all day into a lockout for everyone.
+	throttleWindow = 15 * time.Minute
 	// throttleBaseBlock is the first block once a key reaches its threshold; each further failure
 	// doubles it up to the rule's cap.
 	throttleBaseBlock = 30 * time.Second
@@ -98,8 +104,11 @@ func (t *loginThrottle) begin(identifier, client string) (throttleTicket, bool) 
 	for _, k := range keys {
 		entry := t.entries[k.key]
 		if entry == nil {
-			entry = &throttleEntry{}
+			entry = &throttleEntry{windowStart: now}
 			t.entries[k.key] = entry
+		}
+		if now.Sub(entry.windowStart) > throttleWindow {
+			entry.failures, entry.windowStart = 0, now
 		}
 		entry.failures++
 		entry.lastSeen = now

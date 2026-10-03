@@ -13,6 +13,11 @@
 #   OPENAI_API_BASE_URL  `localhost` inside a container is the container. The gateway is a
 #                        host-published port, so it is reached through the host gateway.
 #
+# FASTTASK_TRUSTED_PROXIES needs the container's view too: connections through a published port
+# arrive from the bridge gateway, not from the host's reverse proxy. Set it in `.env` to the
+# bridge range (e.g. 172.16.0.0/12) — but only while the port below is bound to an address that
+# nothing but the reverse proxy can reach. README「Docker 部署」explains why.
+#
 # The bind mount arrives root-owned and the container runs as the unprivileged `fasttask`
 # user, so the data directory has to belong to that user's uid:gid on the host — see
 # README「Docker 部署」for the one-time chown. Running `--user 0` instead is supported by the
