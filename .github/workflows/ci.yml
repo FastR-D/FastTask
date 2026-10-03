@@ -33,6 +33,19 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # go.mod replaces the FastCAS SDK with the sibling checkout ../FastCAS/sdk/go. CI provisions
+      # exactly what the Dockerfile does — the same pinned commit, read from the Dockerfile so the
+      # two can never build different SDKs — instead of editing the replace directive away.
+      - name: provision the pinned FastCAS SDK
+        run: |
+          set -euo pipefail
+          ref=$(sed -n 's/^ARG FASTCAS_REF=//p' Dockerfile)
+          test -n "$ref"
+          mkdir -p ../FastCAS
+          curl -fsSL --retry 3 "https://codeload.github.com/FastR-D/FastCAS/tar.gz/$ref" \
+            | tar -xz -C ../FastCAS --strip-components=1
+          test -f ../FastCAS/sdk/go/go.mod
+
       # §18.6: CI checks formatting, it does not silently reformat a commit.
       - name: gofmt
         run: |
