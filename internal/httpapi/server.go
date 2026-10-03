@@ -1730,7 +1730,17 @@ func (w *captureWriter) Write(data []byte) (int, error) {
 	return w.ResponseWriter.Write(data)
 }
 
+// credentialResponse reports whether a successful response to this request carries a one-time secret
+// that the database otherwise holds only as a digest (doc/interface.md: a device token is returned once).
+func credentialResponse(method, path string) bool {
+	if method != http.MethodPost {
+		return false
+	}
+	return path == "/api/v1/devices" || (strings.HasPrefix(path, "/api/v1/devices/") && strings.HasSuffix(path, "/token-rotations"))
+}
+
 type replayEnvelope struct {
+	Withheld    bool              `json:"withheld,omitempty"`
 	Body        string            `json:"body"`
 	ContentType string            `json:"content_type"`
 	Headers     map[string]string `json:"headers"`
@@ -1741,6 +1751,18 @@ func idempotencyMiddleware(store *persistence.Store, authService *platformauth.S
 		key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
 		if key == "" || c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
 			c.Next()
+			return
+		}
+		// Sign-in and refresh answer with a session's tokens. Storing that body would put live bearer
+		// credentials in the database for a day, and replaying it would hand them to anyone holding an
+		// already-rotated refresh token — exactly what reuse detection exists to stop. A lost refresh
+		// response is recovered by the auth service's own grace window instead.
+		if c.Request.Method == http.MethodPost && (c.Request.URL.Path == "/api/v1/auth/login" || c.Request.URL.Path == "/api/v1/auth/refresh") {
+			c.Next()
+			return
+		}
+		if len(key) > 200 {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"title": "Bad Request", "status": 400, "detail": "Idempotency-Key must not exceed 200 characters"})
 			return
 		}
 		body, err := io.ReadAll(c.Request.Body)
@@ -1759,18 +1781,6 @@ func idempotencyMiddleware(store *persistence.Store, authService *platformauth.S
 				principalSeed = "service:" + service.ClientID + ":" + service.UserID + ":" + strings.Join(scopes, ",")
 			}
 		}
-		if c.Request.URL.Path == "/api/v1/auth/refresh" {
-			var refresh struct {
-				RefreshToken string `json:"refresh_token"`
-			}
-			_ = json.Unmarshal(body, &refresh)
-			var session persistence.Session
-			if err := store.DB.Where("refresh_hash = ?", persistence.Hash(refresh.RefreshToken)).First(&session).Error; err == nil {
-				principalSeed = "refresh-family:" + session.FamilyID
-			} else {
-				principalSeed = "refresh-token:" + persistence.Hash(refresh.RefreshToken)
-			}
-		}
 		principalHash := persistence.Hash(principalSeed)
 		requestHash := persistence.Hash(c.Request.Method + "\n" + c.Request.URL.RequestURI() + "\n" + string(body))
 		var record persistence.IdempotencyRecord
@@ -1785,6 +1795,10 @@ func idempotencyMiddleware(store *persistence.Store, authService *platformauth.S
 				return
 			}
 			var envelope replayEnvelope
+			if json.Unmarshal([]byte(record.ResponseJSON), &envelope) == nil && envelope.Withheld {
+				c.AbortWithStatusJSON(http.StatusConflict, gin.H{"title": "Request already completed", "status": 409, "detail": "this request already succeeded; its response carried a one-time credential and is not stored, so rotate the credential to obtain a new one", "code": "IDEMPOTENCY_RESPONSE_WITHHELD"})
+				return
+			}
 			if json.Unmarshal([]byte(record.ResponseJSON), &envelope) == nil {
 				for name, value := range envelope.Headers {
 					c.Header(name, value)
@@ -1808,6 +1822,10 @@ func idempotencyMiddleware(store *persistence.Store, authService *platformauth.S
 		c.Writer = writer
 		c.Next()
 		envelope := replayEnvelope{Body: writer.body.String(), ContentType: c.Writer.Header().Get("Content-Type"), Headers: map[string]string{}}
+		if credentialResponse(c.Request.Method, c.Request.URL.Path) && c.Writer.Status() < 300 {
+			// The creation stays exactly-once; only the secret it returned is not kept.
+			envelope = replayEnvelope{Withheld: true, Headers: map[string]string{}}
+		}
 		for _, name := range []string{"ETag", "Location", "Cache-Control"} {
 			if value := c.Writer.Header().Get(name); value != "" {
 				envelope.Headers[name] = value

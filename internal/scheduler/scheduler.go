@@ -74,4 +74,10 @@ func (s *Scheduler) maintain() {
 		Where("status = 'pending'").
 		Updates(map[string]any{"status": "processed", "processed_at": now})
 	s.store.DB.WithContext(ctx).Where("status_code > 0 AND expires_at < ?", now).Delete(&persistence.IdempotencyRecord{})
+	// A record left in progress by a process that died mid-request would answer 409 for that key until
+	// it expired a month later; no API request runs for an hour.
+	s.store.DB.WithContext(ctx).Where("status_code = 0 AND created_at < ?", now.Add(-time.Hour)).Delete(&persistence.IdempotencyRecord{})
+	// Builds before the credential exclusion stored sign-in, refresh and device-token responses
+	// verbatim. Purge any that remain rather than wait out their expiry.
+	s.store.DB.WithContext(ctx).Where("path IN ? OR (path LIKE ? AND method = 'POST')", []string{"/api/v1/auth/login", "/api/v1/auth/refresh"}, "/api/v1/devices%").Where("response_json NOT LIKE ?", `%"withheld":true%`).Delete(&persistence.IdempotencyRecord{})
 }

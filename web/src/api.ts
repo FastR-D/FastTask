@@ -97,6 +97,7 @@ export async function clearSession(): Promise<void> {
   accessToken = null
   accessExpiry = 0
   lastRefreshResult = null
+  notifySessionEnded()
   try { localStorage.removeItem(REFRESH_KEY); localStorage.removeItem(OFFLINE_USER_KEY) } catch { /* ignore */ }
   if (typeof caches !== 'undefined') {
     try {
@@ -106,15 +107,54 @@ export async function clearSession(): Promise<void> {
   }
 }
 
+// Session-end listeners let the shell return to the login screen when the session
+// ends somewhere it did not initiate: a rejected refresh, or a logout in another tab
+// of the same browser (they share the persisted refresh token).
+const sessionEndedListeners = new Set<() => void>()
+export function onSessionEnded(listener: () => void): () => void {
+  sessionEndedListeners.add(listener)
+  return () => { sessionEndedListeners.delete(listener) }
+}
+function notifySessionEnded() { sessionEndedListeners.forEach(listener => listener()) }
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', event => {
+    // Another tab logged out or had its refresh rejected. This tab's in-memory access
+    // token belongs to the same session family, so it is dropped too.
+    if (event.key === REFRESH_KEY && event.newValue === null && accessToken) {
+      accessToken = null
+      accessExpiry = 0
+      lastRefreshResult = null
+      notifySessionEnded()
+    }
+  })
+}
+
+// Tabs share one refresh token. Rotating it from two tabs at once would present the
+// same token twice, which the server treats as theft and answers by revoking the
+// family. The Web Lock serialises refreshes across tabs; inside it the token is read
+// afresh, so a tab that waited uses the token the previous holder just stored.
+type LockManagerLike = { request<T>(name: string, callback: () => Promise<T>): Promise<T> }
+function withRefreshLock<T>(callback: () => Promise<T>): Promise<T> {
+  const locks = (typeof navigator !== 'undefined' ? (navigator as { locks?: LockManagerLike }).locks : undefined)
+  return locks ? locks.request('fasttask-refresh', callback) : callback()
+}
+
 // A rejected refresh token ends the session. Network and server failures are
 // temporary; clearing the session for those would also erase offline snapshots.
-async function refreshAccess(): Promise<RefreshResult> {
+function refreshAccess(): Promise<RefreshResult> {
+  return withRefreshLock(refreshAccessLocked)
+}
+
+async function refreshAccessLocked(): Promise<RefreshResult> {
   const refreshToken = readRefresh()
   if (!refreshToken) return 'rejected'
   try {
     const refreshed = await fetch(`${API}/auth/refresh`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `browser-${refreshToken.slice(-12)}` },
+      // The server no longer replays refresh responses (they carry tokens), so the key
+      // only satisfies the contract; it must not be derived from the token itself.
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idem() },
       body: JSON.stringify({ refresh_token: refreshToken }),
     })
     if (refreshed.status === 401 || refreshed.status === 403) {

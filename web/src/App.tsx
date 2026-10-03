@@ -1,5 +1,5 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, completeFastCAS, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, readOfflineUser, rememberUser, request, token } from './api'
+import { ApiError, completeFastCAS, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, onSessionEnded, readOfflineUser, rememberUser, request, token } from './api'
 import { FastCASAccount } from './FastCASAccount'
 import type { Device, Goal, Job, Plan, PlanItem, Proposal, Task, TaskTree, User, WorkSession } from './types'
 import { fieldValue, useMduiEvent } from './mdui-react'
@@ -50,6 +50,8 @@ export function App() {
     return () => { alive = false }
   }, [restoring, callbackPending])
   const handleLogout = useCallback(async () => { await logout(); setAuthenticated(false) }, [])
+  // A refresh rejected mid-session, or a logout in another tab, ends this session too.
+  useEffect(() => onSessionEnded(() => setAuthenticated(false)), [])
   if (restoring) return null
   return (
     <>

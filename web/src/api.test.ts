@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { clearSession, ensureFreshAccessToken, hasRefreshToken, login, logout, offlineSessionAvailable, request, token } from './api'
+import { clearSession, ensureFreshAccessToken, hasRefreshToken, login, logout, offlineSessionAvailable, onSessionEnded, request, token } from './api'
 
 // jsonResponse builds the minimal Response shape execute()/refreshAccess() read.
 function jsonResponse(body: unknown, status = 200): Response {
@@ -135,5 +135,35 @@ describe('api session storage (pwa.md §4 / frontend.md §5)', () => {
     expect(token.get()).toBeNull()
     expect(hasRefreshToken()).toBe(false)
     expect(cacheNames).toEqual([])
+  })
+
+  it('serialises refreshes across tabs through a Web Lock and reads the token inside it', async () => {
+    localStorage.setItem('fasttask_refresh', 'rt-before-lock')
+    const held: string[] = []
+    vi.stubGlobal('navigator', { ...navigator, locks: { request: async (name: string, callback: () => Promise<unknown>) => {
+      held.push(name)
+      // Another tab rotated while this one waited for the lock.
+      localStorage.setItem('fasttask_refresh', 'rt-from-other-tab')
+      return callback()
+    } } })
+    const sent: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      sent.push(JSON.parse(String(init.body)).refresh_token)
+      expect(new Headers(init.headers).get('Idempotency-Key')).not.toContain('rt-')
+      return jsonResponse({ access_token: fakeJwt(nowSec() + 3600), refresh_token: 'rt-next', user: {} })
+    }))
+    await expect(ensureFreshAccessToken()).resolves.not.toBeNull()
+    expect(held).toEqual(['fasttask-refresh'])
+    expect(sent).toEqual(['rt-from-other-tab'])
+  })
+
+  it('ends this tab\'s session when another tab logs out', () => {
+    token.set(fakeJwt(nowSec() + 3600))
+    const ended = vi.fn()
+    const stop = onSessionEnded(ended)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'fasttask_refresh', oldValue: 'rt', newValue: null }))
+    expect(token.get()).toBeNull()
+    expect(ended).toHaveBeenCalledTimes(1)
+    stop()
   })
 })

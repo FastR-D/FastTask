@@ -140,6 +140,14 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (persistence
 		if err := tx.Where("refresh_hash = ?", hash).First(&session).Error; err != nil {
 			return errors.New("invalid refresh token")
 		}
+		var predecessor *persistence.Session
+		if successor, ok, err := s.refreshGraceSuccessor(tx, session); err != nil {
+			return err
+		} else if ok {
+			presented := session
+			predecessor = &presented
+			session = successor
+		}
 		if session.Status != "active" || session.ExpiresAt.Before(persistence.Now()) {
 			if session.ReplacedByHash != "" {
 				if err := tx.Model(&persistence.Session{}).Where("family_id = ?", session.FamilyID).Updates(map[string]any{"status": "revoked", "updated_at": persistence.Now()}).Error; err != nil {
@@ -173,6 +181,14 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (persistence
 		if err := tx.Model(&session).Updates(map[string]any{"status": "rotated", "replaced_by_hash": newSession.RefreshHash, "updated_at": now}).Error; err != nil {
 			return err
 		}
+		if predecessor != nil {
+			// Point the token the client actually holds at the newest successor, so a further retry
+			// within the same window resolves too. UpdateColumn leaves updated_at alone: the window is
+			// measured from the first rotation and a retry loop must not extend it.
+			if err := tx.Model(&persistence.Session{}).Where("id = ?", predecessor.ID).UpdateColumn("replaced_by_hash", newSession.RefreshHash).Error; err != nil {
+				return err
+			}
+		}
 		session = newSession
 		refreshToken = newRefresh
 		return nil
@@ -185,6 +201,27 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (persistence
 	}
 	access, err := s.issueAccess(user, session.ID)
 	return user, access, refreshToken, err
+}
+
+// refreshReuseGrace is how long a just-rotated refresh token may be presented again. A response lost
+// on the way back (a mobile network dropping the connection after the server committed) leaves the
+// client holding the old token; without this window its retry is indistinguishable from theft and
+// revokes the whole session family. Inside it, the retry rotates the unused successor instead. A thief
+// therefore has this long after each legitimate rotation, and no longer.
+const refreshReuseGrace = 30 * time.Second
+
+// refreshGraceSuccessor returns the session a just-rotated token was replaced by, when that rotation
+// is recent enough and its successor has not been used yet.
+func (s *Service) refreshGraceSuccessor(tx *gorm.DB, session persistence.Session) (persistence.Session, bool, error) {
+	if session.Status != "rotated" || session.ReplacedByHash == "" || persistence.Now().Sub(session.UpdatedAt) > refreshReuseGrace {
+		return persistence.Session{}, false, nil
+	}
+	var successor persistence.Session
+	err := tx.Where("refresh_hash = ? AND family_id = ? AND status = 'active'", session.ReplacedByHash, session.FamilyID).First(&successor).Error
+	if persistence.IsNotFound(err) {
+		return persistence.Session{}, false, nil
+	}
+	return successor, err == nil, err
 }
 
 func (s *Service) Logout(ctx context.Context, sessionID string) error {

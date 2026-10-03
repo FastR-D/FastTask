@@ -95,8 +95,9 @@ Idempotency-Key: 8f2271b8-689c-4f50-bb7d-25b24de13d84
 
 规则：
 
-- 范围为认证主体、Method、规范化 Path 和 Key。Refresh 接口的幂等主体不是 Access Token 用户，而是服务端解析旧 Refresh Token 后得到的会话 ID/会话族 ID。
+- 范围为认证主体、Method、规范化 Path 和 Key。
 - 相同请求返回首次状态码和业务结果。
+- 携带凭据的响应从不落库：`/auth/login` 与 `/auth/refresh` 不参与幂等记录（Refresh 仍要求该请求头以兼容既有客户端，但不重放）；设备创建与设备 Token 轮换仍保证只执行一次，重放时返回 `409 IDEMPOTENCY_RESPONSE_WITHHELD`，不再回显一次性 Token。
 - 相同 Key 对应不同请求摘要返回 `409 IDEMPOTENCY_KEY_REUSED`。
 - 重放响应可返回 `Idempotency-Replayed: true`。
 
@@ -422,7 +423,9 @@ Health 是基础路径的例外，实际位于服务根路径 `/health/*`，便�
 - 密码使用 Argon2id 或经 ADR 选择的同等级自适应哈希，禁止明文和快速哈希。
 - 登录按账号和来源 IP 组合限速，连续失败执行退避并记录审计。
 - Refresh Token 仅保存哈希，成功使用后立即轮换。
-- 已轮换旧 Refresh Token 在不同幂等键、不同请求摘要或幂等重放窗口外再次出现时，撤销对应会话族并要求重新登录；同一幂等键的合法响应重放不视为复用攻击。
+- 已轮换的旧 Refresh Token 在轮换后 30 秒宽限期内再次出现（响应在网络上丢失后的重试），服务端轮换其尚未被使用的后继并签发新 Token；宽限期从首次轮换起算，重试不会延长它。宽限期外再次出现即视为复用，撤销整个会话族并要求重新登录。
+- 浏览器多个标签页共享同一个 Refresh Token，前端用 Web Locks 串行化刷新并在锁内重新读取 Token；一个标签页退出登录时，其他标签页随之回到登录页。
+- 登录被限速时返回 `429`。
 - JWT 验证固定允许的签名算法、Issuer 和 Audience，禁止根据 Token Header 任意选择算法。
 - 提供管理员撤销用户全部会话的运维能力；公开管理端点在管理员接口设计时单独定义。
 
