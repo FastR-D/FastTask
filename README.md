@@ -403,6 +403,19 @@ docker compose down                     # 保留数据目录
 
 升级：`FASTTASK_COMMIT=$(git rev-parse HEAD) docker compose build && docker compose run --rm fasttask backup && docker compose run --rm fasttask migrate && docker compose up -d`。`/health/version` 返回 `version`、`commit`、`build_time` 和 `go`，用来确认跑的是哪次构建。`restart: unless-stopped`，宿主重启后容器自动回来；容器不存活时数据目录仍在宿主机上，可直接被下一个容器或裸二进制接管。
 
+### 排障
+
+| 现象 | 原因与处理 |
+|---|---|
+| `/health/ready` 返回 `503` | 数据库 Schema 不是当前二进制期望的版本。先 `fasttask backup`，再 `fasttask migrate`。`/health/live` 只表示进程在跑。 |
+| 日志出现 `ignoring X-Forwarded-For from a peer that is not a trusted proxy` | 反向代理不在 `FASTTASK_TRUSTED_PROXIES` 里，所有用户共用代理的地址。按上文「配置」把代理（容器里是网桥网关）加入该变量。 |
+| 登录返回 `429` | 同一来源/账号短时间内失败过多（见 `doc/tech.md`「登录限速」），封禁最长 15 分钟，重启进程也会清零。 |
+| 500 错误 | 响应只给 `X-Request-ID`；日志里同一 `request_id` 的 `unhandled application error` 或 `http handler panic` 行给出原因。 |
+| 作业一直「运行中」 | Worker 每 30 秒续租；进程消失后 2 分钟内调度器把作业放回队列，用完重试次数则以 `LEASE_EXPIRED` 失败。日志里 `agent job` 开头的行记录每次失败。 |
+| 恢复前想确认备份可用 | `fasttask backup --verify <文件>`：只读打开备份，检查完整性和 Schema 版本。 |
+
+日志写到 stderr（容器内即 `docker compose logs`），默认文本格式，`FASTTASK_LOG_FORMAT=json` 可接日志采集；不会记录密码、Token、API Key 或查询串。
+
 ## 当前外部边界
 
 - LLM：已实现 OpenAI-compatible Chat Completions Adapter。
