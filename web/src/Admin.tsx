@@ -96,10 +96,10 @@ function UserAdmin({ currentID, onNotice }: { currentID: string; onNotice: (valu
     <div className="admin-layout">
       <div className="admin-form">
         <h2>新增用户</h2>
-        <mdui-text-field label="登录账号" variant="outlined" required minlength={3} value={draft.identifier} onChange={e => setDraft(d => ({ ...d, identifier: fieldValue(e) }))} />
-        <mdui-text-field label="显示名" variant="outlined" required value={draft.displayName} onChange={e => setDraft(d => ({ ...d, displayName: fieldValue(e) }))} />
-        <mdui-text-field label="初始密码（至少12位）" type="password" toggle-password variant="outlined" required minlength={12} value={draft.password} onChange={e => setDraft(d => ({ ...d, password: fieldValue(e) }))} />
-        <mdui-text-field label="时区" variant="outlined" value={draft.timezone} onChange={e => setDraft(d => ({ ...d, timezone: fieldValue(e) }))} />
+        <mdui-text-field label="登录账号" variant="outlined" required minlength={3} value={draft.identifier} onInput={e => setDraft(d => ({ ...d, identifier: fieldValue(e) }))} />
+        <mdui-text-field label="显示名" variant="outlined" required value={draft.displayName} onInput={e => setDraft(d => ({ ...d, displayName: fieldValue(e) }))} />
+        <mdui-text-field label="初始密码（至少12位）" type="password" toggle-password variant="outlined" required minlength={12} value={draft.password} onInput={e => setDraft(d => ({ ...d, password: fieldValue(e) }))} />
+        <mdui-text-field label="时区" variant="outlined" value={draft.timezone} onInput={e => setDraft(d => ({ ...d, timezone: fieldValue(e) }))} />
         <mdui-select label="角色" value={draft.role} onChange={e => setDraft(d => ({ ...d, role: fieldValue(e) }))}>
           <mdui-menu-item value="member">成员</mdui-menu-item>
           <mdui-menu-item value="admin">管理员</mdui-menu-item>
@@ -108,7 +108,7 @@ function UserAdmin({ currentID, onNotice }: { currentID: string; onNotice: (valu
       </div>
       <div className="admin-content">
         <div className="admin-toolbar">
-          <mdui-text-field variant="outlined" clearable value={query} onChange={e => setQuery(fieldValue(e))} placeholder="搜索账号或姓名" />
+          <mdui-text-field variant="outlined" clearable value={query} onInput={e => setQuery(fieldValue(e))} placeholder="搜索账号或姓名" />
           <mdui-button variant="tonal" icon="search" onClick={() => loadUsers().catch(e => onNotice(errorText(e)))}>搜索</mdui-button>
         </div>
         <div className="admin-grid">
@@ -128,7 +128,7 @@ function UserAdmin({ currentID, onNotice }: { currentID: string; onNotice: (valu
         {selected && <section className="session-panel"><h3>{selected.display_name} 的活跃会话</h3>{sessions.length === 0 ? <p>无活跃会话。</p> : sessions.map(session => <div key={session.id}><code>{session.id}</code><span>到期 {stamp(session.expires_at)}</span></div>)}</section>}
       </div>
       {resetTarget && <mdui-dialog ref={resetDialogRef} open icon="key" headline="重置密码" description={`为 ${resetTarget.identifier} 设置至少 12 位新密码，旧会话将被全部撤销。`}>
-        <mdui-text-field label="新密码（至少12位）" type="password" toggle-password variant="outlined" required minlength={12} value={resetValue} onChange={e => setResetValue(fieldValue(e))} />
+        <mdui-text-field label="新密码（至少12位）" type="password" toggle-password variant="outlined" required minlength={12} value={resetValue} onInput={e => setResetValue(fieldValue(e))} />
         <mdui-button slot="action" onClick={() => setResetTarget(null)}>取消</mdui-button>
         <mdui-button slot="action" variant="filled" disabled={resetValue.length < 12} onClick={confirmReset}>确认重置</mdui-button>
       </mdui-dialog>}
@@ -183,11 +183,11 @@ function ProviderAdmin({ onNotice }: { onNotice: (value: string) => void }) {
     <div className="admin-layout">
       <div className="admin-form">
         <h2>新增 Provider</h2>
-        <mdui-text-field label="显示名称" variant="outlined" required value={draft.name} onChange={e => setDraft(d => ({ ...d, name: fieldValue(e) }))} />
-        <mdui-text-field label="https://provider.example/v1" variant="outlined" required value={draft.baseUrl} onChange={e => setDraft(d => ({ ...d, baseUrl: fieldValue(e) }))} />
-        <mdui-text-field label="chat model" variant="outlined" required value={draft.modelName} onChange={e => setDraft(d => ({ ...d, modelName: fieldValue(e) }))} />
-        <mdui-text-field label="语音转写 model（可选）" variant="outlined" value={draft.transcriptionModel} onChange={e => setDraft(d => ({ ...d, transcriptionModel: fieldValue(e) }))} />
-        <mdui-text-field label="API Key" type="password" toggle-password variant="outlined" required minlength={12} value={draft.apiKey} onChange={e => setDraft(d => ({ ...d, apiKey: fieldValue(e) }))} />
+        <mdui-text-field label="显示名称" variant="outlined" required value={draft.name} onInput={e => setDraft(d => ({ ...d, name: fieldValue(e) }))} />
+        <mdui-text-field label="https://provider.example/v1" variant="outlined" required value={draft.baseUrl} onInput={e => setDraft(d => ({ ...d, baseUrl: fieldValue(e) }))} />
+        <mdui-text-field label="chat model" variant="outlined" required value={draft.modelName} onInput={e => setDraft(d => ({ ...d, modelName: fieldValue(e) }))} />
+        <mdui-text-field label="语音转写 model（可选）" variant="outlined" value={draft.transcriptionModel} onInput={e => setDraft(d => ({ ...d, transcriptionModel: fieldValue(e) }))} />
+        <mdui-text-field label="API Key" type="password" toggle-password variant="outlined" required minlength={12} value={draft.apiKey} onInput={e => setDraft(d => ({ ...d, apiKey: fieldValue(e) }))} />
         <mdui-button variant="filled" disabled={!draft.name.trim() || !draft.baseUrl.trim() || !draft.modelName.trim() || draft.apiKey.length < 12} onClick={create}>创建</mdui-button>
         <small>Key 使用服务端 AES-GCM 加密后入库，接口永远不回显明文。</small>
       </div>
@@ -200,11 +200,11 @@ function ProviderAdmin({ onNotice }: { onNotice: (value: string) => void }) {
               <p>API Key：<code>{provider.api_key_hint || '未设置'}</code></p>
               {editing?.id === provider.id ? (
                 <div className="edit-stack">
-                  <mdui-text-field label="显示名称" variant="outlined" value={editing.name} onChange={e => setEditing({ ...editing, name: fieldValue(e) })} />
-                  <mdui-text-field label="Base URL" variant="outlined" value={editing.base_url} onChange={e => setEditing({ ...editing, base_url: fieldValue(e) })} />
-                  <mdui-text-field label="chat model" variant="outlined" value={editing.model_name} onChange={e => setEditing({ ...editing, model_name: fieldValue(e) })} />
-                  <mdui-text-field label="语音转写 model" variant="outlined" value={editing.transcription_model} onChange={e => setEditing({ ...editing, transcription_model: fieldValue(e) })} />
-                  <mdui-text-field type="password" toggle-password variant="outlined" placeholder="仅填写则更换 API Key" value={apiKey} onChange={e => setApiKey(fieldValue(e))} />
+                  <mdui-text-field label="显示名称" variant="outlined" value={editing.name} onInput={e => setEditing({ ...editing, name: fieldValue(e) })} />
+                  <mdui-text-field label="Base URL" variant="outlined" value={editing.base_url} onInput={e => setEditing({ ...editing, base_url: fieldValue(e) })} />
+                  <mdui-text-field label="chat model" variant="outlined" value={editing.model_name} onInput={e => setEditing({ ...editing, model_name: fieldValue(e) })} />
+                  <mdui-text-field label="语音转写 model" variant="outlined" value={editing.transcription_model} onInput={e => setEditing({ ...editing, transcription_model: fieldValue(e) })} />
+                  <mdui-text-field type="password" toggle-password variant="outlined" placeholder="仅填写则更换 API Key" value={apiKey} onInput={e => setApiKey(fieldValue(e))} />
                   <div className="admin-actions"><mdui-button variant="filled" onClick={save}>保存</mdui-button><mdui-button variant="text" onClick={() => { setEditing(null); setApiKey('') }}>取消</mdui-button></div>
                 </div>
               ) : (
@@ -242,7 +242,7 @@ function AuditAdmin({ onNotice }: { onNotice: (value: string) => void }) {
   return (
     <section className="audit-panel">
       <div className="admin-toolbar">
-        <mdui-text-field variant="outlined" clearable value={action} onChange={e => setAction(fieldValue(e))} placeholder="按 action 过滤，例如 model_provider.activated" />
+        <mdui-text-field variant="outlined" clearable value={action} onInput={e => setAction(fieldValue(e))} placeholder="按 action 过滤，例如 model_provider.activated" />
         <mdui-button variant="tonal" icon="search" onClick={() => load()}>查询</mdui-button>
       </div>
       {loading ? <p className="empty">正在读取审计记录…</p> : events.length === 0 ? <p className="empty">暂无管理审计记录。</p> : events.map(event => (

@@ -98,7 +98,8 @@ function select(label: string) {
 function type(label: string, value: string) {
   const element = field(label) as HTMLElement & { value?: string }
   element.value = value
-  act(() => { element.dispatchEvent(new Event('change', { bubbles: true })) })
+  // Typing fires input on every keystroke and change only on commit; the form must follow input.
+  act(() => { element.dispatchEvent(new Event('input', { bubbles: true })) })
 }
 
 function choose(label: string, value: string) {

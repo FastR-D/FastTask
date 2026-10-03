@@ -103,8 +103,8 @@ function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialErr
     <div className="login-panel">
       <form className="login-card" onSubmit={onSubmit} onKeyDown={onKeyDown}>
         <div><p className="eyebrow">WELCOME BACK</p><h2>进入工作台</h2></div>
-        <mdui-text-field label="账号" variant="outlined" required autocomplete="username" value={identifier} onChange={e => setIdentifier(fieldValue(e))}/>
-        <mdui-text-field label="密码" type="password" toggle-password variant="outlined" required autocomplete="current-password" value={password} onChange={e => setPassword(fieldValue(e))}/>
+        <mdui-text-field label="账号" variant="outlined" required autocomplete="username" value={identifier} onInput={e => setIdentifier(fieldValue(e))}/>
+        <mdui-text-field label="密码" type="password" toggle-password variant="outlined" required autocomplete="current-password" value={password} onInput={e => setPassword(fieldValue(e))}/>
         {error && <p className="login-error" role="alert"><mdui-icon name="error_outline"/>{error}</p>}
         <mdui-button variant="filled" full-width disabled={busy} loading={busy} onClick={submit}>{busy ? '正在验证…' : '开始今天'}</mdui-button>
         {fastcas && <mdui-button variant="outlined" full-width onClick={() => window.location.assign('/api/v1/auth/fastcas/login')}>使用 FastCAS 登录</mdui-button>}
@@ -249,10 +249,10 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
   return <section className="goals-page"><header className="page-head"><div className="title-block"><p className="eyebrow">{goals.length} 个长期目标</p><h1>目标树</h1></div><div className="head-side"><mdui-button variant="filled" icon={showCreate?'close':'add'} onClick={()=>setShowCreate(v=>!v)}>新建目标</mdui-button></div></header>
     {showCreate&&<mdui-dialog ref={createDialogRef} className="goal-dialog" open headline="新建目标" description="长期目标定义方向，验收标准决定什么才算完成。">
       <div className="form-stack">
-        <mdui-text-field label="目标标题" variant="outlined" required value={goalDraft.title} onChange={e=>setGoalDraft(d=>({...d,title:fieldValue(e)}))}/>
-        <mdui-text-field label="什么状态算真正完成？" variant="outlined" required value={goalDraft.criteria} onChange={e=>setGoalDraft(d=>({...d,criteria:fieldValue(e)}))}/>
-        <mdui-text-field label="目标日期" type="date" variant="outlined" value={goalDraft.target} onChange={e=>setGoalDraft(d=>({...d,target:fieldValue(e)}))}/>
-        <mdui-text-field label="背景与约束" variant="outlined" rows={3} value={goalDraft.description} onChange={e=>setGoalDraft(d=>({...d,description:fieldValue(e)}))}/>
+        <mdui-text-field label="目标标题" variant="outlined" required value={goalDraft.title} onInput={e=>setGoalDraft(d=>({...d,title:fieldValue(e)}))}/>
+        <mdui-text-field label="什么状态算真正完成？" variant="outlined" required value={goalDraft.criteria} onInput={e=>setGoalDraft(d=>({...d,criteria:fieldValue(e)}))}/>
+        <mdui-text-field label="目标日期" type="date" variant="outlined" value={goalDraft.target} onInput={e=>setGoalDraft(d=>({...d,target:fieldValue(e)}))}/>
+        <mdui-text-field label="背景与约束" variant="outlined" rows={3} value={goalDraft.description} onInput={e=>setGoalDraft(d=>({...d,description:fieldValue(e)}))}/>
       </div>
       <mdui-button slot="action" onClick={()=>setShowCreate(false)}>取消</mdui-button>
       <mdui-button slot="action" variant="filled" disabled={!goalDraft.title.trim()||!goalDraft.criteria.trim()} onClick={createGoal}>创建</mdui-button>
@@ -274,7 +274,7 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
           <mdui-segmented-button value="map" icon="map">地图</mdui-segmented-button>
         </mdui-segmented-button-group>
         <div className="revision-request">
-          <mdui-text-field variant="outlined" label="修订指令" value={revisionInstruction} onChange={e=>setRevisionInstruction(fieldValue(e))} placeholder="例如：把实验任务拆小，并移到当前里程碑下"/>
+          <mdui-text-field variant="outlined" label="修订指令" value={revisionInstruction} onInput={e=>setRevisionInstruction(fieldValue(e))} placeholder="例如：把实验任务拆小，并移到当前里程碑下"/>
           <mdui-button variant="outlined" icon="edit_note" onClick={()=>askAgent(true)} disabled={!revisionInstruction.trim()}>生成修订提案</mdui-button>
         </div>
       </div>
@@ -284,9 +284,9 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
         <strong>P{task.priority}</strong>
       </mdui-card>)}</div>}
       <div className="task-create">
-        <mdui-text-field variant="outlined" label="任务" value={taskDraft.title} onChange={e=>setTaskDraft(d=>({...d,title:fieldValue(e)}))} placeholder="手工添加一个真实任务"/>
-        <mdui-text-field variant="outlined" label="完成标准" value={taskDraft.criteria} onChange={e=>setTaskDraft(d=>({...d,criteria:fieldValue(e)}))} placeholder="完成标准"/>
-        <mdui-text-field variant="outlined" label="最小行动" value={taskDraft.minimum} onChange={e=>setTaskDraft(d=>({...d,minimum:fieldValue(e)}))} placeholder="5-15 分钟最小行动"/>
+        <mdui-text-field variant="outlined" label="任务" value={taskDraft.title} onInput={e=>setTaskDraft(d=>({...d,title:fieldValue(e)}))} placeholder="手工添加一个真实任务"/>
+        <mdui-text-field variant="outlined" label="完成标准" value={taskDraft.criteria} onInput={e=>setTaskDraft(d=>({...d,criteria:fieldValue(e)}))} placeholder="完成标准"/>
+        <mdui-text-field variant="outlined" label="最小行动" value={taskDraft.minimum} onInput={e=>setTaskDraft(d=>({...d,minimum:fieldValue(e)}))} placeholder="5-15 分钟最小行动"/>
         <mdui-button variant="tonal" icon="add" disabled={!taskDraft.title.trim()||!taskDraft.criteria.trim()||!taskDraft.minimum.trim()} onClick={addTask}>添加</mdui-button>
       </div>
     </>:<div className="empty">选择一个目标查看任务树。</div>}</div></div>
@@ -342,7 +342,7 @@ function Devices({ onNotice, timezone }: { onNotice:(s:string)=>void; timezone?:
       <mdui-card variant="outlined" className="device-add">
         <h2>连接墨水屏</h2>
         <p>创建一个只读、可撤销的设备身份。</p>
-        <mdui-text-field variant="outlined" label="设备名称" value={deviceName} onChange={e=>setDeviceName(fieldValue(e))} placeholder="例如：办公室墨水屏" required/>
+        <mdui-text-field variant="outlined" label="设备名称" value={deviceName} onInput={e=>setDeviceName(fieldValue(e))} placeholder="例如：办公室墨水屏" required/>
         <mdui-button variant="filled" disabled={!deviceName.trim()} onClick={create}>生成设备 Token</mdui-button>
       </mdui-card>
       {devices.map(device=><mdui-card variant="outlined" className="device-card" key={device.id}>

@@ -251,19 +251,19 @@ export function NotificationAdmin({ onNotice }: { onNotice: (value: string) => v
         <mdui-select label="推送方式" value={provider} onChange={e => { setProvider(fieldValue(e)); setDraft(emptyDraft()) }}>
           {PROVIDER_ORDER.map(key => <mdui-menu-item key={key} value={key}>{PROVIDER_LABEL[key]}</mdui-menu-item>)}
         </mdui-select>
-        <mdui-text-field label="通道名称" variant="outlined" required value={draft.name} onChange={e => setDraft(d => ({ ...d, name: fieldValue(e) }))} />
-        <mdui-text-field label={shape.endpointLabel} variant="outlined" required={shape.endpointRequired} value={draft.endpoint} onChange={e => setDraft(d => ({ ...d, endpoint: fieldValue(e) }))} />
+        <mdui-text-field label="通道名称" variant="outlined" required value={draft.name} onInput={e => setDraft(d => ({ ...d, name: fieldValue(e) }))} />
+        <mdui-text-field label={shape.endpointLabel} variant="outlined" required={shape.endpointRequired} value={draft.endpoint} onInput={e => setDraft(d => ({ ...d, endpoint: fieldValue(e) }))} />
         {shape.settings.map(field => field.options ? (
           <mdui-select key={field.key} label={field.label} value={setting(field.key)} onChange={e => setSetting(field.key, fieldValue(e))}>
             <mdui-menu-item value="">默认</mdui-menu-item>
             {field.options.map(option => <mdui-menu-item key={option} value={option}>{option}</mdui-menu-item>)}
           </mdui-select>
         ) : (
-          <mdui-text-field key={field.key} label={field.label} variant="outlined" required={field.required} value={setting(field.key)} onChange={e => setSetting(field.key, fieldValue(e))} />
+          <mdui-text-field key={field.key} label={field.label} variant="outlined" required={field.required} value={setting(field.key)} onInput={e => setSetting(field.key, fieldValue(e))} />
         ))}
         {shape.secretRequired && (shape.secretRows
-          ? <mdui-text-field label={shape.secretLabel} variant="outlined" required rows={shape.secretRows} value={draft.secret} onChange={e => setDraft(d => ({ ...d, secret: fieldValue(e) }))} />
-          : <mdui-text-field label={shape.secretLabel} type="password" toggle-password variant="outlined" required value={draft.secret} onChange={e => setDraft(d => ({ ...d, secret: fieldValue(e) }))} />)}
+          ? <mdui-text-field label={shape.secretLabel} variant="outlined" required rows={shape.secretRows} value={draft.secret} onInput={e => setDraft(d => ({ ...d, secret: fieldValue(e) }))} />
+          : <mdui-text-field label={shape.secretLabel} type="password" toggle-password variant="outlined" required value={draft.secret} onInput={e => setDraft(d => ({ ...d, secret: fieldValue(e) }))} />)}
         <mdui-select label="创建后状态" value={draft.status} onChange={e => setDraft(d => ({ ...d, status: fieldValue(e) }))}>
           <mdui-menu-item value="active">启用</mdui-menu-item>
           <mdui-menu-item value="disabled">先停用</mdui-menu-item>
@@ -291,16 +291,16 @@ export function NotificationAdmin({ onNotice }: { onNotice: (value: string) => v
               className={'admin-card' + (channel.id === channelID ? ' selected' : '') + (channel.status === 'disabled' ? ' muted' : '')}>
               {editing?.id === channel.id ? (
                 <div className="edit-stack">
-                  <mdui-text-field label="通道名称" variant="outlined" value={editing.name} onChange={e => setEditing({ ...editing, name: fieldValue(e) })} />
-                  <mdui-text-field label="服务地址" variant="outlined" value={editing.endpoint} onChange={e => setEditing({ ...editing, endpoint: fieldValue(e) })} />
+                  <mdui-text-field label="通道名称" variant="outlined" value={editing.name} onInput={e => setEditing({ ...editing, name: fieldValue(e) })} />
+                  <mdui-text-field label="服务地址" variant="outlined" value={editing.endpoint} onInput={e => setEditing({ ...editing, endpoint: fieldValue(e) })} />
                   {(PROVIDERS[channel.provider]?.settings ?? []).map(field => (
                     <mdui-text-field key={field.key} label={field.label} variant="outlined" value={editing.settings?.[field.key] ?? ''}
-                      onChange={e => setEditing({ ...editing, settings: { ...editing.settings, [field.key]: fieldValue(e) } })} />
+                      onInput={e => setEditing({ ...editing, settings: { ...editing.settings, [field.key]: fieldValue(e) } })} />
                   ))}
                   {PROVIDERS[channel.provider]?.secretRequired && (
                     PROVIDERS[channel.provider]?.secretRows
-                      ? <mdui-text-field label="替换凭据（留空则保留）" variant="outlined" rows={PROVIDERS[channel.provider].secretRows} value={editSecret} onChange={e => setEditSecret(fieldValue(e))} />
-                      : <mdui-text-field label="替换凭据（留空则保留）" type="password" toggle-password variant="outlined" value={editSecret} onChange={e => setEditSecret(fieldValue(e))} />)}
+                      ? <mdui-text-field label="替换凭据（留空则保留）" variant="outlined" rows={PROVIDERS[channel.provider].secretRows} value={editSecret} onInput={e => setEditSecret(fieldValue(e))} />
+                      : <mdui-text-field label="替换凭据（留空则保留）" type="password" toggle-password variant="outlined" value={editSecret} onInput={e => setEditSecret(fieldValue(e))} />)}
                   <mdui-select label="状态" value={editing.status} onChange={e => setEditing({ ...editing, status: fieldValue(e) })}>
                     <mdui-menu-item value="active">启用</mdui-menu-item>
                     <mdui-menu-item value="disabled">停用</mdui-menu-item>
@@ -351,8 +351,8 @@ export function NotificationAdmin({ onNotice }: { onNotice: (value: string) => v
                 <mdui-select label="用户" value={recipient.user_id} onChange={e => setRecipient(r => ({ ...r, user_id: fieldValue(e) }))}>
                   {users.map(user => <mdui-menu-item key={user.id} value={user.id}>{user.display_name}（{user.identifier}）</mdui-menu-item>)}
                 </mdui-select>
-                <mdui-text-field label={PROVIDERS[selectedChannel.provider]?.addressLabel ?? '地址'} variant="outlined" value={recipient.address} onChange={e => setRecipient(r => ({ ...r, address: fieldValue(e) }))} />
-                <mdui-text-field label="备注（例如：张三的 iPhone）" variant="outlined" value={recipient.label} onChange={e => setRecipient(r => ({ ...r, label: fieldValue(e) }))} />
+                <mdui-text-field label={PROVIDERS[selectedChannel.provider]?.addressLabel ?? '地址'} variant="outlined" value={recipient.address} onInput={e => setRecipient(r => ({ ...r, address: fieldValue(e) }))} />
+                <mdui-text-field label="备注（例如：张三的 iPhone）" variant="outlined" value={recipient.label} onInput={e => setRecipient(r => ({ ...r, label: fieldValue(e) }))} />
                 <mdui-button variant="tonal" icon="add" disabled={!recipient.user_id || !recipient.address.trim()} onClick={() => { void createTarget() }}>添加</mdui-button>
               </div>
               {targets.length === 0 ? <p className="empty">这个通道还没有接收端。</p> : (
@@ -411,7 +411,7 @@ export function NotificationAdmin({ onNotice }: { onNotice: (value: string) => v
             : `直接向一个地址发送测试消息，不会保存为接收端。`}>
           {testFor.channel && (
             <mdui-text-field label={PROVIDERS[testFor.channel.provider]?.addressLabel ?? '地址'} variant="outlined" required
-              helper={PROVIDERS[testFor.channel.provider]?.addressHint ?? ''} value={testAddress} onChange={e => setTestAddress(fieldValue(e))} />
+              helper={PROVIDERS[testFor.channel.provider]?.addressHint ?? ''} value={testAddress} onInput={e => setTestAddress(fieldValue(e))} />
           )}
           <mdui-button slot="action" onClick={() => setTestFor(null)}>取消</mdui-button>
           <mdui-button slot="action" variant="filled" disabled={busy === 'test' || (Boolean(testFor.channel) && !testAddress.trim())} loading={busy === 'test'} onClick={() => { void sendTest() }}>发送</mdui-button>
@@ -424,8 +424,8 @@ export function NotificationAdmin({ onNotice }: { onNotice: (value: string) => v
             <mdui-menu-item value="">全部通道</mdui-menu-item>
             {channels.map(channel => <mdui-menu-item key={channel.id} value={channel.id}>{channel.name}</mdui-menu-item>)}
           </mdui-select>
-          <mdui-text-field label="标题" variant="outlined" required value={broadcast.title} onChange={e => setBroadcast(b => b && { ...b, title: fieldValue(e) })} />
-          <mdui-text-field label="正文" variant="outlined" rows={3} value={broadcast.body} onChange={e => setBroadcast(b => b && { ...b, body: fieldValue(e) })} />
+          <mdui-text-field label="标题" variant="outlined" required value={broadcast.title} onInput={e => setBroadcast(b => b && { ...b, title: fieldValue(e) })} />
+          <mdui-text-field label="正文" variant="outlined" rows={3} value={broadcast.body} onInput={e => setBroadcast(b => b && { ...b, body: fieldValue(e) })} />
           <mdui-button slot="action" onClick={() => setBroadcast(null)}>取消</mdui-button>
           <mdui-button slot="action" variant="filled" disabled={!broadcast.title.trim()} onClick={() => { void sendBroadcast() }}>发送</mdui-button>
         </mdui-dialog>

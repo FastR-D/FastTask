@@ -131,7 +131,7 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
               <mdui-text-field
                 autoFocus
                 value={draft}
-                onChange={event => setDraft(fieldValue(event))}
+                onInput={event => setDraft(fieldValue(event))}
                 onBlur={() => void rename(thread)}
                 onKeyDown={event => {
                   if (event.key === 'Enter') void rename(thread)

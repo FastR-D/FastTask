@@ -21,7 +21,7 @@ export function FastCASAccount(){
  return <section className="card"><h2>账号认证</h2><p>FastCAS 是可选登录方式，不改变你的 FastTask 账号、任务或权限。</p>
  {!status?<p>正在读取认证状态…</p>:!status.enabled?<p>此部署未启用 FastCAS，本地登录仍可正常使用。</p>:<>
  <p>{current?.state==='active'?'已完成 FastCAS 认证':current?'认证尚未完成，可重试确认':'当前账号未认证'} · {status.issuer}</p>
- <mdui-text-field label="确认本地 FastTask 密码" type="password" autocomplete="current-password" value={password} onChange={e=>setPassword(fieldValue(e))}/>
+ <mdui-text-field label="确认本地 FastTask 密码" type="password" autocomplete="current-password" value={password} onInput={e=>setPassword(fieldValue(e))}/>
  {current?.state==='prepared'&&<mdui-button disabled={busy} onClick={()=>void act('reconcile')}>确认待完成认证</mdui-button>}
  <mdui-button disabled={busy||!password} loading={busy} onClick={()=>void act(current?'revoke':'link')}>{current?'解除 FastCAS 认证':'认证当前账号'}</mdui-button>
  <p>解除认证只终止 FastCAS 来源会话。本地密码登录、设备权限和任务数据保持原样。</p>

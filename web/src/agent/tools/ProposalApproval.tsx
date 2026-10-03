@@ -41,7 +41,7 @@ function ProposalCard({ title, args, result, addResult }: CardProps) {
             label="拒绝理由（可选，会回灌模型）"
             variant="outlined"
             value={reason}
-            onChange={e => setReason(fieldValue(e))}
+            onInput={e => setReason(fieldValue(e))}
           />
           <div className="agent-proposal-buttons">
             <mdui-button variant="filled" icon="check" onClick={() => addResult({ decision: 'approve' })}>批准</mdui-button>
