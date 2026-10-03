@@ -86,8 +86,14 @@ func (a *JobService) CancelJob(ctx context.Context, userID, id string, expected 
 		updates["status"] = status
 		updates["finished_at"] = persistence.Now()
 	}
-	if err := a.Store.DB.WithContext(ctx).Model(&job).Updates(updates).Error; err != nil {
-		return nil, err
+	// Conditional on the state that was read: a worker claiming the job between the read and this write
+	// must make the cancellation fail as a revision conflict, not overwrite a running job's status.
+	result := a.Store.DB.WithContext(ctx).Model(&persistence.AgentJob{}).Where("id = ? AND user_id = ? AND status = ? AND revision = ?", job.ID, userID, job.Status, expected).Updates(updates)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return nil, ErrRevision
 	}
 	if err := a.Store.DB.WithContext(ctx).First(&job, "id = ?", id).Error; err != nil {
 		return nil, err

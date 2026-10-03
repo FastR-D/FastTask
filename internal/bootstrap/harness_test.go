@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/FastR-D/FastTask/internal/application"
+	"github.com/FastR-D/FastTask/internal/config"
 	"github.com/FastR-D/FastTask/internal/persistence"
 )
 
@@ -60,7 +61,7 @@ func TestSchedulerReapsLostHarnessHosts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	maintenance, err := NewScheduler(store, app, agent)
+	maintenance, err := NewScheduler(store, app, agent, config.Config{AudioDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1095,14 +1095,19 @@ func (s conversationRoutes) RegisterRoutes(api huma.API) {
 			return nil, huma.Error400BadRequest("cannot read audio")
 		}
 		defer file.Close()
-		limited, err := io.ReadAll(io.LimitReader(file, 16<<20))
+		// Read one byte past the cap so an oversized recording is refused instead of silently
+		// truncated into a file the transcriber would choke on.
+		limited, err := io.ReadAll(io.LimitReader(file, voiceMaxBytes+1))
 		if err != nil || len(limited) == 0 {
 			return nil, huma.Error400BadRequest("audio is empty or invalid")
+		}
+		if len(limited) > voiceMaxBytes {
+			return nil, huma.Error413RequestEntityTooLarge("audio exceeds the 16 MB limit")
 		}
 		if err := os.MkdirAll(s.cfg.AudioDir, 0o750); err != nil {
 			return nil, mapError(err)
 		}
-		audioPath := filepath.Join(s.cfg.AudioDir, persistence.NewID("audio")+filepath.Ext(files[0].Filename))
+		audioPath := filepath.Join(s.cfg.AudioDir, persistence.NewID("audio")+audioExtension(files[0].Filename))
 		if err := os.WriteFile(audioPath, limited, 0o600); err != nil {
 			return nil, mapError(err)
 		}
@@ -1113,6 +1118,23 @@ func (s conversationRoutes) RegisterRoutes(api huma.API) {
 		}
 		return &acceptedResponse{Location: "/api/v1/agent-jobs/" + job.ID, Body: *job}, nil
 	})
+}
+
+const voiceMaxBytes = 16 << 20
+
+// audioExtension keeps the client's extension only when it is a short alphanumeric one: the transcriber
+// uses it as a format hint, and nothing else from a client filename reaches the filesystem.
+func audioExtension(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filepath.Base(filename)))
+	if len(ext) < 2 || len(ext) > 6 {
+		return ""
+	}
+	for _, r := range ext[1:] {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			return ""
+		}
+	}
+	return ext
 }
 
 func (s jobRoutes) RegisterRoutes(api huma.API) {

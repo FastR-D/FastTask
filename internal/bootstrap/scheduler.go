@@ -2,8 +2,10 @@ package bootstrap
 
 import (
 	"context"
+	"time"
 
 	"github.com/FastR-D/FastTask/internal/application"
+	"github.com/FastR-D/FastTask/internal/config"
 	"github.com/FastR-D/FastTask/internal/persistence"
 	"github.com/FastR-D/FastTask/internal/scheduler"
 	"go.uber.org/fx"
@@ -26,8 +28,13 @@ var SchedulerModule = fx.Module("scheduler",
 // Notification delivery is a sweeper for the same reason (doc/notification.md §5): a push is
 // a periodic drain of a durable queue, not a new long-running loop, and the scheduler is
 // where this deployment already keeps its clock.
-func NewScheduler(store *persistence.Store, app *application.App, agent *application.AgentService) (*scheduler.Scheduler, error) {
+func NewScheduler(store *persistence.Store, app *application.App, agent *application.AgentService, cfg config.Config) (*scheduler.Scheduler, error) {
 	return scheduler.New(store,
+		// Remove voice recordings no job needs any more (failed or cancelled transcriptions).
+		func(ctx context.Context) error {
+			_, err := application.ReapStaleAudio(ctx, store, cfg.AudioDir, time.Now())
+			return err
+		},
 		// Interrupt the runs whose host stopped beating, and finish the cancellations no host
 		// confirmed.
 		func(ctx context.Context) error { _, err := agent.ReapHarnessRuns(ctx); return err },

@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/FastR-D/FastTask/internal/persistence"
@@ -18,6 +19,9 @@ type Scheduler struct {
 	store     *persistence.Store
 	scheduler gocron.Scheduler
 	sweepers  []Sweeper
+
+	mu           sync.Mutex
+	lastSweepErr map[int]string
 }
 
 func New(store *persistence.Store, sweepers ...Sweeper) (*Scheduler, error) {
@@ -49,10 +53,30 @@ func (s *Scheduler) sweep() { s.SweepOnce(context.Background()) }
 // sweep cannot starve the others or hold a context open across intervals. It is exported so a test —
 // or an operator command — can run maintenance without waiting for the ticker.
 func (s *Scheduler) SweepOnce(ctx context.Context) {
-	for _, sweeper := range s.sweepers {
+	for i, sweeper := range s.sweepers {
 		sweepCtx, cancel := context.WithTimeout(ctx, sweepInterval)
-		_ = sweeper(sweepCtx)
+		err := sweeper(sweepCtx)
 		cancel()
+		s.reportSweep(i, err)
+	}
+}
+
+// reportSweep logs a sweeper's failure when it starts and when it clears, not on every five-second
+// pass: a database outage should be one line per sweeper, not seven hundred an hour.
+func (s *Scheduler) reportSweep(index int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastSweepErr == nil {
+		s.lastSweepErr = map[int]string{}
+	}
+	previous, failing := s.lastSweepErr[index]
+	switch {
+	case err != nil && (!failing || previous != err.Error()):
+		s.lastSweepErr[index] = err.Error()
+		slog.Error("maintenance sweep failed", "sweeper", index, "err", err)
+	case err == nil && failing:
+		delete(s.lastSweepErr, index)
+		slog.Info("maintenance sweep recovered", "sweeper", index)
 	}
 }
 
