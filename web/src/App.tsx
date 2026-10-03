@@ -254,14 +254,14 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
 	async function askAgent(revision=false){if(!selected)return;await guarded('agent',async()=>{try{const path=revision?'revision-jobs':'generation-jobs';const headers:Record<string,string>={'Idempotency-Key':idem()};if(revision)headers['If-Match']=treeETag;const instruction=revision?revisionInstruction:'生成三层以内的可执行任务树，每个任务必须有最小行动';const {data}=await request<Job>(`/goals/${selected.id}/task-tree/${path}`,{method:'POST',headers,body:JSON.stringify({instruction})});onNotice(`作业 ${data.id} 已进入队列`);const job=await waitJob(data.id);if(job.status!=='succeeded')throw new Error(job.error_message||'Agent 作业失败');await load(selected,true);setRevisionInstruction('')}catch(e){onNotice(errorText(e))}})}
 	async function decide(proposal:Proposal,apply:boolean){if(!selected)return;await guarded('proposal',async()=>{try{if(apply){await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/application`,{method:'POST',headers:{'If-Match':treeETag,'Idempotency-Key':idem()}});onNotice('提案已确认并应用')}else{await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/rejection`,{method:'PUT',headers:{'If-Match':etag('proposal',proposal.id,proposal.revision)}});onNotice('提案已拒绝')}await load(selected,true)}catch(e){onNotice(errorText(e))}})}
   return <section className="goals-page"><header className="page-head"><div className="title-block"><p className="eyebrow">{goals.length} 个长期目标</p><h1>目标树</h1></div><div className="head-side"><mdui-button variant="filled" icon={showCreate?'close':'add'} onClick={()=>setShowCreate(v=>!v)}>新建目标</mdui-button></div></header>
-    {showCreate&&<mdui-dialog ref={createDialogRef} className="goal-dialog" open headline="新建目标" description="长期目标定义方向，验收标准决定什么才算完成。">
+    {showCreate&&<mdui-dialog close-on-esc ref={createDialogRef} className="goal-dialog" open headline="新建目标" description="长期目标定义方向，验收标准决定什么才算完成。">
       <div className="form-stack">
         <mdui-text-field label="目标标题" variant="outlined" required value={goalDraft.title} onInput={e=>setGoalDraft(d=>({...d,title:fieldValue(e)}))}/>
         <mdui-text-field label="什么状态算真正完成？" variant="outlined" required value={goalDraft.criteria} onInput={e=>setGoalDraft(d=>({...d,criteria:fieldValue(e)}))}/>
         <mdui-text-field label="目标日期" type="date" variant="outlined" value={goalDraft.target} onInput={e=>setGoalDraft(d=>({...d,target:fieldValue(e)}))}/>
         <mdui-text-field label="背景与约束" variant="outlined" rows={3} value={goalDraft.description} onInput={e=>setGoalDraft(d=>({...d,description:fieldValue(e)}))}/>
       </div>
-      <mdui-button slot="action" onClick={()=>setShowCreate(false)}>取消</mdui-button>
+      <mdui-button slot="action" variant="text" onClick={()=>setShowCreate(false)}>取消</mdui-button>
       <mdui-button slot="action" variant="filled" disabled={!goalDraft.title.trim()||!goalDraft.criteria.trim()||busy==='goal'} loading={busy==='goal'} onClick={createGoal}>创建</mdui-button>
     </mdui-dialog>}
 		<div className="goal-layout">

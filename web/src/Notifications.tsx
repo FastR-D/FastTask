@@ -405,7 +405,7 @@ export function NotificationAdmin({ onNotice }: { onNotice: (value: string) => v
       </div>
 
       {testFor && (
-        <mdui-dialog ref={dialogRef} open icon="send" headline="发送测试通知"
+        <mdui-dialog close-on-esc ref={dialogRef} open icon="send" headline="发送测试通知"
           description={testFor.target
             ? `向 ${testFor.target.label || testFor.target.address_hint} 发送一条测试消息，结果会记入投递记录。`
             : `直接向一个地址发送测试消息，不会保存为接收端。`}>
@@ -413,20 +413,20 @@ export function NotificationAdmin({ onNotice }: { onNotice: (value: string) => v
             <mdui-text-field label={PROVIDERS[testFor.channel.provider]?.addressLabel ?? '地址'} variant="outlined" required
               helper={PROVIDERS[testFor.channel.provider]?.addressHint ?? ''} value={testAddress} onInput={e => setTestAddress(fieldValue(e))} />
           )}
-          <mdui-button slot="action" onClick={() => setTestFor(null)}>取消</mdui-button>
+          <mdui-button slot="action" variant="text" onClick={() => setTestFor(null)}>取消</mdui-button>
           <mdui-button slot="action" variant="filled" disabled={busy === 'test' || (Boolean(testFor.channel) && !testAddress.trim())} loading={busy === 'test'} onClick={() => { void sendTest() }}>发送</mdui-button>
         </mdui-dialog>
       )}
 
       {broadcast && (
-        <mdui-dialog ref={dialogRef} open icon="campaign" headline="广播通知" description="向所有在用接收端排队发送一条消息。通道留空表示全部通道。">
+        <mdui-dialog close-on-esc ref={dialogRef} open icon="campaign" headline="广播通知" description="向所有在用接收端排队发送一条消息。通道留空表示全部通道。">
           <mdui-select variant="outlined" label="通道" value={broadcast.channel_id} onChange={e => setBroadcast(b => b && { ...b, channel_id: fieldValue(e) })}>
             <mdui-menu-item value="">全部通道</mdui-menu-item>
             {channels.map(channel => <mdui-menu-item key={channel.id} value={channel.id}>{channel.name}</mdui-menu-item>)}
           </mdui-select>
           <mdui-text-field label="标题" variant="outlined" required value={broadcast.title} onInput={e => setBroadcast(b => b && { ...b, title: fieldValue(e) })} />
           <mdui-text-field label="正文" variant="outlined" rows={3} value={broadcast.body} onInput={e => setBroadcast(b => b && { ...b, body: fieldValue(e) })} />
-          <mdui-button slot="action" onClick={() => setBroadcast(null)}>取消</mdui-button>
+          <mdui-button slot="action" variant="text" onClick={() => setBroadcast(null)}>取消</mdui-button>
           <mdui-button slot="action" variant="filled" disabled={!broadcast.title.trim()} onClick={() => { void sendBroadcast() }}>发送</mdui-button>
         </mdui-dialog>
       )}

@@ -127,9 +127,9 @@ function UserAdmin({ currentID, onNotice }: { currentID: string; onNotice: (valu
         </div>
         {selected && <section className="session-panel"><h3>{selected.display_name} 的活跃会话</h3>{sessions.length === 0 ? <p>无活跃会话。</p> : sessions.map(session => <div key={session.id}><code>{session.id}</code><span>到期 {stamp(session.expires_at)}</span></div>)}</section>}
       </div>
-      {resetTarget && <mdui-dialog ref={resetDialogRef} open icon="key" headline="重置密码" description={`为 ${resetTarget.identifier} 设置至少 12 位新密码，旧会话将被全部撤销。`}>
+      {resetTarget && <mdui-dialog close-on-esc ref={resetDialogRef} open icon="key" headline="重置密码" description={`为 ${resetTarget.identifier} 设置至少 12 位新密码，旧会话将被全部撤销。`}>
         <mdui-text-field label="新密码（至少12位）" type="password" toggle-password variant="outlined" required minlength={12} value={resetValue} onInput={e => setResetValue(fieldValue(e))} />
-        <mdui-button slot="action" onClick={() => setResetTarget(null)}>取消</mdui-button>
+        <mdui-button slot="action" variant="text" onClick={() => setResetTarget(null)}>取消</mdui-button>
         <mdui-button slot="action" variant="filled" disabled={resetValue.length < 12} onClick={confirmReset}>确认重置</mdui-button>
       </mdui-dialog>}
     </div>
