@@ -575,7 +575,8 @@ token := base64.RawURLEncoding.EncodeToString(buf)
 - 计数按 15 分钟固定窗口：窗口过去后从零重新计数（正处于封禁中的除外），这样同一 NAT 或同一个未受信任的反向代理后面的许多用户，日常输错密码不会全天累积成所有人的封禁。
 - 状态在进程内存中，键空闲 30 分钟后遗忘，总量上限 5 万条，重启即清零。FastTask 是单进程单 SQLite 写者，因此不需要共享存储。
 - 未知账号也执行一次等成本的 Argon2id 校验，响应时间不泄露账号是否存在；封禁时返回 `429`。
-- Argon2id（64 MiB）同时最多运行 2–4 个，避免并发登录把内存打满。Refresh Token 只保存哈希且每次使用后轮换；检测到旧 Token 复用时撤销会话族。JWT 验证固定算法白名单、Issuer 和 Audience。
+- Argon2id（64 MiB）同时最多运行 2–4 个，避免并发登录把内存打满。
+- 其余有单次成本的匿名端点按来源 IP 令牌桶限流（`internal/httpapi/ratelimit.go`）：`/auth/refresh` 每分钟 60 次，FastCAS `login` 20 次（每次写一行事务）、`callback`/`complete` 30 次、`backchannel-logout` 120 次；超出返回 `429` 和 `Retry-After`。前端把刷新的 `429` 当作暂时不可用，不会因此退出登录。Refresh Token 只保存哈希且每次使用后轮换；检测到旧 Token 复用时撤销会话族。JWT 验证固定算法白名单、Issuer 和 Audience。
 
 Refresh 接口要求 `Idempotency-Key`。轮换事务同时保存旧 Token 哈希、替代 Token 关系和短期加密的响应快照；同一旧 Token、同一幂等键和相同请求在短重试窗口内重放原响应，不触发复用告警。不同幂等键、不同请求摘要或超过窗口后再次使用旧 Token，才按复用攻击撤销会话族。加密快照使用独立密钥、严格 TTL，禁止日志记录并定期清理。
 

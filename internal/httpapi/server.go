@@ -59,7 +59,7 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	if err := engine.SetTrustedProxies(cfg.TrustedProxies); err != nil {
 		panic("invalid trusted proxy configuration: " + err.Error())
 	}
-	engine.Use(requestID(), clientAddress(), accessLog(), recovery())
+	engine.Use(requestID(), clientAddress(), accessLog(), recovery(), publicRateLimit(newRateLimiter()))
 	engine.Use(func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("X-Frame-Options", "DENY")
