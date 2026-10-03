@@ -3,14 +3,16 @@ package auth
 import (
 	"context"
 	cryptorand "crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	fastcas "github.com/FastR-D/FastCAS/sdk/go"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	fastcas "github.com/FastR-D/FastCAS/sdk/go"
 	"github.com/FastR-D/FastTask/internal/config"
 	"github.com/FastR-D/FastTask/internal/persistence"
 	"github.com/golang-jwt/jwt/v5"
@@ -32,14 +34,16 @@ type Service struct {
 	store     *persistence.Store
 	config    config.Config
 	mu        sync.Mutex
-	failures  map[string]loginFailure
+	throttle  *loginThrottle
 	casClient *fastcas.Client
 }
 
-type loginFailure struct {
-	Count        int
-	BlockedUntil time.Time
-}
+// ErrLoginThrottled is returned while a client or account is cooling down after repeated failures.
+var ErrLoginThrottled = errors.New("login temporarily blocked")
+
+// ErrInvalidCredentials covers both an unknown identifier and a wrong password; callers must not be
+// able to tell them apart.
+var ErrInvalidCredentials = errors.New("invalid credentials")
 
 type claims struct {
 	Role string `json:"role"`
@@ -55,7 +59,7 @@ type serviceClaims struct {
 }
 
 func New(store *persistence.Store, cfg config.Config) *Service {
-	return &Service{store: store, config: cfg, failures: map[string]loginFailure{}}
+	return &Service{store: store, config: cfg, throttle: newLoginThrottle()}
 }
 
 func WithPrincipal(ctx context.Context, principal Principal) context.Context {
@@ -91,19 +95,25 @@ func (s *Service) EnsureAdmin(ctx context.Context) error {
 
 func (s *Service) Login(ctx context.Context, identifier, password string) (persistence.User, string, string, error) {
 	identifier = strings.TrimSpace(identifier)
-	if s.loginBlocked(identifier) {
-		return persistence.User{}, "", "", errors.New("login temporarily blocked")
+	ticket, ok := s.throttle.begin(identifier, clientIPFromContext(ctx))
+	if !ok {
+		return persistence.User{}, "", "", ErrLoginThrottled
 	}
 	var user persistence.User
-	if err := s.store.DB.WithContext(ctx).Where("identifier = ? AND status = 'active'", identifier).First(&user).Error; err != nil {
-		s.recordLoginFailure(identifier)
-		return user, "", "", errors.New("invalid credentials")
+	err := s.store.DB.WithContext(ctx).Where("identifier = ? AND status = 'active'", identifier).First(&user).Error
+	if err != nil && !persistence.IsNotFound(err) {
+		return persistence.User{}, "", "", err
 	}
-	if !VerifyPassword(password, user.PasswordHash) {
-		s.recordLoginFailure(identifier)
-		return user, "", "", errors.New("invalid credentials")
+	// An unknown identifier costs the same Argon2id work as a wrong password, so response time does not
+	// reveal which accounts exist.
+	encoded := user.PasswordHash
+	if err != nil {
+		encoded = dummyPasswordHash()
 	}
-	s.clearLoginFailures(identifier)
+	if !VerifyPassword(password, encoded) || err != nil {
+		return persistence.User{}, "", "", ErrInvalidCredentials
+	}
+	s.throttle.succeed(ticket)
 	refresh, err := randomToken(32)
 	if err != nil {
 		return user, "", "", err
@@ -119,29 +129,6 @@ func (s *Service) Login(ctx context.Context, identifier, password string) (persi
 	}
 	access, err := s.issueAccess(user, session.ID)
 	return user, access, refresh, err
-}
-
-func (s *Service) loginBlocked(identifier string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.failures[identifier].BlockedUntil.After(persistence.Now())
-}
-
-func (s *Service) recordLoginFailure(identifier string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	failure := s.failures[identifier]
-	failure.Count++
-	if failure.Count >= 5 {
-		failure.BlockedUntil = persistence.Now().Add(time.Duration(failure.Count-4) * 30 * time.Second)
-	}
-	s.failures[identifier] = failure
-}
-
-func (s *Service) clearLoginFailures(identifier string) {
-	s.mu.Lock()
-	delete(s.failures, identifier)
-	s.mu.Unlock()
 }
 
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (persistence.User, string, string, error) {
@@ -317,21 +304,69 @@ func (s *Service) issueAccess(user persistence.User, sessionID string) (string, 
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString([]byte(s.config.JWTSecret))
 }
 
+// Argon2id with these parameters holds 64 MiB for the duration of one hash. Unbounded, a burst of login
+// requests is a memory-exhaustion attack that needs no valid account, so hashing is gated by a small
+// fixed number of slots; waiting callers hold a goroutine, not 64 MiB.
+const (
+	argonMemoryKiB   = 64 * 1024
+	argonIterations  = 1
+	argonParallelism = 4
+	// maxPasswordBytes bounds the input. Argon2 pre-hashes it, so length is not a work factor, but
+	// nothing legitimate is this long and a bound keeps a request body from becoming a password.
+	maxPasswordBytes = 1024
+)
+
+var argonSlots = make(chan struct{}, max(2, min(runtime.NumCPU(), 4)))
+
+func argon2Key(password, salt []byte, iterations, memory uint32, parallelism uint8, length uint32) []byte {
+	argonSlots <- struct{}{}
+	defer func() { <-argonSlots }()
+	return argon2.IDKey(password, salt, iterations, memory, parallelism, length)
+}
+
+var (
+	dummyHashOnce sync.Once
+	dummyHash     string
+)
+
+// dummyPasswordHash is a valid encoded hash of a random password nobody knows, verified in place of a
+// real one when the identifier does not exist.
+func dummyPasswordHash() string {
+	dummyHashOnce.Do(func() {
+		secret, err := randomToken(32)
+		if err == nil {
+			dummyHash, err = HashPassword(secret)
+		}
+		if err != nil {
+			// Without a random source there is nothing secure to fall back to; a fixed, well-formed
+			// hash still keeps the timing equal and matches no password.
+			dummyHash = "argon2id$v=19$m=65536,t=1,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+		}
+	})
+	return dummyHash
+}
+
 func HashPassword(password string) (string, error) {
 	if len(password) < 12 {
 		return "", errors.New("password must contain at least 12 characters")
+	}
+	if len(password) > maxPasswordBytes {
+		return "", fmt.Errorf("password must not exceed %d bytes", maxPasswordBytes)
 	}
 	salt := make([]byte, 16)
 	if _, err := cryptorand.Read(salt); err != nil {
 		return "", err
 	}
-	hash := argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, 32)
-	return fmt.Sprintf("argon2id$v=19$m=65536,t=1,p=4$%s$%s", base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(hash)), nil
+	hash := argon2Key([]byte(password), salt, argonIterations, argonMemoryKiB, argonParallelism, 32)
+	return fmt.Sprintf("argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", argonMemoryKiB, argonIterations, argonParallelism, base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(hash)), nil
 }
 
 func VerifyPassword(password, encoded string) bool {
+	if len(password) > maxPasswordBytes {
+		return false
+	}
 	parts := strings.Split(encoded, "$")
-	if len(parts) != 5 {
+	if len(parts) != 5 || parts[0] != "argon2id" {
 		return false
 	}
 	var memory uint32
@@ -340,27 +375,21 @@ func VerifyPassword(password, encoded string) bool {
 	if _, err := fmt.Sscanf(parts[2], "m=%d,t=%d,p=%d", &memory, &iterations, &parallelism); err != nil {
 		return false
 	}
+	// Parameters come from the database. Refuse values no FastTask build ever wrote rather than let a
+	// damaged row turn one login into a multi-gigabyte allocation.
+	if memory == 0 || memory > 1024*1024 || iterations == 0 || iterations > 16 || parallelism == 0 {
+		return false
+	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[3])
 	if err != nil {
 		return false
 	}
 	want, err := base64.RawStdEncoding.DecodeString(parts[4])
-	if err != nil {
+	if err != nil || len(want) < 16 || len(want) > 64 {
 		return false
 	}
-	got := argon2.IDKey([]byte(password), salt, iterations, memory, parallelism, uint32(len(want)))
-	return subtleEqual(got, want)
-}
-
-func subtleEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var result byte
-	for i := range a {
-		result |= a[i] ^ b[i]
-	}
-	return result == 0
+	got := argon2Key([]byte(password), salt, iterations, memory, parallelism, uint32(len(want)))
+	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
 func randomToken(bytes int) (string, error) {

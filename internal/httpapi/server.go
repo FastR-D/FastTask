@@ -55,7 +55,7 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	if err := engine.SetTrustedProxies(cfg.TrustedProxies); err != nil {
 		panic("invalid trusted proxy configuration: " + err.Error())
 	}
-	engine.Use(requestID(), gin.CustomRecovery(func(c *gin.Context, recovered any) {
+	engine.Use(requestID(), clientAddress(), gin.CustomRecovery(func(c *gin.Context, recovered any) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"title": "Internal Server Error", "status": 500, "detail": "unexpected server error"})
 	}))
 	engine.Use(func(c *gin.Context) {
@@ -247,8 +247,8 @@ func operationStatus(id string) int {
 func (s authRoutes) RegisterRoutes(api huma.API) {
 	type loginInput struct {
 		Body struct {
-			Identifier string `json:"identifier" minLength:"1"`
-			Password   string `json:"password"`
+			Identifier string `json:"identifier" minLength:"1" maxLength:"200"`
+			Password   string `json:"password" maxLength:"1024"`
 		}
 	}
 	type tokenBody struct {
@@ -261,8 +261,13 @@ func (s authRoutes) RegisterRoutes(api huma.API) {
 	}
 	register(api, "auth-login", http.MethodPost, "/auth/login", "Login", publicSecurity(), func(ctx context.Context, input *loginInput) (*itemResponse[tokenBody], error) {
 		user, access, refresh, err := s.auth.Login(ctx, input.Body.Identifier, input.Body.Password)
-		if err != nil {
+		switch {
+		case errors.Is(err, platformauth.ErrLoginThrottled):
+			return nil, huma.Error429TooManyRequests("too many failed sign-in attempts; wait a few minutes and try again")
+		case errors.Is(err, platformauth.ErrInvalidCredentials):
 			return nil, huma.Error401Unauthorized("invalid credentials")
+		case err != nil:
+			return nil, mapError(err)
 		}
 		return &itemResponse[tokenBody]{Body: tokenBody{"Bearer", access, 3600, refresh, 2592000, user}}, nil
 	})
@@ -1701,6 +1706,16 @@ func requestID() gin.HandlerFunc {
 			id = persistence.NewID("req")
 		}
 		c.Header("X-Request-ID", id)
+		c.Next()
+	}
+}
+
+// clientAddress hands the caller's address to the auth layer. gin resolves it from X-Forwarded-For
+// only when the direct peer is in FASTTASK_TRUSTED_PROXIES, so a client cannot choose its own key in
+// the login throttle by sending the header itself.
+func clientAddress() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Request = c.Request.WithContext(platformauth.WithClientIP(c.Request.Context(), c.ClientIP()))
 		c.Next()
 	}
 }

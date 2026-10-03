@@ -83,11 +83,11 @@ func (s *Service) ProveFastCASLocal(ctx context.Context, p Principal, password s
 	if err := s.store.DB.WithContext(ctx).First(&user, "id = ? AND status = 'active'", p.UserID).Error; err != nil {
 		return errors.New("local account unavailable")
 	}
-	if s.loginBlocked(user.Identifier) {
-		return errors.New("login temporarily blocked")
+	ticket, ok := s.throttle.begin(user.Identifier, clientIPFromContext(ctx))
+	if !ok {
+		return ErrLoginThrottled
 	}
 	if !VerifyPassword(password, user.PasswordHash) {
-		s.recordLoginFailure(user.Identifier)
 		return errors.New("confirm your local password")
 	}
 	var count int64
@@ -97,7 +97,7 @@ func (s *Service) ProveFastCASLocal(ctx context.Context, p Principal, password s
 	if count != 1 {
 		return errors.New("local session expired")
 	}
-	s.clearLoginFailures(user.Identifier)
+	s.throttle.succeed(ticket)
 	return nil
 }
 

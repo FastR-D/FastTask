@@ -61,6 +61,20 @@ export function App() {
   )
 }
 
+// The server's problem details are English and deliberately vague; the sign-in form says what the
+// status means for the person typing instead.
+export function loginErrorText(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 401) return '账号或密码不正确'
+    if (error.status === 429) return '失败次数过多，请几分钟后再试'
+    if (error.status === 422) return '账号或密码格式不正确'
+    if (error.status >= 500) return '服务暂时不可用，请稍后再试'
+    return error.message || '登录失败'
+  }
+  if (error instanceof TypeError) return '无法连接服务器，请检查网络'
+  return '登录失败'
+}
+
 function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialError?: string }) {
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
@@ -72,7 +86,7 @@ function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialErr
     if (busy || !identifier.trim() || !password) return
     setBusy(true); setError('')
     try { await login(identifier.trim(), password); onLogin() }
-    catch (e) { setError(e instanceof Error ? e.message : '登录失败') }
+    catch (e) { setError(loginErrorText(e)) }
     finally { setBusy(false) }
   }
   function onSubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); submit() }
