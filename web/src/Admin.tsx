@@ -100,7 +100,7 @@ function UserAdmin({ currentID, onNotice }: { currentID: string; onNotice: (valu
         <mdui-text-field label="显示名" variant="outlined" required value={draft.displayName} onInput={e => setDraft(d => ({ ...d, displayName: fieldValue(e) }))} />
         <mdui-text-field label="初始密码（至少12位）" type="password" toggle-password variant="outlined" required minlength={12} value={draft.password} onInput={e => setDraft(d => ({ ...d, password: fieldValue(e) }))} />
         <mdui-text-field label="时区" variant="outlined" value={draft.timezone} onInput={e => setDraft(d => ({ ...d, timezone: fieldValue(e) }))} />
-        <mdui-select label="角色" value={draft.role} onChange={e => setDraft(d => ({ ...d, role: fieldValue(e) }))}>
+        <mdui-select variant="outlined" label="角色" value={draft.role} onChange={e => setDraft(d => ({ ...d, role: fieldValue(e) }))}>
           <mdui-menu-item value="member">成员</mdui-menu-item>
           <mdui-menu-item value="admin">管理员</mdui-menu-item>
         </mdui-select>

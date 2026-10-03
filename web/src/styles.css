@@ -77,7 +77,14 @@ button,input,textarea{font:inherit}
 }
 @media (max-width:839.98px){
   .app-rail{display:none}
-  .page{padding:var(--ft-space-4) var(--ft-space-4) calc(5.5rem + env(safe-area-inset-bottom))}
+  /* mdui-layout already pads the main area by the navigation bar's measured height, so the page only
+     needs its own breathing room; a second 5.5rem left a band of empty space above the bar and lifted
+     the chat composer off the bottom of the screen. */
+  .page{padding:var(--ft-space-4) var(--ft-space-4) var(--ft-space-6)}
+  .page-dialogue{padding-bottom:var(--ft-space-3)}
+  /* viewport-fit=cover lets the bar reach under the home indicator; mdui does not inset it, so the
+     bar grows by the inset (the layout measures offsetHeight, so the main area follows). */
+  .app-nav{height:calc(5rem + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);box-sizing:border-box}
 }
 @media (min-width:1080px){
   .page{padding-inline:var(--ft-space-6)}
