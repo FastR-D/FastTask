@@ -155,7 +155,7 @@ async function authHeaders() {
 
 要求：
 
-- 刷新逻辑必须与 `api.ts` 现有的 `refreshInFlight` 单飞机制共用，避免并发刷新导致 refresh token 轮换冲突。
+- 刷新逻辑必须与 `api.ts` 现有的 `refreshInFlight` 单飞机制共用，避免并发刷新导致 refresh token 轮换冲突。单飞只覆盖一个标签页；同一浏览器的多个标签页共享 localStorage 里的 refresh token，所以刷新还包在 Web Lock（`fasttask-refresh`）里，并在锁内重新读取 token。一个标签页退出登录（refresh token 被移除）时，其余标签页通过 `storage` 事件丢弃内存中的 access token 并回到登录页。服务端对轮换后 30 秒内重复出现的旧 token 只轮换其未使用的后继（响应丢失后的重试），之外视为复用并撤销会话族（`interface.md` §6.1）。
 - 三个传输端点的 401 不能依赖 `api.ts:21` 的重试逻辑（那是 `execute` 内部的，assistant-ui 不走这条路径），必须在 `authHeaders` 里前置保证 token 有效。§4.3 的恢复读走 `request`，本身就有这条重试。
 
 **token 存储位置需要从 `sessionStorage` 改为持久存储**（`api.ts:10-12`、`api.ts:35-52`），否则 PWA 每次冷启动都要重新登录。这是 §2 文件边界的唯一例外：两条工作流都会碰 `api.ts`，需要提前协调。具体方案见 [`doc/pwa.md`](pwa.md) §4。
