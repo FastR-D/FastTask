@@ -63,7 +63,17 @@ RUN go mod download
 COPY . .
 COPY --from=web /src/web/dist ./web/dist
 ENV CGO_ENABLED=1
-RUN go build -trimpath -ldflags="-s -w" -o /out/fasttask ./cmd/fasttask
+# The build context excludes .git, so the toolchain cannot record the revision itself; the caller passes
+# it (`FASTTASK_COMMIT=$(git rev-parse HEAD) docker compose build`). /health/version and `fasttask
+# version` report these; the Go version is always the runtime's own.
+ARG FASTTASK_VERSION=0.1.0-dev
+ARG FASTTASK_COMMIT=unknown
+RUN build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
+    go build -trimpath -ldflags="-s -w \
+      -X github.com/FastR-D/FastTask/internal/buildinfo.Version=${FASTTASK_VERSION} \
+      -X github.com/FastR-D/FastTask/internal/buildinfo.Commit=${FASTTASK_COMMIT} \
+      -X github.com/FastR-D/FastTask/internal/buildinfo.BuildTime=${build_time}" \
+      -o /out/fasttask ./cmd/fasttask
 
 FROM alpine:3.22
 # tzdata is not optional: the server loads Asia/Shanghai for daily planning and `doctor` fails without it

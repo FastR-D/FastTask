@@ -2,12 +2,13 @@ package bootstrap
 
 import (
 	"context"
-	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/FastR-D/FastTask/internal/application"
+	"github.com/FastR-D/FastTask/internal/buildinfo"
 	"github.com/FastR-D/FastTask/internal/config"
 	"github.com/FastR-D/FastTask/internal/httpapi"
 	platformauth "github.com/FastR-D/FastTask/internal/platform/auth"
@@ -89,10 +90,13 @@ func NewHTTPServer(api *httpapi.Server, cfg config.Config) *http.Server {
 		Addr:              cfg.Address(),
 		Handler:           writeDeadlineHandler(api.Engine, defaultWriteTimeout),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      0,
-		IdleTimeout:       90 * time.Second,
-		MaxHeaderBytes:    1 << 20,
+		// ReadTimeout bounds the whole request body. Uploads are capped at 16 MB (voice) and 8 MB (images),
+		// and 30 seconds was not enough for the voice cap over a 1–2 Mbit/s mobile uplink. Slow-header
+		// attacks are what ReadHeaderTimeout stops; a slow body is bounded by this and the size caps.
+		ReadTimeout:    2 * time.Minute,
+		WriteTimeout:   0,
+		IdleTimeout:    90 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 	}
 }
 
@@ -121,9 +125,12 @@ func registerHTTPLifecycle(lc fx.Lifecycle, server *http.Server, cfg config.Conf
 			}
 			listener = ln
 			obs.Started("http")
-			fmt.Printf("FastTask listening on %s\n", cfg.Address())
+			info := buildinfo.Get()
+			slog.Info("FastTask listening", "address", cfg.Address(), "public_url", cfg.PublicURL, "environment", cfg.Environment,
+				"version", info.Version, "commit", info.Commit, "go", info.Go)
 			go func() {
 				if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
+					slog.Error("HTTP server stopped unexpectedly", "err", err)
 					_ = shutdowner.Shutdown(fx.ExitCode(1))
 				}
 			}()
@@ -131,9 +138,16 @@ func registerHTTPLifecycle(lc fx.Lifecycle, server *http.Server, cfg config.Conf
 		},
 		OnStop: func(ctx context.Context) error {
 			obs.Stopped("http")
+			slog.Info("HTTP server draining connections")
 			err := server.Shutdown(ctx)
 			if listener != nil {
 				_ = listener.Close()
+			}
+			if err != nil {
+				// Long-lived streams that did not finish inside the budget are cut; their runs are
+				// recovered by the agent runtime's interrupted-run sweep on the next start.
+				slog.Warn("HTTP drain did not finish in time; closing remaining connections", "err", err)
+				_ = server.Close()
 			}
 			return err
 		},

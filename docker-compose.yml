@@ -32,6 +32,10 @@ services:
         GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
         # Same reason: the Alpine CDN measured 19s against this mirror's 1s for one index file.
         APK_MIRROR: ${APK_MIRROR:-mirrors.aliyun.com}
+        # Reported by /health/version. Compose cannot run git itself:
+        #   FASTTASK_COMMIT=$(git rev-parse HEAD) docker compose build
+        FASTTASK_VERSION: ${FASTTASK_VERSION:-0.1.0-dev}
+        FASTTASK_COMMIT: ${FASTTASK_COMMIT:-unknown}
     image: ${DOCKER_NAME:-fasttask}:local
     container_name: ${DOCKER_NAME:-fasttask}
     restart: unless-stopped

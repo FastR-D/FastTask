@@ -2,22 +2,20 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/FastR-D/FastTask/internal/bootstrap"
+	"github.com/FastR-D/FastTask/internal/buildinfo"
 	"github.com/FastR-D/FastTask/internal/config"
 	"github.com/FastR-D/FastTask/internal/persistence"
 	"github.com/spf13/cobra"
 )
 
-var (
-	version   = "0.1.0-dev"
-	commit    = "unknown"
-	buildTime = "unknown"
-)
-
 func main() {
+	setupLogging()
 	// A failed migration or a refused configuration is a runtime error, not a usage error: print it
 	// once, without the flag listing burying it.
 	root := &cobra.Command{Use: "fasttask", Short: "Long-term goal and daily focus system", SilenceUsage: true, SilenceErrors: true}
@@ -122,6 +120,28 @@ func doctorCommand() *cobra.Command {
 
 func versionCommand() *cobra.Command {
 	return &cobra.Command{Use: "version", Short: "Print build information", Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("fasttask %s commit=%s built=%s go=%s %s/%s\n", version, commit, buildTime, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		info := buildinfo.Get()
+		fmt.Printf("fasttask %s commit=%s built=%s go=%s %s/%s\n", info.Version, info.Commit, info.BuildTime, info.Go, runtime.GOOS, runtime.GOARCH)
 	}}
+}
+
+// setupLogging configures the process-wide structured logger. Text by default, because the usual reader
+// is `docker compose logs`; FASTTASK_LOG_FORMAT=json for a log shipper. FASTTASK_LOG_LEVEL=debug|info|
+// warn|error. Logs go to stderr so stdout stays the command's own output (backup paths, doctor summary).
+func setupLogging() {
+	level := slog.LevelInfo
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("FASTTASK_LOG_LEVEL"))) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	options := &slog.HandlerOptions{Level: level}
+	var handler slog.Handler = slog.NewTextHandler(os.Stderr, options)
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("FASTTASK_LOG_FORMAT")), "json") {
+		handler = slog.NewJSONHandler(os.Stderr, options)
+	}
+	slog.SetDefault(slog.New(handler))
 }

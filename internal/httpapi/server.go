@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/FastR-D/FastTask/internal/application"
+	"github.com/FastR-D/FastTask/internal/buildinfo"
 	"github.com/FastR-D/FastTask/internal/config"
 	"github.com/FastR-D/FastTask/internal/domain"
 	"github.com/FastR-D/FastTask/internal/persistence"
@@ -55,9 +57,7 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	if err := engine.SetTrustedProxies(cfg.TrustedProxies); err != nil {
 		panic("invalid trusted proxy configuration: " + err.Error())
 	}
-	engine.Use(requestID(), clientAddress(), gin.CustomRecovery(func(c *gin.Context, recovered any) {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"title": "Internal Server Error", "status": 500, "detail": "unexpected server error"})
-	}))
+	engine.Use(requestID(), clientAddress(), accessLog(), recovery())
 	engine.Use(func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("X-Frame-Options", "DENY")
@@ -94,7 +94,7 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 		}
 		c.JSON(200, gin.H{"status": "ready"})
 	})
-	engine.GET("/health/version", func(c *gin.Context) { c.JSON(200, gin.H{"version": "0.1.0", "go": "1.24"}) })
+	engine.GET("/health/version", func(c *gin.Context) { c.JSON(200, buildinfo.Get()) })
 
 	v1 := engine.Group("/api/v1")
 	v1.Use(func(c *gin.Context) { c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 34<<20); c.Next() })
@@ -1699,17 +1699,6 @@ func acceptedEncodings(header string) []string {
 	return out
 }
 
-func requestID() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		id := c.GetHeader("X-Request-ID")
-		if id == "" {
-			id = persistence.NewID("req")
-		}
-		c.Header("X-Request-ID", id)
-		c.Next()
-	}
-}
-
 // clientAddress hands the caller's address to the auth layer. gin resolves it from X-Forwarded-For
 // only when the direct peer is in FASTTASK_TRUSTED_PROXIES, so a client cannot choose its own key in
 // the login throttle by sending the header itself.
@@ -1854,6 +1843,9 @@ func mapError(err error) error {
 	case errors.Is(err, application.ErrForbidden):
 		return huma.Error403Forbidden("administrator permission required")
 	default:
+		// The client learns nothing; the log learns what failed. Request correlation comes from the
+		// access-log line written for the same request.
+		slog.Error("unhandled application error", "err", err)
 		return huma.Error500InternalServerError("internal server error")
 	}
 }

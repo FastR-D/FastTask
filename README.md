@@ -28,7 +28,7 @@ FastTask 是一个面向研究生和科研人员的长期目标推进系统。�
 
 ## 技术栈
 
-- Go 1.24.1+
+- Go（版本以 `go.mod` 的 `go`/`toolchain` 指令为准；`/health/version` 报告运行时实际版本）
 - Gin 1.11 + Huma v2.36
 - GORM + SQLite WAL
 - gocron v2
@@ -121,6 +121,8 @@ go run ./cmd/fasttask serve --with-worker --with-scheduler
 | `FASTTASK_NOTIFICATION_TIMEOUT_MS` | `10000` | 单次提供方调用超时，范围 1000 至 60000 毫秒 |
 | `FASTTASK_NOTIFICATION_BATCH` | `20` | 一次投递排水认领的消息数，范围 1 至 100 |
 | `FASTTASK_NOTIFICATION_RETENTION_HOURS` | `336` | 投递日志保留时长（小时），范围 1 至 2160 |
+| `FASTTASK_LOG_FORMAT` | `text` | 结构化日志格式，`text` 或 `json`；写到 stderr |
+| `FASTTASK_LOG_LEVEL` | `info` | `debug`、`info`、`warn`、`error`。日志包含每个 API 请求一行（含 `request_id`，不含查询串）、Panic 堆栈和 500 的内部原因，不含密码、Token 或凭据 |
 | `OPENAI_API_BASE_URL` | 空 | OpenAI-compatible `/v1` Base URL |
 | `OPENAI_MODEL` | 空 | 模型名 |
 | `OPENAI_API_KEY` | 空 | API Key |
@@ -397,7 +399,7 @@ docker compose restart fasttask         # SIGTERM，30s 宽限（应用排水预
 docker compose down                     # 保留数据目录
 ```
 
-升级：`docker compose build && docker compose run --rm fasttask migrate && docker compose up -d`。`restart: unless-stopped`，宿主重启后容器自动回来；容器不存活时数据目录仍在宿主机上，可直接被下一个容器或裸二进制接管。
+升级：`FASTTASK_COMMIT=$(git rev-parse HEAD) docker compose build && docker compose run --rm fasttask backup && docker compose run --rm fasttask migrate && docker compose up -d`。`/health/version` 返回 `version`、`commit`、`build_time` 和 `go`，用来确认跑的是哪次构建。`restart: unless-stopped`，宿主重启后容器自动回来；容器不存活时数据目录仍在宿主机上，可直接被下一个容器或裸二进制接管。
 
 ## 当前外部边界
 
