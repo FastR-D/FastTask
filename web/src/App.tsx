@@ -197,11 +197,18 @@ function Today({ onNotice, timezone }: { onNotice: (s:string)=>void; timezone?: 
     setSession(sessions?.data.items.find(s=>['running','paused'].includes(s.status)) || null)
   }
   useEffect(()=>{load()},[])
+  // One action at a time, named by what it is acting on, so the button that was pressed shows progress
+  // and a second press cannot send a duplicate (a fresh idempotency key each time) or a stale If-Match.
+  // The ref is the guard (clicks dispatched before React re-renders all see the same state); the state
+  // only drives what the buttons show.
+  const [busy,setBusy]=useState('')
+  const busyRef=useRef('')
+  async function guarded(key:string,action:()=>Promise<void>){if(busyRef.current)return;busyRef.current=key;setBusy(key);try{await action()}finally{busyRef.current='';setBusy('')}}
   useEffect(()=>{if(!session||session.status!=='running')return;const startedAt=new Date(session.started_at).getTime();const tick=()=>setElapsed(Math.max(0,Math.floor((Date.now()-startedAt)/1000)));tick();const timer=setInterval(tick,1000);return()=>clearInterval(timer)},[session])
-	async function generate(replace=false) { if (!timezone) { onNotice('正在加载用户时区，请稍后重试'); return } const localDate=localDateInTimezone(new Date(),timezone); try { const {data}=await request<Job>('/daily-plans/generation-jobs',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({local_date:localDate,timezone,available_minutes:120,replace_existing:replace,base_revision:replace?plan?.revision:undefined})}); onNotice(`计划作业已创建：${data.id}`); const job=await waitJob(data.id);if(job.status!=='succeeded')throw new Error(job.error_message||'计划作业失败');load() } catch(e){onNotice(errorText(e))} }
-  async function satisfy(item:PlanItem,type='minimum_action'){try{await request(`/daily-plans/${item.daily_plan_id}/items/${item.id}/completions`,{method:'POST',headers:{'If-Match':etag('dpi',item.id,item.revision),'Idempotency-Key':idem()},body:JSON.stringify({type,summary:type==='minimum_action'?'已完成今天的最小行动':'已获得可验证推进'})});onNotice('已记录推进证据，底层任务仍保持开放');load()}catch(e){onNotice(errorText(e))}}
-  async function start(item:PlanItem){if(!item.task_id)return;try{const {data}=await request<WorkSession>('/work-sessions',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({task_id:item.task_id,daily_plan_item_id:item.id,session_type:'pomodoro',target_minutes:25,started_at:new Date().toISOString()})});setSession(data);onNotice('专注计时开始')}catch(e){onNotice(errorText(e))}}
-  async function finish(){if(!session)return;try{await request(`/work-sessions/${session.id}/completions`,{method:'POST',headers:{'If-Match':etag('work',session.id,session.revision),'Idempotency-Key':idem()},body:JSON.stringify({ended_at:new Date().toISOString(),outcome:'progressed',note:'从今日工作台完成'})});setSession(null);onNotice('专注记录已保存')}catch(e){onNotice(errorText(e))}}
+	async function generate(replace=false) { if (!timezone) { onNotice('正在加载用户时区，请稍后重试'); return } const localDate=localDateInTimezone(new Date(),timezone); await guarded('plan',async()=>{ try { const {data}=await request<Job>('/daily-plans/generation-jobs',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({local_date:localDate,timezone,available_minutes:120,replace_existing:replace,base_revision:replace?plan?.revision:undefined})}); onNotice(`计划作业已创建：${data.id}`); const job=await waitJob(data.id);if(job.status!=='succeeded')throw new Error(job.error_message||'计划作业失败');await load() } catch(e){onNotice(errorText(e))} }) }
+  async function satisfy(item:PlanItem,type='minimum_action'){await guarded('satisfy:'+item.id,async()=>{try{await request(`/daily-plans/${item.daily_plan_id}/items/${item.id}/completions`,{method:'POST',headers:{'If-Match':etag('dpi',item.id,item.revision),'Idempotency-Key':idem()},body:JSON.stringify({type,summary:type==='minimum_action'?'已完成今天的最小行动':'已获得可验证推进'})});onNotice('已记录推进证据，底层任务仍保持开放');await load()}catch(e){onNotice(errorText(e))}})}
+  async function start(item:PlanItem){if(!item.task_id)return;await guarded('start:'+item.id,async()=>{try{const {data}=await request<WorkSession>('/work-sessions',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({task_id:item.task_id,daily_plan_item_id:item.id,session_type:'pomodoro',target_minutes:25,started_at:new Date().toISOString()})});setSession(data);onNotice('专注计时开始')}catch(e){onNotice(errorText(e))}})}
+  async function finish(){if(!session)return;await guarded('finish',async()=>{try{await request(`/work-sessions/${session.id}/completions`,{method:'POST',headers:{'If-Match':etag('work',session.id,session.revision),'Idempotency-Key':idem()},body:JSON.stringify({ended_at:new Date().toISOString(),outcome:'progressed',note:'从今日工作台完成'})});setSession(null);onNotice('专注记录已保存')}catch(e){onNotice(errorText(e))}})}
   const coreItems = items.filter(i=>i.kind==='core')
   const done = coreItems.filter(i=>i.status==='satisfied').length
   const total = coreItems.length
@@ -210,14 +217,14 @@ function Today({ onNotice, timezone }: { onNotice: (s:string)=>void; timezone?: 
       <div className="title-block"><p className="eyebrow">{new Date().toLocaleDateString('zh-CN',{timeZone:timezone,month:'long',day:'numeric',weekday:'long'})}</p><h1>今日推进</h1></div>
       <div className="head-side">
         {total>0&&<p className="head-stat"><strong>{done}<small>/{total}</small></strong><span>核心信号已满足</span></p>}
-        {plan&&<mdui-button variant="tonal" icon="refresh" onClick={()=>generate(true)}>基于最新进展重规划</mdui-button>}
+        {plan&&<mdui-button variant="tonal" icon="refresh" disabled={busy==='plan'} loading={busy==='plan'} onClick={()=>generate(true)}>基于最新进展重规划</mdui-button>}
       </div>
     </header>
     {session && <div className="focus-strip">
       <div className="focus-info"><span className="pulse"/><b>专注进行中</b><span className="focus-timer">{Math.floor(elapsed/60).toString().padStart(2,'0')}:{(elapsed%60).toString().padStart(2,'0')}</span></div>
-      <mdui-button variant="filled" onClick={finish}>结束并记录</mdui-button>
+      <mdui-button variant="filled" disabled={busy==='finish'} loading={busy==='finish'} onClick={finish}>结束并记录</mdui-button>
     </div>}
-    {loading ? <div className="loading-block"><mdui-linear-progress/><p className="empty">正在整理今天的信号…</p></div> : !plan ? <div className="empty-state"><h2>今天还没有计划</h2><p>系统会从活跃目标中选择最多三个有明确最小行动的任务。</p><mdui-button variant="filled" icon="auto_awesome" onClick={()=>generate(false)}>生成今日计划</mdui-button></div> : <>
+    {loading ? <div className="loading-block"><mdui-linear-progress/><p className="empty">正在整理今天的信号…</p></div> : !plan ? <div className="empty-state"><h2>今天还没有计划</h2><p>系统会从活跃目标中选择最多三个有明确最小行动的任务。</p><mdui-button variant="filled" icon="auto_awesome" disabled={busy==='plan'} loading={busy==='plan'} onClick={()=>generate(false)}>生成今日计划</mdui-button></div> : <>
     <div className="today-grid">{coreItems.map(item=><mdui-card key={item.id} variant="outlined" className={item.status==='satisfied'?'signal-card done':'signal-card'}>
       <div className="signal-content">
         <p className="meta">{item.status==='satisfied'?'已满足':'核心推进'} · {item.target_minutes} 分钟</p>
@@ -225,8 +232,8 @@ function Today({ onNotice, timezone }: { onNotice: (s:string)=>void; timezone?: 
         <p>{item.commitment}</p>
         <div className="minimum"><span>最小行动</span>{item.minimum_action}</div>
         <div className="actions">
-          <mdui-button variant="outlined" icon="play_arrow" onClick={()=>start(item)} disabled={Boolean(session)||item.status==='satisfied'}>开始专注</mdui-button>
-          <mdui-button variant="filled" icon={item.status==='satisfied'?'check_circle':undefined} onClick={()=>satisfy(item)} disabled={item.status==='satisfied'}>{item.status==='satisfied'?'已记录':'完成最小行动'}</mdui-button>
+          <mdui-button variant="outlined" icon="play_arrow" onClick={()=>start(item)} disabled={Boolean(session)||item.status==='satisfied'||Boolean(busy)} loading={busy==='start:'+item.id}>开始专注</mdui-button>
+          <mdui-button variant="filled" icon={item.status==='satisfied'?'check_circle':undefined} onClick={()=>satisfy(item)} disabled={item.status==='satisfied'||Boolean(busy)} loading={busy==='satisfy:'+item.id}>{item.status==='satisfied'?'已记录':'完成最小行动'}</mdui-button>
         </div>
       </div>
     </mdui-card>)}</div>
@@ -248,7 +255,8 @@ function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
   // slower response for the previous goal land under the new goal's heading.
   const latestGoal=useRef('')
 	async function load(goal=selected, fresh=false){const refresh=fresh?`?_refresh=${idem()}`:'';const g=await request<{items:Goal[]}>(`/goals${refresh}`);setGoals(g.data.items);const t=await request<{items:Task[]}>('/tasks').catch(()=>null);if(t)setTasks(t.data.items);const active=goal||g.data.items[0]||null;if(!selected&&active)setSelected(active);if(active){latestGoal.current=active.id;const response=await request<TaskTree>(`/goals/${active.id}/task-tree${refresh}`);if(latestGoal.current!==active.id)return;setTree(response.data);setTreeETag(response.etag||etag('tree',active.id,response.data.revision))}}
-  async function guarded(kind:'goal'|'task'|'agent'|'proposal',action:()=>Promise<void>){if(busy)return;setBusy(kind);try{await action()}finally{setBusy('')}}
+  const busyRef=useRef('')
+  async function guarded(kind:'goal'|'task'|'agent'|'proposal',action:()=>Promise<void>){if(busyRef.current)return;busyRef.current=kind;setBusy(kind);try{await action()}finally{busyRef.current='';setBusy('')}}
   useEffect(()=>{load().catch(e=>onNotice(errorText(e)))},[])
   async function createGoal(){if(!goalDraft.title.trim()||!goalDraft.criteria.trim())return;await guarded('goal',async()=>{try{const {data:goal}=await request<Goal>('/goals',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({title:goalDraft.title,description:goalDraft.description,success_criteria:goalDraft.criteria,target_date:goalDraft.target||null})});setShowCreate(false);setGoalDraft({title:'',criteria:'',target:'',description:''});setSelected(goal);onNotice('目标已创建');await load(goal,true)}catch(e){onNotice(errorText(e))}})}
   async function addTask(){if(!selected||!taskDraft.title.trim()||!taskDraft.criteria.trim()||!taskDraft.minimum.trim())return;await guarded('task',async()=>{try{await request('/tasks',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({goal_id:selected.id,type:'task',title:taskDraft.title,description:'',success_criteria:taskDraft.criteria,minimum_action:taskDraft.minimum,estimate_minutes:50,priority:70,position:tasks.length})});setTaskDraft({title:'',criteria:'',minimum:''});onNotice('任务已加入目标树');await load(selected,true)}catch(e){onNotice(errorText(e))}})}
