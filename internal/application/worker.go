@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -28,6 +29,8 @@ type Worker struct {
 	// (doc/notification.md §5).
 	dispatchNotifications func(ctx context.Context) error
 	lastNotificationDrain time.Time
+	// leaseRenewEvery overrides jobLeaseRenewEvery in tests.
+	leaseRenewEvery time.Duration
 }
 
 // WithAgentRunner attaches the agent runtime so the worker can execute
@@ -116,8 +119,82 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	if err != nil || job == nil {
 		return err
 	}
-	output, runErr := w.execute(ctx, *job)
-	return w.finish(ctx, *job, token, output, runErr)
+	runCtx, release := w.holdLease(ctx, *job, token)
+	output, runErr := w.execute(runCtx, *job)
+	release()
+	if err := w.finish(ctx, *job, token, output, runErr); err != nil {
+		if errors.Is(err, ErrStaleAgentAttempt) {
+			slog.Warn("agent job result discarded: lease was lost during execution", "job_id", job.ID, "type", job.Type, "attempt", job.AttemptCount)
+		} else {
+			slog.Error("agent job could not be finalised", "job_id", job.ID, "type", job.Type, "err", err)
+		}
+		return err
+	}
+	if runErr != nil {
+		slog.Warn("agent job attempt failed", "job_id", job.ID, "type", job.Type, "attempt", job.AttemptCount, "max_attempts", job.MaxAttempts, "err", runErr)
+	}
+	return nil
+}
+
+// jobRetryDelay backs off exponentially from 2s, capped at a minute. A provider answering 429 or 5xx is
+// the common failure, and retrying it one second later mostly earns the same answer.
+func jobRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	return min(2*time.Second<<min(attempt-1, 5), time.Minute)
+}
+
+// jobLease is how long a claim stays valid without renewal; jobLeaseRenewEvery is how often a running
+// attempt renews it. The scheduler requeues a job whose lease has lapsed, so an attempt that runs longer
+// than one lease — an agent loop's wall clock alone is three minutes — must keep extending it, or a
+// second worker would start the same job while the first is still producing a result.
+const (
+	jobLease           = 2 * time.Minute
+	jobLeaseRenewEvery = 30 * time.Second
+)
+
+// holdLease renews the claim while the attempt runs. If a renewal finds the claim gone (cancelled,
+// reclaimed after a stall, or fenced by a newer attempt) the returned context is cancelled, so the
+// attempt stops spending provider calls on a result that can no longer be recorded.
+func (w *Worker) holdLease(ctx context.Context, job persistence.AgentJob, rawToken string) (context.Context, func()) {
+	runCtx, cancel := context.WithCancel(ctx)
+	every := w.leaseRenewEvery
+	if every <= 0 {
+		every = jobLeaseRenewEvery
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				result := w.app.Store.DB.WithContext(runCtx).Model(&persistence.AgentJob{}).
+					Where("id = ? AND status = 'running' AND lease_version = ? AND run_token_hash = ?", job.ID, job.LeaseVersion, persistence.Hash(rawToken)).
+					UpdateColumn("locked_until", persistence.Now().Add(jobLease))
+				if result.Error != nil {
+					if runCtx.Err() == nil {
+						// A busy database is not a lost lease; the next tick tries again well inside it.
+						slog.Warn("agent job lease renewal failed", "job_id", job.ID, "err", result.Error)
+					}
+					continue
+				}
+				if result.RowsAffected == 0 {
+					slog.Warn("agent job lease lost; stopping the attempt", "job_id", job.ID, "type", job.Type)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return runCtx, func() {
+		cancel()
+		<-done
+	}
 }
 
 func (w *Worker) claim(ctx context.Context) (*persistence.AgentJob, string, error) {
@@ -133,7 +210,7 @@ func (w *Worker) claim(ctx context.Context) (*persistence.AgentJob, string, erro
 			return err
 		}
 		rawToken = persistence.NewID("run")
-		until := now.Add(2 * time.Minute)
+		until := now.Add(jobLease)
 		result := tx.Model(&persistence.AgentJob{}).Where("id = ? AND status = 'queued'", job.ID).Updates(map[string]any{
 			"status": "running", "locked_by": w.identity, "locked_until": until, "lease_version": job.LeaseVersion + 1,
 			"run_token_hash": persistence.Hash(rawToken), "attempt_count": job.AttemptCount + 1, "started_at": now,
@@ -201,7 +278,7 @@ func (w *Worker) finish(ctx context.Context, claimed persistence.AgentJob, rawTo
 			if errors.Is(runErr, ErrRevision) {
 				updates["status"], updates["error_code"], updates["error_message"] = "failed", "REVISION_MISMATCH", runErr.Error()
 			} else if current.AttemptCount < current.MaxAttempts && !strings.Contains(runErr.Error(), "unknown job") {
-				updates["status"], updates["run_after"], updates["finished_at"] = "queued", now.Add(time.Duration(current.AttemptCount)*time.Second), nil
+				updates["status"], updates["run_after"], updates["finished_at"] = "queued", now.Add(jobRetryDelay(current.AttemptCount)), nil
 				updates["error_code"], updates["error_message"] = "TEMPORARY", runErr.Error()
 			} else {
 				updates["status"], updates["error_code"], updates["error_message"] = "failed", "PROVIDER_ERROR", runErr.Error()
