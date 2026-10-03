@@ -152,6 +152,10 @@
 /* GFM tables cannot shrink to 400px (frontend.md §7), so the block scrolls
    sideways inside the message instead of pushing the layout wider. */
 .agent-md-table { display: block; min-width: 0; max-width: 100%; overflow-x: auto; }
+/* Column headings are short labels; wrapping them one CJK character per line (预计 / 时间) made a
+   five-column table unreadable. The table scrolls sideways instead of crushing them. */
+.agent-md-table th { white-space: nowrap; }
+.agent-md-table td { min-width: 4em; }
 .agent-md table { border-collapse: collapse; width: 100%; font-size: var(--mdui-typescale-body-small-size); }
 /* Row rules only. A box around every cell plus a filled header plus zebra striping states the same
    structure three times, and inside a typeset reply that grid reads as a spreadsheet pasted in from
@@ -528,6 +532,16 @@
     border-block-end: 1px solid rgb(var(--mdui-color-outline-variant));
     padding-inline-end: 0;
     padding-block-end: var(--ft-space-2);
-    max-block-size: 30vh;
+    max-block-size: 40vh;
   }
+  /* Closed, the list is one row: new conversation, and a toggle naming the one that is open. Measured
+     at 390px before this: list and status bar together left the conversation 150px of a 640px column. */
+  .agent-threads:not(.open) .agent-threads-items,
+  .agent-threads:not(.open) > mdui-button,
+  .agent-threads:not(.open) .agent-threads-archived { display: none; }
+  .agent-threads-toggle { display: inline-flex; min-inline-size: 0; flex: 1 1 auto; justify-content: flex-start; }
+  .agent-threads-toggle-label { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-inline-size: 100%; }
+}
+@media (min-width: 720.02px) {
+  .agent-threads-toggle { display: none; }
 }

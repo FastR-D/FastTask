@@ -30,6 +30,11 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [loading, setLoading] = useState(false)
+  // On a phone the list is a disclosure above the conversation (agent.css): closed by default and closed
+  // again once a conversation is picked, so the thread — not the index — gets the screen.
+  const [open, setOpen] = useState(false)
+  const openThread = (threadId: string | null) => { setOpen(false); onOpen(threadId) }
+  const activeTitle = threads.find(thread => thread.id === activeId)?.title
 
   const load = useCallback(async (cursor?: string) => {
     setLoading(true)
@@ -64,7 +69,7 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
     try {
       const id = await createThread(null)
       await load()
-      onOpen(id)
+      openThread(id)
     } catch (error) {
       fail('新建会话')(error)
     }
@@ -113,11 +118,21 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
   }
 
   return (
-    <nav className="agent-threads" aria-label="会话列表" data-testid="thread-list">
+    <nav className={`agent-threads${open ? ' open' : ''}`} aria-label="会话列表" data-testid="thread-list">
       <header className="agent-threads-head">
         <mdui-button variant="filled" icon="add" onClick={() => void startNew()}>新对话</mdui-button>
         <mdui-button
           variant="text"
+          className="agent-threads-toggle"
+          end-icon={open ? 'expand_less' : 'expand_more'}
+          aria-expanded={open}
+          onClick={() => setOpen(value => !value)}
+        >
+          <span className="agent-threads-toggle-label">{activeTitle ?? '全部会话'}</span>
+        </mdui-button>
+        <mdui-button
+          variant="text"
+          className="agent-threads-archived"
           icon={showArchived ? 'unarchive' : 'archive'}
           onClick={() => setShowArchived(value => !value)}
         >
@@ -141,7 +156,7 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
               // No timestamp in the row: the list is already ordered by recency, and the actions
               // overlay the row's end — on touch they are permanently opaque, so a date there is
               // invisible space the title pays for (measured: 56px reserved, title clipped to 115px).
-              <button type="button" className="agent-thread-open" onClick={() => onOpen(thread.id)}>
+              <button type="button" className="agent-thread-open" onClick={() => openThread(thread.id)}>
                 <mdui-icon name="forum" />
                 <span className="agent-thread-title">{thread.title}</span>
               </button>
