@@ -26,7 +26,7 @@ var embeddedMigrations embed.FS
 
 type Store struct{ DB *gorm.DB }
 
-const ExpectedSchemaVersion = 11
+const ExpectedSchemaVersion = 18
 
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -218,6 +218,9 @@ func execSchemaRewrite(ctx context.Context, db *gorm.DB, contents string) error 
 		return err
 	}
 	defer func() {
+		// Rewrites may carry their own BEGIN/COMMIT. If one statement fails,
+		// release the transaction before returning this connection to the pool.
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
 		_, _ = conn.ExecContext(context.WithoutCancel(ctx), "PRAGMA foreign_keys = ON")
 	}()
 	if _, err := conn.ExecContext(ctx, contents); err != nil {

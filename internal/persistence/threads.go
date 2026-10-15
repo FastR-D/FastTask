@@ -67,18 +67,41 @@ func (r *AgentRepository) UpdateThread(ctx context.Context, userID, threadID str
 // deterministic title is made of (doc/chat-features.md §2.4). It reads the authoritative parts rather
 // than a client-supplied title, so a title can never say something the conversation did not.
 func (r *AgentRepository) FirstThreadMessageText(ctx context.Context, userID, threadID string) (string, error) {
-	var text string
-	err := r.db(ctx).Raw(`
-		SELECT p.text
-		FROM agent_messages m
-		JOIN agent_message_parts p ON p.message_id = m.id
-		WHERE m.thread_id = ? AND m.user_id = ? AND m.role = 'user' AND p.type = 'text' AND p.text <> ''
-		ORDER BY m.seq, p.idx
-		LIMIT 1`, threadID, userID).Scan(&text).Error
-	if err != nil {
-		return "", err
+	texts, err := r.FirstThreadMessageTexts(ctx, userID, []string{threadID})
+	return texts[threadID], err
+}
+
+// unicode.IsSpace's characters match strings.Fields when deciding whether a
+// text part can identify a conversation. Image-only and blank parts are skipped.
+const threadTextWhitespace = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+
+// FirstThreadMessageTexts reads only the requested owner's page in one query.
+// It does not fetch entire transcripts or mutate title/recency metadata.
+func (r *AgentRepository) FirstThreadMessageTexts(ctx context.Context, userID string, threadIDs []string) (map[string]string, error) {
+	texts := make(map[string]string, len(threadIDs))
+	if len(threadIDs) == 0 {
+		return texts, nil
 	}
-	return text, nil
+	var rows []struct {
+		ThreadID string
+		Text     string
+	}
+	err := r.db(ctx).Raw(`
+		SELECT t.id AS thread_id, COALESCE((
+			SELECT p.text FROM agent_messages m
+			JOIN agent_message_parts p ON p.message_id = m.id AND p.user_id = m.user_id
+			WHERE m.thread_id = t.id AND m.user_id = t.user_id AND m.role = 'user'
+				AND p.type = 'text' AND TRIM(p.text, ?) <> ''
+			ORDER BY m.seq, p.idx LIMIT 1
+		), '') AS text
+		FROM agent_threads t WHERE t.user_id = ? AND t.id IN ?`, threadTextWhitespace, userID, threadIDs).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		texts[row.ThreadID] = row.Text
+	}
+	return texts, nil
 }
 
 // DeleteThread removes a thread and everything that belongs to it, in one transaction (§2.5): runs,

@@ -3,8 +3,7 @@ import { fieldValue } from '../mdui-react'
 import { resetModeProbe, subscribeHarnessStatus, warmUpHarness, type HarnessStatus } from '../harness'
 import { readModePreference, writeModePreference, type ModePreference } from './modePreference'
 
-/** useOnline tracks connectivity. The PWA can load the host offline, but a model call cannot be made
- *  without a network, so the composer has to say so instead of failing on send (doc/harness.md §9.3). */
+/** The browser's connectivity flag is advisory; local services can remain reachable. */
 export function useOnline(): boolean {
   const [online, setOnline] = useState<boolean>(() => (typeof navigator === 'undefined' ? true : navigator.onLine !== false))
   useEffect(() => {
@@ -52,17 +51,17 @@ export function HarnessStatusLine() {
     return subscribeHarnessStatus(setStatus)
   }, [])
 
-  if (!online) {
-    // Offline is the one state that outranks the mode line: history is readable from the cache, and
-    // nothing else about the agent works (§9.3).
+  const networkHint = !online
+    ? <span className="agent-harness-reason">浏览器报告网络不可用；可继续写草稿，发送时将尝试连接 FastTask。</span>
+    : null
+  if (!status || status.mode === 'idle') {
+    if (online) return null
     return (
-      <div className="agent-harness degraded" data-testid="harness-status" data-mode="offline">
-        <span className="agent-harness-mode">离线</span>
-        <span className="agent-harness-reason">可以查看已缓存的对话，发起新对话需要联网</span>
+      <div className="agent-harness" data-testid="harness-status" data-mode="idle">
+        {networkHint}
       </div>
     )
   }
-  if (!status || status.mode === 'idle') return null
   const degraded = status.mode !== 'wasm'
   const reason = status.reason ? REASON_LABEL[status.reason] ?? status.reason : ''
   return (
@@ -71,9 +70,10 @@ export function HarnessStatusLine() {
       {degraded && reason && <span className="agent-harness-reason">{reason}</span>}
       {status.detail && <span className="agent-harness-detail">{status.detail}</span>}
       {status.contextDegraded && (
-        <span className="agent-harness-degraded">本会话早期上下文已压缩为摘要（checkpoint 版本不一致）</span>
+        <span className="agent-harness-degraded">本会话已从保留的历史记录恢复</span>
       )}
       {status.error && <span className="agent-harness-error">{status.error}</span>}
+      {networkHint}
     </div>
   )
 }

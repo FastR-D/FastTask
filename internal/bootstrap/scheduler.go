@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/FastR-D/FastTask/internal/application"
@@ -29,7 +30,24 @@ var SchedulerModule = fx.Module("scheduler",
 // a periodic drain of a durable queue, not a new long-running loop, and the scheduler is
 // where this deployment already keeps its clock.
 func NewScheduler(store *persistence.Store, app *application.App, agent *application.AgentService, cfg config.Config) (*scheduler.Scheduler, error) {
+	var lastPlanningSweep time.Time
+	var planningMu sync.Mutex
 	return scheduler.New(store,
+		// Resume the durable seven-day forecast after a restart, then check once
+		// a minute. Each user is evaluated in their own local date and timezone.
+		func(ctx context.Context) error {
+			planningMu.Lock()
+			defer planningMu.Unlock()
+			now := persistence.Now()
+			if !lastPlanningSweep.IsZero() && now.Sub(lastPlanningSweep) < time.Minute {
+				return nil
+			}
+			if err := app.PlanService.MaintainSchedules(ctx, now); err != nil {
+				return err
+			}
+			lastPlanningSweep = now
+			return nil
+		},
 		// Remove voice recordings no job needs any more (failed or cancelled transcriptions).
 		func(ctx context.Context) error {
 			_, err := application.ReapStaleAudio(ctx, store, cfg.AudioDir, time.Now())

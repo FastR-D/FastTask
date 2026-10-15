@@ -1,5 +1,6 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider'
+import { isToolInputEnvelope, originalSchema, ToolCallBindings } from './tool-identity'
 
 // The gateway shim (doc/harness.md §4.2).
 //
@@ -22,6 +23,8 @@ export const GATEWAY_CHAT_PATHS = ['/v4/ai/language-model', '/v3/ai/language-mod
 export const GATEWAY_MODELS_PATH = '/coding-agent/v1/models'
 
 export type GatewayFetchOptions = {
+  /** The run-local identity bridge shared with buildHostTools. */
+  bindings?: ToolCallBindings
   /** The run this host is driving. It scopes the proxy endpoint, so a token cannot be replayed. */
   runId: string
   /** The run capability token, or a getter for it. A getter is what lets a heartbeat rotate the token
@@ -115,7 +118,7 @@ export function createGatewayFetch(options: GatewayFetchOptions): typeof fetch {
     try {
       // Inside the try on purpose: a body this shim cannot read must surface as an error response, so
       // libfx fails the turn cleanly instead of seeing its fetch throw.
-      const callOptions = await parseCallOptions(init?.body)
+      const callOptions = restoreModelInputs(await parseCallOptions(init?.body))
       const modelId = bodyModel(callOptions) ?? modelIdHint
       options.onEvent?.({ type: 'shim.request', model: modelId, endpoint: maskOrigin(baseURL) })
       const model = createOpenAICompatible({
@@ -129,7 +132,7 @@ export function createGatewayFetch(options: GatewayFetchOptions): typeof fetch {
         // Cancellation must reach the upstream call, or a cancelled turn keeps generating.
         abortSignal: init?.signal ?? undefined,
       } as LanguageModelV4CallOptions)
-      return streamResponseOf(stream)
+      return streamResponseOf(stream, options.bindings)
     } catch (error) {
       // libfx retries once on a transport failure (§3.6); answering with an error response is what
       // makes that path run instead of leaving the turn hanging.
@@ -173,21 +176,62 @@ function bodyModel(callOptions: unknown): string | undefined {
 }
 
 /** streamResponseOf re-encodes V4 stream parts as the SSE the gateway would have returned. */
-export function streamResponseOf(stream: ReadableStream<LanguageModelV4StreamPart>): Response {
+export function streamResponseOf(stream: ReadableStream<LanguageModelV4StreamPart>, bindings?: ToolCallBindings): Response {
   const encoder = new TextEncoder()
   const body = new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = stream.getReader()
+      const turn = bindings?.beginTurn()
+      const calls: Array<Extract<LanguageModelV4StreamPart, { type: 'tool-call' }>> = []
+      const endings: LanguageModelV4StreamPart[] = []
+      const opened = new Map<string, Extract<LanguageModelV4StreamPart, { type: 'tool-input-start' }>>()
+      let finished = false
+      const send = (value: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`))
       try {
         for (;;) {
           const { value, done } = await reader.read()
           if (done) break
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`))
+          if (bindings) {
+            // Do not expose any executable call until the complete model response is registered on
+            // the proxy. A partial/failed response cannot leave a runnable identity behind.
+            if (value.type === 'error') throw new Error(messageOf(value.error))
+            if (value.type === 'tool-input-start') {
+              opened.set(value.id, value)
+              continue
+            }
+            if (value.type === 'tool-input-delta' || value.type === 'tool-input-end') continue
+            if (value.type === 'tool-call') {
+              calls.push(value)
+              continue
+            }
+            if (value.type === 'finish') {
+              finished = true
+              endings.push(value)
+              continue
+            }
+          }
+          send(value)
+        }
+        if (bindings && turn !== undefined) {
+          if (!finished) throw new Error('TOOL_CALL_RESPONSE_INCOMPLETE: the model response ended without a finish event')
+          const encoded = calls.map(call => ({ call, input: JSON.stringify(bindings.bind(turn, call.toolCallId, call.toolName, call.input)) }))
+          for (const id of opened.keys()) {
+            if (!calls.some(call => call.toolCallId === id)) throw new Error('TOOL_CALL_RESPONSE_INCOMPLETE: a tool input has no complete call')
+          }
+          bindings.finishTurn(turn)
+          for (const { call, input } of encoded) {
+            send(opened.get(call.toolCallId) ?? { type: 'tool-input-start', id: call.toolCallId, toolName: call.toolName })
+            send({ type: 'tool-input-delta', id: call.toolCallId, delta: input })
+            send({ type: 'tool-input-end', id: call.toolCallId })
+            send({ ...call, input })
+          }
+          endings.forEach(send)
         }
         controller.close()
       } catch (error) {
+        if (bindings && turn !== undefined) bindings.failTurn(turn)
         // An error mid-stream becomes a V4 error part, which is how the SDK reports one.
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'error', error: messageOf(error) })}\n\n`))
+        send({ type: 'error', error: messageOf(error) })
         controller.close()
       } finally {
         reader.releaseLock()
@@ -198,6 +242,21 @@ export function streamResponseOf(stream: ReadableStream<LanguageModelV4StreamPar
     status: 200,
     headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' },
   })
+}
+
+/** Restore original schemas and arguments before calling a model. This also handles envelopes that
+ *  travelled through an opaque checkpoint into a new browser or sidecar host. */
+export function restoreModelInputs(options: LanguageModelV4CallOptions): LanguageModelV4CallOptions {
+  return {
+    ...options,
+    tools: options.tools?.map(tool => tool.type === 'function' ? { ...tool, inputSchema: originalSchema(tool.inputSchema) } : tool),
+    prompt: options.prompt.map(message => message.role !== 'assistant' ? message : {
+      ...message,
+      content: message.content.map(part => part.type === 'tool-call' && isToolInputEnvelope(part.input) && part.input.tool_call_id === part.toolCallId
+        ? { ...part, input: part.input.input }
+        : part),
+    }),
+  } as LanguageModelV4CallOptions
 }
 
 function errorResponseOf(error: unknown, status: number): Response {

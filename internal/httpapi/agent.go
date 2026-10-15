@@ -48,10 +48,28 @@ func (s *Server) registerAgent() {
 		c.Next()
 	})
 	group.POST("/commands", s.handleAgentCommands)
+	group.GET("/availability", s.handleAgentAvailability)
 	group.GET("/thread-state", s.handleAgentThreadState)
 	group.POST("/resume-state", s.handleAgentResumeState)
 	group.POST("/resume", s.handleAgentResume)
 	s.registerAgentOpenAPI()
+}
+
+// Availability exposes only public model metadata, never provider credentials.
+func (s *Server) handleAgentAvailability(c *gin.Context) {
+	if _, ok := s.authenticateAgent(c); !ok {
+		return
+	}
+	configured, model, err := s.agent.Availability(c.Request.Context())
+	if err != nil {
+		agentAbort(c, http.StatusServiceUnavailable, "model configuration unavailable")
+		return
+	}
+	mode := "demo_unconfigured"
+	if configured {
+		mode = "live"
+	}
+	c.JSON(http.StatusOK, gin.H{"configured": configured, "mode": mode, "model_name": model})
 }
 
 // handleAgentThreadState serves GET /agent/thread-state: the authoritative state
@@ -332,7 +350,7 @@ func agentSubmitError(c *gin.Context, err error) {
 	case errors.Is(err, application.ErrApprovalDuplicate), errors.Is(err, application.ErrApprovalNotAwaiting), errors.Is(err, application.ErrConflict):
 		agentAbort(c, http.StatusConflict, err.Error())
 	case errors.Is(err, application.ErrRevision):
-		agentAbort(c, http.StatusPreconditionFailed, "the task tree changed before this approval; the proposal was marked conflict")
+		agentAbort(c, http.StatusPreconditionFailed, "the proposal basis changed before this approval; the proposal was marked conflict")
 	case errors.Is(err, persistence.ErrActiveRunExists):
 		agentAbort(c, http.StatusConflict, "an agent run is already active")
 	case persistence.IsNotFound(err):
@@ -356,6 +374,16 @@ func (s *Server) registerAgentOpenAPI() {
 		api.Paths = map[string]*huma.PathItem{}
 	}
 	bearer := []map[string][]string{{"userBearer": {}}}
+	api.Paths["/agent/availability"] = &huma.PathItem{Get: &huma.Operation{
+		OperationID: "agent-availability",
+		Summary:     "Read model availability without credentials",
+		Security:    bearer,
+		Responses: map[string]*huma.Response{
+			"200": {Description: "configured, mode (live or demo_unconfigured), and model_name", Content: map[string]*huma.MediaType{"application/json": {}}},
+			"401": {Description: "authentication required"},
+			"503": {Description: "model configuration could not be read"},
+		},
+	}}
 	jsonBody := func(desc string) *huma.RequestBody {
 		return &huma.RequestBody{
 			Description: desc,
@@ -374,9 +402,9 @@ func (s *Server) registerAgentOpenAPI() {
 	api.Paths["/agent/commands"] = &huma.PathItem{Post: &huma.Operation{
 		OperationID: "agent-commands",
 		Summary:     "Submit agent commands and stream a run",
-		Description: "assistant-transport `api` endpoint. Creates a run from add-message commands and streams assistant-transport chunks. Request `state`, `system` and `tools` are untrusted and ignored (doc/agent-impl.md §2.2).",
+		Description: "assistant-transport `api` endpoint. Creates a run from add-message commands and streams assistant-transport chunks. A standalone add-tool-result receipt may set detachHarness=true to settle an existing pending browser proposal while ending its old wasm turn; it must omit state and other commands. Sidecar turns continue normally. Request state/system/tools never provide authoritative business state (doc/agent-impl.md §2.2).",
 		Security:    bearer,
-		RequestBody: jsonBody("commands, threadId, parentId; state/system/tools are ignored"),
+		RequestBody: jsonBody("commands, threadId, parentId; standalone add-tool-result may set detachHarness=true and must omit state; system/tools are ignored"),
 		Responses:   withConflict(sseResponses),
 	}}
 	api.Paths["/agent/thread-state"] = &huma.PathItem{Get: &huma.Operation{

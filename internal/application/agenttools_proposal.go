@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/FastR-D/FastTask/internal/agent"
 	"github.com/FastR-D/FastTask/internal/persistence"
+	"gorm.io/gorm"
 )
 
 // proposalTool is the shared shape for proposal-level tools: they validate the
@@ -39,7 +41,7 @@ func (p proposalTool) Execute(ctx context.Context, tc ToolContext, args map[stri
 		}
 		return ToolResult{}, err
 	}
-	if ref.GoalID == "" {
+	if ref.GoalID == "" && p.kind != "goal_with_tasks" {
 		return ToolResult{IsError: true, Text: "goal_id is required and must be one of the user's goals"}, nil
 	}
 	encoded, err := json.Marshal(payload)
@@ -49,10 +51,14 @@ func (p proposalTool) Execute(ctx context.Context, tc ToolContext, args map[stri
 	now := persistence.Now()
 	proposal := persistence.Proposal{
 		ID: persistence.NewID("proposal"), UserID: tc.UserID, GoalID: ref.GoalID,
-		Status: "pending", Instruction: instruction, PatchJSON: string(encoded),
+		Kind: p.kind, Status: "pending", Instruction: instruction, PatchJSON: string(encoded),
 		BaseRevision: ref.BaseRevision, Revision: 1, CreatedAt: now, UpdatedAt: now,
 	}
-	if err := p.app.Store.DB.WithContext(ctx).Create(&proposal).Error; err != nil {
+	query := p.app.Store.DB.WithContext(ctx)
+	if p.kind == "goal_with_tasks" {
+		query = query.Omit("GoalID")
+	}
+	if err := query.Create(&proposal).Error; err != nil {
 		return ToolResult{}, err
 	}
 	ref.ProposalID = proposal.ID
@@ -61,7 +67,7 @@ func (p proposalTool) Execute(ctx context.Context, tc ToolContext, args map[stri
 		Proposal: &ref,
 		Result: map[string]any{
 			"proposal_id": proposal.ID, "status": "pending", "base_revision": proposal.BaseRevision,
-			"summary": ref.Summary, "note": "需用户确认后才会落库",
+			"summary": ref.Summary, "kind": p.kind, "diff": ref.Diff, "note": "需用户确认后才会落库",
 		},
 	}, nil
 }
@@ -73,20 +79,22 @@ func (p proposalTool) Execute(ctx context.Context, tc ToolContext, args map[stri
 // a distinct non-structural apply path and must not be mis-routed through either.
 func NewProposalTools(app *App) []Tool {
 	return []Tool{
+		newGoalWithTasksTool(app),
+		newGoalUpdateTool(app),
 		proposalTool{
 			app:  app,
 			kind: "task_tree_patch",
 			def: agent.ToolDefinition{
 				Name:        "propose_task_tree_patch",
-				Description: "Propose a task-tree change (create/update/move/supersede) for a goal. Creates a pending proposal the user must approve; nothing is written until then. Read the tree first with get_task_tree to obtain target_id values and the current tree_revision.",
+				Description: "Propose a task-tree change (create/update/move/supersede/delete/restore) for an existing goal, including adding research steps in continued conversation. Use one batch of concrete steps with distinct outputs. Read the current tree before adding: reuse or update equivalent unfinished work; describe a real independent round's distinct material or context in description/output. Delete moves a task subtree to the recoverable recycle bin; restore requires the original task ID. User approval is required. Read the tree first for target_id and tree_revision; preserve started work and evidence.",
 				Parameters: objectSchema(map[string]any{
 					"goal_id":       stringProp("The goal whose task tree to change."),
 					"instruction":   stringProp("Short human-readable rationale for the change."),
 					"base_revision": integerProp("The tree_revision from get_task_tree this patch is based on; omit to use the current revision.", 0, 0),
 					"patch": map[string]any{
 						"type":        "array",
-						"description": "Ordered operations. create: {op?,client_ref?,parent_ref?,type,title,success_criteria,minimum_action,priority?,estimate_minutes?,uncertainty?,contribution?,coord_rationale?}. update/move/supersede: {op,target_id,...fields}. move: {op:move,target_id,parent_id|null}.",
-						"items":       map[string]any{"type": "object"},
+						"description": "Ordered operations. create requires type/title/success_criteria/minimum_action; update requires target_id and at least one changed field; move requires target_id and an explicit parent_id (null for root) or earlier parent_ref; supersede/delete/restore only accept op and target_id. estimate_minutes is TOTAL work, not today's budget. Parent is tree structure; array order recommends sequence. depends_on/depends_on_refs is only for required finished artifacts; explain that artifact in description. Omitted dependencies stay unchanged; an empty depends_on array explicitly removes them. Do not invent quantitative research targets the user did not request.",
+						"items":       taskTreePatchOperationSchema(),
 					},
 				}, "goal_id", "patch"),
 			},
@@ -100,7 +108,7 @@ func NewProposalTools(app *App) []Tool {
 				Description: "Propose today's core plan (0..3 tasks) from the user's executable candidates. Each candidate MUST carry a concrete 5-15 minute minimum_action; candidates without one are invalid. The program — not you — does the final filter, sort, dedup and top-3 cap, so proposing more than three is allowed but only the deterministic selection lands. Creates a pending proposal the user must approve.",
 				Parameters: objectSchema(map[string]any{
 					"local_date":        stringProp("Plan date YYYY-MM-DD; omit for today in the user's timezone."),
-					"available_minutes": integerProp("Focus minutes available that day (0..1440); omit to use the goal's default or 0.", 0, 1440),
+					"available_minutes": integerProp("Focus minutes available that day: 30..480, or 0/omitted to use the user's saved daily budget.", 0, 480),
 					"instruction":       stringProp("Short human-readable rationale for the plan."),
 					"candidates": map[string]any{
 						"type":        "array",
@@ -110,6 +118,7 @@ func NewProposalTools(app *App) []Tool {
 							"properties": map[string]any{
 								"task_id":        stringProp("The candidate task id."),
 								"minimum_action": stringProp("Concrete 5-15 minute first step for this candidate."),
+								"commitment":     stringProp("Optional specific local output achievable in today's focus budget, separate from the task's final success_criteria. Defaults to minimum_action; never promise the entire long task."),
 								"reason":         stringProp("Why this candidate belongs in today's plan."),
 							},
 							"required":             []string{"task_id", "minimum_action"},
@@ -123,6 +132,37 @@ func NewProposalTools(app *App) []Tool {
 	}
 }
 
+// The model gets the actual editable field vocabulary rather than an opaque
+// object. Operation-specific requirements are checked before staging below;
+// saved proposals retain their existing apply format.
+func taskTreePatchOperationSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"op":         stringProp("Operation; omitted means create.", "create", "update", "move", "supersede", "delete", "restore"),
+		"target_id":  stringProp("Existing task ID read from get_task_tree; required except for create."),
+		"client_ref": stringProp("Unique temporary reference for a newly created task."),
+		"parent_id": map[string]any{
+			"description": "Existing parent task ID; explicitly use null to move to the root.",
+			"anyOf":       []any{map[string]any{"type": "string"}, map[string]any{"type": "null"}},
+		},
+		"parent_ref":       stringProp("Temporary reference of an earlier created parent; do not combine with parent_id."),
+		"type":             stringProp("Task kind.", "milestone", "task", "action"),
+		"title":            stringProp("Task title, up to 300 characters."),
+		"description":      stringProp("Execution advice and real required artifacts, up to 8000 characters."),
+		"success_criteria": stringProp("Observable final output, up to 2000 characters."),
+		"minimum_action":   stringProp("Concrete next small action, up to 2000 characters."),
+		"status":           stringProp("Editable open status; final completion requires evidence through the completion action.", "ready", "in_progress", "blocked", "paused", "cancelled"),
+		"blocked_reason":   stringProp("Why a blocked task cannot start, up to 2000 characters."),
+		"priority":         integerProp("Priority, 0..100.", 0, 100),
+		"estimate_minutes": integerProp("Total task work minutes, 1..1440, separate from today's budget.", 1, 1440),
+		"position":         integerProp("Sibling order for update/move, starting at zero.", 0, 1<<31-1),
+		"depends_on":       map[string]any{"type": "array", "items": stringProp("Existing task ID for a truly required finished artifact; empty array clears dependencies.")},
+		"depends_on_refs":  map[string]any{"type": "array", "items": stringProp("Temporary reference of an earlier new prerequisite.")},
+		"uncertainty":      integerProp("Research uncertainty coordinate for create/update, 0..100.", 0, 100),
+		"contribution":     integerProp("Research contribution coordinate for create/update, 0..100.", 0, 100),
+		"coord_rationale":  stringProp("Reason for a supplied research coordinate."),
+	})
+}
+
 // buildTaskTreePatchProposal validates the patch shape and resolves the base
 // revision. Deep field/cycle/ownership validation is deferred to ApplyProposal,
 // which re-validates inside the apply transaction (§7.3, invariant 4).
@@ -134,7 +174,7 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 		}
 		// The goal must belong to the caller; a stranger's goal is not-found.
 		var goal persistence.Goal
-		if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", goalID, tc.UserID).First(&goal).Error; err != nil {
+		if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ? AND deleted_at IS NULL AND status = 'active'", goalID, tc.UserID).First(&goal).Error; err != nil {
 			if persistence.IsNotFound(err) {
 				return PendingProposalRef{}, nil, "", nil // empty GoalID -> structured error
 			}
@@ -144,11 +184,33 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 		if problem != "" {
 			return PendingProposalRef{}, nil, "", patchError(problem)
 		}
+		if problem := validateNewTaskPatchIntent(patch); problem != "" {
+			return PendingProposalRef{}, nil, "", patchError(problem)
+		}
 		var current int
-		a.Store.DB.WithContext(ctx).Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", goalID).Select("COALESCE(MAX(revision),0)").Scan(&current)
+		// The identity check and implicit base revision must describe the same
+		// tree. Apply keeps its revision guard if the tree changes after staging.
+		if err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+			var tasks []persistence.Task
+			if err := tx.Where("goal_id = ? AND user_id = ?", goalID, tc.UserID).Order("id").Find(&tasks).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", goalID).Select("COALESCE(MAX(revision),0)").Scan(&current).Error; err != nil {
+				return err
+			}
+			return validateNewPatchSteps(patch, tasks)
+		}); err != nil {
+			return PendingProposalRef{}, nil, "", err
+		}
 		base := current
-		if provided, ok := args["base_revision"].(float64); ok && provided > 0 {
-			base = int(provided)
+		if raw, provided := args["base_revision"]; provided && raw != nil {
+			var revision int
+			if err := changeInt(args, "base_revision", &revision); err != nil || revision < 0 {
+				return PendingProposalRef{}, nil, "", patchError("base_revision must be a non-negative whole number from get_task_tree")
+			}
+			if revision > 0 {
+				base = revision
+			}
 		}
 		ref := PendingProposalRef{
 			GoalID: goalID, BaseRevision: base,
@@ -156,6 +218,91 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 		}
 		return ref, patch, strings.TrimSpace(stringArg(args, "instruction")), nil
 	}
+}
+
+// Apply still revalidates domain invariants transactionally. These checks keep
+// ambiguous or silently ignored model fields out of a user approval card.
+// They deliberately apply only to new existing-tree proposals, not saved ones.
+func validateNewTaskPatchIntent(patch []map[string]any) string {
+	properties := taskTreePatchOperationSchema()["properties"].(map[string]any)
+	refs := map[string]bool{}
+	for i, node := range patch {
+		op := textValue(node["op"])
+		if op == "" {
+			op = "create"
+		}
+		allowed := map[string]bool{"op": true, "target_id": true}
+		if op == "create" || op == "update" || op == "move" {
+			for key := range properties {
+				allowed[key] = true
+			}
+			allowed["client_ref"] = op == "create"
+			allowed["target_id"] = op != "create"
+			allowed["position"] = op != "create"
+			allowed["status"], allowed["blocked_reason"] = op != "create", op != "create"
+			for _, key := range []string{"uncertainty", "contribution", "coord_rationale"} {
+				allowed[key] = op != "move"
+			}
+		}
+		for key, value := range node {
+			if !allowed[key] {
+				return fmt.Sprintf("patch[%d] %s does not support field %q; use the declared editable fields", i, op, key)
+			}
+			if key == "parent_id" {
+				if value == nil {
+					continue // Explicitly moving to the root is meaningful.
+				}
+				// The wire uses anyOf for nullable parents; the focused schema
+				// validator handles null but does not interpret union branches.
+				if _, ok := value.(string); !ok {
+					return fmt.Sprintf("patch[%d] parent_id must be a task ID string or null for root", i)
+				}
+			}
+			if value == nil {
+				return fmt.Sprintf("patch[%d] %s cannot be null", i, key)
+			}
+			// normalizePatch has already validated/deduplicated dependency arrays
+			// and converted their JSON []any to []string.
+			if schema, ok := properties[key].(map[string]any); ok && key != "depends_on" && key != "depends_on_refs" {
+				if problem := validateValue(key, schema, value); len(problem) > 0 {
+					return fmt.Sprintf("patch[%d]: %s", i, strings.Join(problem, "; "))
+				}
+			}
+			if key == "type" || key == "title" || key == "success_criteria" || key == "minimum_action" || key == "parent_id" || key == "parent_ref" || key == "target_id" || key == "client_ref" {
+				if textValue(value) == "" {
+					return fmt.Sprintf("patch[%d] %s must be non-empty", i, key)
+				}
+			}
+		}
+		_, hasParent := node["parent_id"]
+		_, hasParentRef := node["parent_ref"]
+		if hasParent && hasParentRef {
+			return fmt.Sprintf("patch[%d] use either parent_id or parent_ref, not both", i)
+		}
+		if op == "move" && !hasParent && !hasParentRef {
+			return fmt.Sprintf("patch[%d] move requires parent_id (null for root) or an earlier parent_ref", i)
+		}
+		if hasParentRef && !refs[textValue(node["parent_ref"])] {
+			return fmt.Sprintf("patch[%d] parent_ref must name an earlier created task", i)
+		}
+		if op == "update" {
+			changed := false
+			for key := range node {
+				if key != "op" && key != "target_id" && key != "coord_rationale" {
+					changed = true
+				}
+			}
+			if !changed {
+				return fmt.Sprintf("patch[%d] update requires at least one editable field", i)
+			}
+		}
+		if op == "create" {
+			if ref := textValue(node["client_ref"]); ref != "" {
+				refs[ref] = true
+			}
+		}
+	}
+	return ""
 }
 
 // buildDailyPlanProposal validates the candidate list and stages a daily-plan
@@ -191,6 +338,16 @@ func buildDailyPlanProposal(app *App) func(context.Context, *App, ToolContext, m
 		if localDate == "" {
 			localDate = persistence.Now().In(location).Format("2006-01-02")
 		}
+		if err := ParseDateInZone(localDate, zone); err != nil {
+			return PendingProposalRef{}, nil, "", patchError("local_date must be YYYY-MM-DD")
+		}
+		baseline := &dailyPlanBase{}
+		var plan persistence.DailyPlan
+		if err := a.Store.DB.WithContext(ctx).Where("user_id = ? AND local_date = ? AND timezone = ?", tc.UserID, localDate, zone).First(&plan).Error; err == nil {
+			baseline.PlanID, baseline.Revision = plan.ID, plan.Revision
+		} else if !persistence.IsNotFound(err) {
+			return PendingProposalRef{}, nil, "", err
+		}
 		available := 0
 		if v, ok := args["available_minutes"].(float64); ok && v > 0 {
 			available = int(v)
@@ -200,11 +357,13 @@ func buildDailyPlanProposal(app *App) func(context.Context, *App, ToolContext, m
 			Timezone:         zone,
 			AvailableMinutes: available,
 			Candidates:       candidates,
+			BasePlan:         baseline,
 		}
 		ref := PendingProposalRef{
-			GoalID:  task.GoalID,
-			Diff:    candidatesDiff(candidates),
-			Summary: fmt.Sprintf("今日计划提案：%d 项候选（程序确定性取前三）", len(candidates)),
+			GoalID:       task.GoalID,
+			BaseRevision: baseline.Revision,
+			Diff:         candidatesDiff(candidates),
+			Summary:      fmt.Sprintf("今日计划提案：%d 项候选（程序确定性取前三）", len(candidates)),
 		}
 		return ref, payload, strings.TrimSpace(stringArg(args, "instruction")), nil
 	}
@@ -242,6 +401,22 @@ func normalizePatch(raw any) ([]map[string]any, string) {
 		if kind == "" {
 			kind = "create"
 		}
+		for _, field := range []string{"depends_on", "depends_on_refs"} {
+			if raw, exists := op[field]; exists {
+				values, err := taskDependencyList(raw)
+				if err != nil {
+					return nil, fmt.Sprintf("patch[%d] %s must be an array of valid task references", i, field)
+				}
+				if field == "depends_on_refs" {
+					for _, ref := range values {
+						if !refs[ref] {
+							return nil, fmt.Sprintf("patch[%d] dependency must reference an earlier client_ref", i)
+						}
+					}
+				}
+				op[field] = values
+			}
+		}
 		switch kind {
 		case "create":
 			nodeType := textValue(op["type"])
@@ -254,12 +429,15 @@ func normalizePatch(raw any) ([]map[string]any, string) {
 				}
 			}
 			if ref := textValue(op["client_ref"]); ref != "" {
+				if refs[ref] {
+					return nil, fmt.Sprintf("patch[%d] client_ref must be unique", i)
+				}
 				refs[ref] = true
 			}
 			if parentRef := textValue(op["parent_ref"]); parentRef != "" && !refs[parentRef] {
 				return nil, fmt.Sprintf("patch[%d] parent_ref %q must reference an earlier client_ref", i, parentRef)
 			}
-		case "update", "move", "supersede":
+		case "update", "move", "supersede", "delete", "restore":
 			if textValue(op["target_id"]) == "" {
 				return nil, fmt.Sprintf("patch[%d] %s requires target_id from get_task_tree", i, kind)
 			}
@@ -301,11 +479,15 @@ func normalizeCandidates(raw any) ([]PlanCandidate, string) {
 		if minAction == "" {
 			return nil, fmt.Sprintf("candidates[%d] (%s) requires a concrete minimum_action", i, taskID)
 		}
+		commitment := strings.TrimSpace(textValue(m["commitment"]))
+		if utf8.RuneCountInString(minAction) > 2000 || utf8.RuneCountInString(commitment) > 2000 {
+			return nil, fmt.Sprintf("candidates[%d] daily scope is too long", i)
+		}
 		if seen[taskID] {
 			continue
 		}
 		seen[taskID] = true
-		out = append(out, PlanCandidate{TaskID: taskID, MinimumAction: minAction, Reason: strings.TrimSpace(textValue(m["reason"]))})
+		out = append(out, PlanCandidate{TaskID: taskID, MinimumAction: minAction, Commitment: commitment, Reason: strings.TrimSpace(textValue(m["reason"]))})
 	}
 	if len(out) == 0 {
 		return nil, "candidates must contain at least one valid task"
@@ -318,6 +500,9 @@ func candidatesDiff(candidates []PlanCandidate) []map[string]any {
 	diff := make([]map[string]any, 0, len(candidates))
 	for _, c := range candidates {
 		entry := map[string]any{"task_id": c.TaskID, "minimum_action": c.MinimumAction}
+		if c.Commitment != "" {
+			entry["commitment"] = c.Commitment
+		}
 		if c.Reason != "" {
 			entry["reason"] = c.Reason
 		}
@@ -336,8 +521,8 @@ func summarizePatch(patch []map[string]any) string {
 		}
 		counts[kind]++
 	}
-	order := []string{"create", "update", "move", "supersede"}
-	labels := map[string]string{"create": "新建", "update": "更新", "move": "移动", "supersede": "取代"}
+	order := []string{"create", "update", "move", "supersede", "delete", "restore"}
+	labels := map[string]string{"create": "新建", "update": "更新", "move": "移动", "supersede": "取代", "delete": "移入回收站", "restore": "恢复"}
 	parts := make([]string, 0, len(counts))
 	for _, kind := range order {
 		if counts[kind] > 0 {

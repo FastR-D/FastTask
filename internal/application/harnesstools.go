@@ -10,7 +10,6 @@ import (
 
 	"github.com/FastR-D/FastTask/internal/agent/protocol"
 	"github.com/FastR-D/FastTask/internal/persistence"
-	"gorm.io/gorm"
 )
 
 // The host-facing tool surface (doc/harness.md §5, §7).
@@ -38,12 +37,10 @@ type harnessTools struct{ harnessBase }
 
 // HarnessToolCall is the body of POST /agent/runs/{run_id}/tools/{name} (§5).
 //
-// tool_call_id ties the execution back to the part the model proxy already wrote, so a result can never
-// attach itself to the wrong call (§4.4.1) — but it is OPTIONAL, because a libfx host cannot send one:
-// HostTool.execute() receives the input and an abort signal and no call id. With it absent the call is
-// matched on (run, tool name) instead, which is unambiguous because a host runs same-name calls one at a
-// time. Both fields are marked not-required so the schema says what the server actually accepts; a
-// required tool_call_id made every host tool call fail validation before it reached that logic.
+// tool_call_id is the actual id observed by the proxy and host shim. It remains
+// optional in the wire schema for compatibility, but an unidentified execution
+// is refused without changing the transcript. libfx does not supply it to
+// execute(); the shim must carry its verified execution envelope instead.
 type HarnessToolCall struct {
 	ToolCallID string         `json:"tool_call_id" required:"false"`
 	Input      map[string]any `json:"input" required:"false"`
@@ -79,8 +76,8 @@ type ApprovalWait struct {
 //
 //   - the tool-call part already exists, written by the model proxy when the model named
 //     the call (§4.4.1). This method writes only the RESULT onto it, so a call is never
-//     recorded twice. A missing part is created rather than rejected: a host can reach
-//     this endpoint before the proxy finished reading the stream.
+//     recorded twice. The host must carry the actual call id; a missing or
+//     ambiguous identity is refused without inventing transcript records.
 //   - a proposal tool does not end the run. It parks the run at awaiting_approval and the
 //     host waits on the long poll, so the same turn continues after the decision (§7)
 //     instead of a new run being created.
@@ -108,58 +105,54 @@ func (s *harnessTools) ExecuteHarnessTool(ctx context.Context, p HarnessPrincipa
 		return HarnessToolOutcome{}, errors.New("run has no assistant message to record the tool call on")
 	}
 
+	if toolCallID == "" {
+		return identityFailure("TOOL_CALL_ID_REQUIRED: refresh the FastTask host; no tool was executed"), nil
+	}
+	part, err := s.verifiedToolCall(ctx, run, sess, toolCallID, name, args)
+	if err != nil {
+		return identityFailure(err.Error()), nil
+	}
+	if part.ResultJSON != "" {
+		return replayToolOutcome(part), nil
+	}
+	// Claim only a finalized call from the current model response. Retrying the
+	// same id cannot consume another call, including an identical-argument call.
+	claimed, err := s.repo().ClaimToolCall(ctx, run.UserID, run.ID, sess.assistantID, part.ID, part.ToolModelTurn)
+	if err != nil {
+		return HarnessToolOutcome{}, err
+	}
+	if !claimed {
+		latest, readErr := s.repo().GetPart(ctx, run.UserID, part.ID)
+		if readErr == nil && latest.ResultJSON != "" {
+			return replayToolOutcome(latest), nil
+		}
+		return identityFailure("TOOL_EXECUTION_UNCONFIRMED: this call is already executing or its model turn is no longer current; reconcile its result before retrying"), nil
+	}
+	s.syncPartIntoState(sess, part)
 	tool, ok := s.svc.tools.Get(name)
 	if !ok {
-		return s.recordToolFailure(ctx, sess, run, toolCallID, name, args, toolError("unknown tool %q", name)), nil
-	}
-	var correlated *persistence.AgentMessagePart
-	if toolCallID == "" {
-		// A libfx HostTool is called with its input and an abort signal, and no call id, so a host has
-		// nothing to echo back (§4.4.1). The call is matched to the part the model proxy already wrote
-		// for it; refusing here instead would fail every tool call a browser or sidecar host makes.
-		part, err := s.correlateToolCall(ctx, run, sess, name)
-		if err != nil {
-			return HarnessToolOutcome{}, err
-		}
-		if part == nil {
-			// Nothing is waiting for a result under that name. Saying so reaches the model as a tool
-			// error, which is a recoverable turn; inventing a part would put a call in the transcript
-			// that no model ever made.
-			return s.recordToolFailure(ctx, sess, run, "", name, args,
-				toolError("no pending %q call in this run", name)), nil
-		}
-		correlated = part
-		toolCallID = derefString(part.ToolCallID)
+		return s.recordToolResult(ctx, sess, part, toolError("unknown tool %q", name)), nil
 	}
 	if problems := s.svc.tools.ValidateArgs(name, args); len(problems) > 0 {
-		return s.recordToolFailure(ctx, sess, run, toolCallID, name, args,
-			ToolResult{IsError: true, Text: "invalid arguments: " + strings.Join(problems, "; ")}), nil
+		return s.recordToolResult(ctx, sess, part, ToolResult{IsError: true, Text: "invalid arguments: " + strings.Join(problems, "; ")}), nil
 	}
-
 	thread, err := s.repo().GetThread(ctx, p.UserID, p.ThreadID)
 	if err != nil {
 		return HarnessToolOutcome{}, err
 	}
 	tc := ToolContext{UserID: p.UserID, ThreadID: p.ThreadID, RunID: p.RunID, ActiveGoalID: derefString(thread.GoalID)}
 
-	part := correlated
-	if part == nil {
-		part, err = s.ensureToolCallPart(ctx, sess, run, toolCallID, name, args)
-		if err != nil {
-			return HarnessToolOutcome{}, err
-		}
-	}
-
 	// Both levels execute OUTSIDE any business transaction with the §6 per-call timeout.
 	// A proposal tool writes only the staging record, never a business table (agent.md §4
 	// invariant 1). Waiting for the decision happens after this returns and is not bounded
 	// by the tool timeout (§7).
-	toolCtx, cancel := context.WithTimeout(ctx, s.toolTimeout())
+	budget := s.executionTimeout(tool)
+	toolCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	result, execErr := tool.Execute(toolCtx, tc, args)
 	if execErr != nil {
 		if toolCtx.Err() == context.DeadlineExceeded {
-			result = toolError("tool %q timed out after %s", name, s.toolTimeout())
+			result = toolError("tool %q timed out after %s", name, budget)
 		} else {
 			result = ToolResult{IsError: true, Text: fmt.Sprintf("tool %q failed: %v", name, execErr)}
 		}
@@ -180,95 +173,83 @@ func (s *harnessTools) toolTimeout() time.Duration {
 	return DefaultLoopLimits().ToolTimeout
 }
 
-// correlateToolCall finds the part an id-less tool call belongs to (§4.4.1), or nil when there is none.
-//
-// The name is enough because a host runs same-name calls sequentially (web/src/harness/tools.ts), so at
-// most one part of that name is waiting for a result at a time. The wait is short and bounded: the proxy
-// writes the part while it reads the model's stream, and a host cannot know about the call until that
-// stream reached it, so a miss means the model never made one rather than that the row is still on its way.
-func (s *harnessTools) correlateToolCall(ctx context.Context, run *persistence.AgentRun, sess *runSession, name string) (*persistence.AgentMessagePart, error) {
-	for attempt := 0; attempt < 5; attempt++ {
-		part, err := s.repo().LatestUnfinishedToolPart(ctx, run.UserID, sess.assistantID, name)
-		if err == nil {
-			return part, nil
-		}
-		if !persistence.IsNotFound(err) {
-			return nil, err
-		}
-		if attempt == 4 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+func (s *harnessTools) executionTimeout(tool Tool) time.Duration {
+	budget := s.toolTimeout()
+	// Explicit operator/test bounds win. Only locally registered tools can
+	// request a longer bounded budget; model input cannot increase it.
+	if declared, ok := tool.(ToolExecutionBudget); ok && !s.svc.toolTimeoutConfigured {
+		if requested := declared.ExecutionBudget(); requested > budget && requested <= 45*time.Second {
+			return requested
 		}
 	}
-	return nil, nil
+	return budget
 }
 
-// ensureToolCallPart returns the part carrying this tool call, creating it when the model
-// proxy has not written it yet. Creation claims the next part index inside a transaction
-// so the proxy and this path cannot both take the same one (§2.7.1: the server is the sole
-// index owner).
-func (s *harnessTools) ensureToolCallPart(ctx context.Context, sess *runSession, run *persistence.AgentRun, toolCallID, name string, args map[string]any) (*persistence.AgentMessagePart, error) {
-	if toolCallID != "" {
-		existing, err := s.repo().GetPartByToolCallID(ctx, run.UserID, toolCallID)
-		if err == nil {
-			if existing.MessageID != sess.assistantID {
-				// Another run's part carries this id. Writing a result onto it would put this run's tool
-				// output in somebody else's transcript, and a second row is blocked by the unique index.
-				return nil, fmt.Errorf("%w: %s", ErrToolCallIDCollision, toolCallID)
-			}
-			s.syncPartIntoState(sess, existing)
-			return existing, nil
-		}
-		if !persistence.IsNotFound(err) {
+func identityFailure(message string) HarnessToolOutcome {
+	return HarnessToolOutcome{Status: "error", IsError: true, Error: message}
+}
+
+func sameToolArgs(raw string, args map[string]any) bool {
+	var decoded map[string]any
+	if json.Unmarshal([]byte(raw), &decoded) != nil {
+		return false
+	}
+	if decoded == nil {
+		decoded = map[string]any{}
+	}
+	a, errA := json.Marshal(decoded)
+	b, errB := json.Marshal(args)
+	return errA == nil && errB == nil && string(a) == string(b)
+}
+
+// A bounded wait handles the proxy finishing persistence after the last streamed
+// byte. No path invents a call or chooses one by name/argument similarity.
+func (s *harnessTools) verifiedToolCall(ctx context.Context, run *persistence.AgentRun, sess *runSession, id, name string, args map[string]any) (*persistence.AgentMessagePart, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		part, err := s.repo().GetPartByToolCallID(ctx, run.UserID, id)
+		if err != nil && !persistence.IsNotFound(err) {
 			return nil, err
 		}
-	}
-	part := persistence.AgentMessagePart{
-		UserID: run.UserID, MessageID: sess.assistantID, Type: "tool-call", ToolName: name,
-	}
-	if toolCallID != "" {
-		callID := toolCallID
-		part.ToolCallID = &callID
-	}
-	encoded, err := json.Marshal(args)
-	if err != nil {
-		return nil, err
-	}
-	part.ArgsJSON = string(encoded)
-
-	err = s.svc.store.Transaction(ctx, func(tx *gorm.DB) error {
-		repo := s.repo().WithTx(tx)
-		idx, err := repo.NextPartIdx(ctx, run.UserID, sess.assistantID)
-		if err != nil {
-			return err
-		}
-		part.Idx = idx
-		if err := repo.CreatePartAtIdx(ctx, &part); err != nil {
-			if persistence.IsUniqueViolation(err) && toolCallID != "" {
-				// The proxy won the race for this run's part; use its row rather than duplicating the call.
-				found, lookupErr := repo.GetPartByToolCallID(ctx, run.UserID, toolCallID)
-				if lookupErr != nil {
-					return lookupErr
-				}
-				if found.MessageID != sess.assistantID {
-					return fmt.Errorf("%w: %s", ErrToolCallIDCollision, toolCallID)
-				}
-				part = *found
-				return nil
+		if err == nil {
+			if part.MessageID != sess.assistantID || part.Type != "tool-call" || part.ToolName != name {
+				return nil, fmt.Errorf("TOOL_CALL_IDENTITY_MISMATCH: call does not belong to this run and tool")
 			}
-			return err
+			if part.ToolArgsReady || part.ResultJSON != "" {
+				if !sameToolArgs(part.ArgsJSON, args) {
+					return nil, fmt.Errorf("TOOL_CALL_ARGUMENT_MISMATCH: full input differs from the model call")
+				}
+				return part, nil
+			}
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+		if attempt < 9 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
 	}
-	s.syncPartIntoState(sess, &part)
-	return &part, nil
+	return nil, fmt.Errorf("TOOL_CALL_NOT_READY: no finalized %q call with this identity; no tool was executed", name)
+}
+
+func replayToolOutcome(part *persistence.AgentMessagePart) HarnessToolOutcome {
+	var value any
+	if json.Unmarshal([]byte(part.ResultJSON), &value) != nil {
+		return identityFailure("TOOL_RESULT_UNREADABLE: execution will not be repeated")
+	}
+	if part.IsError {
+		message := part.ResultJSON
+		if result, ok := value.(map[string]any); ok {
+			if detail, ok := result["error"].(string); ok {
+				message = detail
+			}
+		}
+		return identityFailure(message)
+	}
+	if part.ProposalID != nil && part.ApprovalStatus == protocol.ApprovalPending {
+		return HarnessToolOutcome{Status: "pending", ProposalID: *part.ProposalID, Result: value}
+	}
+	return HarnessToolOutcome{Status: "ok", Result: value}
 }
 
 // syncPartIntoState makes the in-memory session state agree with a part that came from the
@@ -326,16 +307,6 @@ func (s *harnessTools) recordToolResult(ctx context.Context, sess *runSession, p
 	return HarnessToolOutcome{Status: "ok", Result: result.Result}
 }
 
-// recordToolFailure is the structured-error path: the model gets something it can correct
-// itself on and the run keeps going (§5 item 6).
-func (s *harnessTools) recordToolFailure(ctx context.Context, sess *runSession, run *persistence.AgentRun, toolCallID, name string, args map[string]any, result ToolResult) HarnessToolOutcome {
-	part, err := s.ensureToolCallPart(ctx, sess, run, toolCallID, name, args)
-	if err != nil {
-		return HarnessToolOutcome{Status: "error", IsError: true, Error: result.Text}
-	}
-	return s.recordToolResult(ctx, sess, part, result)
-}
-
 // emitPartResult mirrors a recorded result into the session state and emits the part, so a
 // tool output or an approval card appears without a reload.
 func (s *harnessTools) emitPartResult(sess *runSession, part *persistence.AgentMessagePart, result ToolResult, approval string) {
@@ -364,25 +335,7 @@ func (s *harnessTools) emitPartResult(sess *runSession, part *persistence.AgentM
 // run, and hand the host a "pending" outcome that keeps its execute() open.
 func (s *harnessTools) parkForApproval(ctx context.Context, sess *runSession, run *persistence.AgentRun, part *persistence.AgentMessagePart, result ToolResult) (HarnessToolOutcome, error) {
 	proposalID := result.Proposal.ProposalID
-	resultJSON, isError := resultPayload(result)
-	if err := s.repo().UpdatePartResult(ctx, part.UserID, part.ID, resultJSON, isError); err != nil {
-		return HarnessToolOutcome{}, err
-	}
-	if err := s.repo().UpdatePartApproval(ctx, part.UserID, part.ID, protocol.ApprovalPending, &proposalID); err != nil {
-		return HarnessToolOutcome{}, err
-	}
-	part.ResultJSON, part.IsError, part.ApprovalStatus = resultJSON, isError, protocol.ApprovalPending
-	part.ProposalID = &proposalID
-	s.emitPartResult(sess, part, result, protocol.ApprovalPending)
-
-	// The message needs a user decision before it can continue (§2.7).
-	requires := protocol.RequiresActionStatus()
-	sess.state.Messages[sess.assistantIdx].Status = requires
-	_ = sess.emitSet(protocol.MessageStatusPath(sess.assistantIdx), requires)
-	if err := sess.saveState(); err != nil {
-		return HarnessToolOutcome{}, err
-	}
-	if err := s.repo().SetRunStatus(ctx, run.UserID, run.ID, persistence.RunAwaitingApproval, "", ""); err != nil {
+	if err := s.commitPendingApproval(ctx, sess, run, part, result); err != nil {
 		return HarnessToolOutcome{}, err
 	}
 	// The run is parked and the host is about to block on a long poll. A user who closed

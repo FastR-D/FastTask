@@ -126,10 +126,14 @@ func (r *AgentRepository) TouchThread(ctx context.Context, userID, threadID stri
 // SaveThreadCheckpoint stores the libfx checkpoint for a thread
 // (doc/harness.md §6.1). The write is scoped by user and thread, so a harness
 // token can never move a checkpoint onto somebody else's thread.
-func (r *AgentRepository) SaveThreadCheckpoint(ctx context.Context, userID, threadID string, checkpoint []byte, libfxVersion string) error {
-	res := r.db(ctx).Model(&AgentThread{}).
-		Where("id = ? AND user_id = ?", threadID, userID).
-		Updates(map[string]any{"checkpoint": checkpoint, "libfx_version": libfxVersion, "updated_at": Now()})
+func (r *AgentRepository) SaveThreadCheckpoint(ctx context.Context, userID, threadID string, checkpoint []byte, libfxVersion string, runIDs ...string) error {
+	query := r.db(ctx).Model(&AgentThread{}).Where("id = ? AND user_id = ?", threadID, userID)
+	if len(runIDs) > 0 {
+		// A request authenticated before token revocation can arrive late. Keep
+		// a detached or older host from overwriting this thread's new context.
+		query = query.Where("EXISTS (SELECT 1 FROM agent_runs owner WHERE owner.id = ? AND owner.user_id = ? AND owner.thread_id = ? AND NOT (owner.status = ? AND owner.error_code = ?) AND NOT EXISTS (SELECT 1 FROM agent_runs newer WHERE newer.user_id = owner.user_id AND newer.thread_id = owner.thread_id AND newer.created_at > owner.created_at))", runIDs[0], userID, threadID, RunInterrupted, RunErrorHostDetached)
+	}
+	res := query.Updates(map[string]any{"checkpoint": checkpoint, "libfx_version": libfxVersion, "updated_at": Now()})
 	if res.Error != nil {
 		return res.Error
 	}
@@ -258,6 +262,14 @@ func (r *AgentRepository) GetRunByJobID(ctx context.Context, userID, jobID strin
 // UpdateRun applies fields to a run with an optimistic revision bump. It returns
 // gorm.ErrRecordNotFound when the run does not belong to userID.
 func (r *AgentRepository) UpdateRun(ctx context.Context, userID, runID string, fields map[string]any) error {
+	return r.updateRun(ctx, userID, runID, fields, false)
+}
+
+// RunErrorHostDetached marks a browser turn explicitly ended by the owner while
+// settling an approval. Its old host may never update or revive that run again.
+const RunErrorHostDetached = "HOST_DETACHED"
+
+func (r *AgentRepository) updateRun(ctx context.Context, userID, runID string, fields map[string]any, allowDetached bool) error {
 	now := Now()
 	updates := make(map[string]any, len(fields)+2)
 	for k, v := range fields {
@@ -265,7 +277,11 @@ func (r *AgentRepository) UpdateRun(ctx context.Context, userID, runID string, f
 	}
 	updates["updated_at"] = now
 	updates["revision"] = gorm.Expr("revision + 1")
-	res := r.db(ctx).Model(&AgentRun{}).Where("id = ? AND user_id = ?", runID, userID).Updates(updates)
+	query := r.db(ctx).Model(&AgentRun{}).Where("id = ? AND user_id = ?", runID, userID)
+	if !allowDetached {
+		query = query.Where("NOT (status = ? AND error_code = ?)", RunInterrupted, RunErrorHostDetached)
+	}
+	res := query.Updates(updates)
 	if res.Error != nil {
 		return res.Error
 	}
@@ -288,8 +304,8 @@ func (r *AgentRepository) SetRunStatus(ctx context.Context, userID, runID, statu
 
 // SaveRunState persists the retained resume snapshot and checkpoint sequence
 // (doc/agent-impl.md §2.8, §3.1 state_json).
-func (r *AgentRepository) SaveRunState(ctx context.Context, userID, runID, stateJSON string, checkpointSeq int) error {
-	return r.UpdateRun(ctx, userID, runID, map[string]any{"state_json": stateJSON, "checkpoint_seq": checkpointSeq})
+func (r *AgentRepository) SaveRunState(ctx context.Context, userID, runID, stateJSON string, checkpointSeq int, allowDetached ...bool) error {
+	return r.updateRun(ctx, userID, runID, map[string]any{"state_json": stateJSON, "checkpoint_seq": checkpointSeq}, len(allowDetached) > 0 && allowDetached[0])
 }
 
 // --- Messages ---
@@ -389,25 +405,6 @@ func (r *AgentRepository) GetPartByToolCallID(ctx context.Context, userID, toolC
 	return &part, nil
 }
 
-// LatestUnfinishedToolPart returns the newest tool-call part of one name on one message that has no
-// result yet, or gorm.ErrRecordNotFound.
-//
-// It exists for a host that cannot echo a tool call id back (doc/harness.md §4.4.1): libfx hands a
-// HostTool its input and an abort signal and nothing else, so the call is matched on (run, tool name)
-// instead. A host runs same-name calls one at a time, which is what makes "newest without a result"
-// unambiguous.
-func (r *AgentRepository) LatestUnfinishedToolPart(ctx context.Context, userID, messageID, toolName string) (*AgentMessagePart, error) {
-	var part AgentMessagePart
-	err := r.db(ctx).
-		Where("message_id = ? AND user_id = ? AND type = ? AND tool_name = ? AND (result_json IS NULL OR result_json = '')",
-			messageID, userID, "tool-call", toolName).
-		Order("idx DESC").First(&part).Error
-	if err != nil {
-		return nil, err
-	}
-	return &part, nil
-}
-
 // GetPart returns one part owned by userID, or gorm.ErrRecordNotFound.
 func (r *AgentRepository) GetPart(ctx context.Context, userID, partID string) (*AgentMessagePart, error) {
 	var part AgentMessagePart
@@ -497,7 +494,7 @@ func (r *AgentRepository) UpdatePartText(ctx context.Context, userID, partID, te
 // the call is complete, so the part exists before the host can execute the tool.
 func (r *AgentRepository) UpdatePartArgs(ctx context.Context, userID, partID, argsJSON string) error {
 	res := r.db(ctx).Model(&AgentMessagePart{}).
-		Where("id = ? AND user_id = ?", partID, userID).
+		Where("id = ? AND user_id = ? AND type = 'tool-call' AND tool_args_ready = 0 AND tool_execution_claimed = 0", partID, userID).
 		Updates(map[string]any{"args_json": argsJSON, "updated_at": Now()})
 	if res.Error != nil {
 		return res.Error

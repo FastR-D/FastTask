@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -76,7 +77,7 @@ func (taskTreeHandler) JobTypes() []string {
 }
 func (taskTreeHandler) HandleJob(ctx context.Context, job persistence.AgentJob, rt JobRuntime) (any, error) {
 	var goal persistence.Goal
-	if err := rt.App.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", job.SubjectID, job.UserID).First(&goal).Error; err != nil {
+	if err := rt.App.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ? AND deleted_at IS NULL", job.SubjectID, job.UserID).First(&goal).Error; err != nil {
 		return nil, err
 	}
 	var current int
@@ -96,7 +97,7 @@ func (taskTreeHandler) HandleJob(ctx context.Context, job persistence.AgentJob, 
 		instruction := fmt.Sprint(input["instruction"])
 		if job.Type == "task_tree_revision" {
 			var tasks []persistence.Task
-			_ = rt.App.Store.DB.WithContext(ctx).Where("goal_id = ? AND user_id = ?", goal.ID, job.UserID).Order("position, id").Find(&tasks).Error
+			_ = rt.App.Store.DB.WithContext(ctx).Where("goal_id = ? AND user_id = ? AND deleted_at IS NULL", goal.ID, job.UserID).Order("position, id").Find(&tasks).Error
 			tree, _ := json.Marshal(tasks)
 			instruction += "\n现有任务（修订时可使用 update/move/supersede，target_id 必须来自这里）：" + string(tree)
 		}
@@ -118,25 +119,60 @@ func (dailyPlanHandler) JobTypes() []string {
 }
 func (dailyPlanHandler) HandleJob(ctx context.Context, job persistence.AgentJob, rt JobRuntime) (any, error) {
 	var input struct {
-		LocalDate, Timezone string
-		AvailableMinutes    int  `json:"available_minutes"`
-		ReplaceExisting     bool `json:"replace_existing"`
-		BaseRevision        int  `json:"base_revision"`
+		LocalDate        string `json:"local_date"`
+		Timezone         string `json:"timezone"`
+		AvailableMinutes int    `json:"available_minutes"`
+		ReplaceExisting  bool   `json:"replace_existing"`
+		BaseRevision     int    `json:"base_revision"`
 	}
-	_ = json.Unmarshal([]byte(job.InputJSON), &input)
-	if input.LocalDate == "" {
-		input.LocalDate = time.Now().Format("2006-01-02")
+	if err := json.Unmarshal([]byte(job.InputJSON), &input); err != nil {
+		return nil, ErrValidation
 	}
 	if input.Timezone == "" {
-		input.Timezone = "Asia/Shanghai"
+		var user persistence.User
+		if err := rt.App.Store.DB.WithContext(ctx).First(&user, "id = ?", job.UserID).Error; err != nil {
+			return nil, notFound(err)
+		}
+		input.Timezone = user.Timezone
+	}
+	loc, err := time.LoadLocation(input.Timezone)
+	if err != nil {
+		return nil, ErrValidation
+	}
+	if input.LocalDate == "" {
+		input.LocalDate = persistence.Now().In(loc).Format("2006-01-02")
+	}
+	if err := ParseDateInZone(input.LocalDate, input.Timezone); err != nil {
+		return nil, err
 	}
 	var plan *persistence.DailyPlan
 	var items []persistence.DailyPlanItem
-	var err error
+	err = nil
 	if input.ReplaceExisting {
 		plan, items, err = rt.App.ReplanDailyPlan(ctx, job.UserID, input.LocalDate, input.Timezone, nil, input.AvailableMinutes, input.BaseRevision)
 	} else {
-		plan, items, err = rt.App.CreateDailyPlan(ctx, job.UserID, input.LocalDate, input.Timezone, nil, input.AvailableMinutes)
+		var existing persistence.DailyPlan
+		lookup := rt.App.Store.DB.WithContext(ctx).Where("user_id = ? AND local_date = ? AND timezone = ?", job.UserID, input.LocalDate, input.Timezone).First(&existing).Error
+		switch {
+		case lookup == nil:
+			if existing.Status != "active" {
+				return nil, ErrConflict
+			}
+			items, err = livePlanItemsTx(rt.App.Store.DB.WithContext(ctx), existing)
+			if err != nil {
+				return nil, err
+			}
+			plan = &existing
+			// Reading today's empty plan should not prevent its first explicit
+			// generation. Once there are commitments, replace_existing is required.
+			if len(items) == 0 && existing.FrozenAt == nil {
+				plan, items, err = rt.App.ReplanDailyPlan(ctx, job.UserID, input.LocalDate, input.Timezone, nil, input.AvailableMinutes, existing.Revision)
+			}
+		case errors.Is(lookup, gorm.ErrRecordNotFound):
+			plan, items, err = rt.App.CreateDailyPlan(ctx, job.UserID, input.LocalDate, input.Timezone, nil, input.AvailableMinutes)
+		default:
+			err = lookup
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -258,16 +294,9 @@ func (supportMaterializer) JobTypes() []string {
 	return []string{"support_generation"}
 }
 func (supportMaterializer) MaterializeJob(tx *gorm.DB, job persistence.AgentJob, output any, now time.Time) error {
-	var plan persistence.DailyPlan
-	if err := tx.Where("id = ? AND user_id = ?", job.SubjectID, job.UserID).First(&plan).Error; err != nil {
-		return notFound(err)
-	}
-	var unsatisfied int64
-	if err := tx.Model(&persistence.DailyPlanItem{}).Where("plan_id = ? AND kind = 'core' AND status NOT IN ('satisfied','superseded')", plan.ID).Count(&unsatisfied).Error; err != nil {
+	plan, err := validateSupportJobTx(tx, job, now)
+	if err != nil {
 		return err
-	}
-	if unsatisfied > 0 {
-		return ErrConflict
 	}
 	item := persistence.DailyPlanItem{ID: persistence.NewID("dpi"), UserID: job.UserID, PlanID: plan.ID, PlanRevision: plan.CurrentRevision, Kind: "input", Title: "阅读与当前阻碍直接相关的资料", Commitment: "限定范围阅读并记录三条与当前阻碍直接相关的信息", MinimumAction: "打开一份相关资料并定位摘要", AllowedTypes: "result,step,time,minimum_action", TargetMinutes: 25, Status: "planned", Position: 1, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	if err := tx.Create(&item).Error; err != nil {

@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "rootDir": "..",
+    "composite": true,
+    "skipLibCheck": true,
+    "allowJs": false,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true
+  },
+  "include": [
+    "../sidecar/src/**/*.ts",
+    "src/harness/sidecar-driver.ts",
+    "src/harness/shim.ts",
+    "src/harness/tools.ts",
+    "src/harness/tool-identity.ts",
+    "src/harness/tool-request.ts",
+    "src/harness/runtime.ts",
+    "src/harness/libfx.d.ts"
+  ]
+}

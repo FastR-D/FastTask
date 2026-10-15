@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/FastR-D/FastTask/internal/agent"
 )
@@ -17,6 +18,9 @@ const (
 	// ToolReadonly executes directly; its result re-enters the model context. It
 	// runs OUTSIDE any database transaction (§5.2) and is always user-scoped.
 	ToolReadonly ToolLevel = "readonly"
+	// ToolWrite performs a fixed external mutation already authorized by the
+	// user, with target-system identity and operation-specific safety checks.
+	ToolWrite ToolLevel = "write"
 	// ToolProposal produces a Proposal for user approval and never touches
 	// business tables (§5.2). Landing in phase D.
 	ToolProposal ToolLevel = "proposal"
@@ -66,6 +70,14 @@ type Tool interface {
 	Definition() agent.ToolDefinition
 	Level() ToolLevel
 	Execute(ctx context.Context, tc ToolContext, args map[string]any) (ToolResult, error)
+}
+
+// ToolExecutionBudget optionally declares the bounded time needed by an
+// existing upstream protocol. Hosts may cap it; explicit loop-limit overrides
+// and parent-context cancellation remain authoritative. Ordinary tools do not
+// implement this interface and retain the default execution timeout.
+type ToolExecutionBudget interface {
+	ExecutionBudget() time.Duration
 }
 
 // identityArgNames are argument keys that must never appear in a tool schema or

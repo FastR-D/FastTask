@@ -3,6 +3,8 @@ import { ensureFreshAccessToken, request } from '../api'
 import { absoluteAssetURL, cachedMode, selectMode, WASM_ASSET_PATH, type HarnessMode } from './backend'
 import { createGatewayFetch } from './shim'
 import { buildHostTools, type ToolCallResult, type ToolDef } from './tools'
+import { ToolCallBindings } from './tool-identity'
+import { retryToolNetworkRequest } from './tool-request'
 
 // The browser harness host (doc/harness.md §3, §5, §6, §7, §10).
 //
@@ -134,18 +136,21 @@ export async function driveRun(options: DriveRunOptions): Promise<void> {
     void beat(run).catch(() => undefined)
     run.heartbeat = setInterval(() => { void beat(run).catch(() => undefined) }, interval)
 
+    const bindings = new ToolCallBindings()
     run.agent = await createFxAgent({
       apiKey: grant.harness_token,
       model: grant.model,
       wasm: absoluteAssetURL(WASM_ASSET_PATH),
       fetch: createGatewayFetch({
+        bindings,
         runId: options.runId,
         harnessToken: () => run.token,
         model: grant.model,
         onEvent: diagnostics,
       }),
       instructions: grant.instructions,
-      tools: buildHostTools(manifest.tools, (name, input, signal) => callTool(run, name, input, signal), {
+      tools: buildHostTools(manifest.tools, (name, input, signal, toolCallId) => callTool(run, name, input, signal, toolCallId), {
+        bindings,
         onWarn: message => diagnostics({ type: 'harness.warning', message }),
       }),
       ...(checkpoint ? { checkpoint } : {}),
@@ -331,13 +336,13 @@ async function beat(run: ActiveRun): Promise<void> {
 
 /** callTool executes one tool through the server's surface, waiting out an approval inline so the same
  *  turn continues (§5, §7). */
-async function callTool(run: ActiveRun, name: string, input: unknown, signal: AbortSignal): Promise<ToolCallResult> {
+async function callTool(run: ActiveRun, name: string, input: unknown, signal: AbortSignal, toolCallId: string): Promise<ToolCallResult> {
   let outcome
   try {
-    outcome = await hostFetch(run, 'POST', `/agent/runs/${encodeURIComponent(run.runId)}/tools/${encodeURIComponent(name)}`, {
-      // libfx does not hand a tool its call id (§4.4.1), so the server correlates by name.
-      input: input ?? {},
-    })
+    outcome = await retryToolNetworkRequest(() => hostFetch(run, 'POST', `/agent/runs/${encodeURIComponent(run.runId)}/tools/${encodeURIComponent(name)}`, {
+      tool_call_id: toolCallId,
+      input,
+    }), signal)
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) }
   }

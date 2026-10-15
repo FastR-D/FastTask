@@ -274,6 +274,16 @@ func (w *Worker) finish(ctx context.Context, claimed persistence.AgentJob, rawTo
 			updates["status"], updates["error_code"], updates["error_message"] = "cancelled", "CANCELLED", "cancelled by user"
 			return tx.Model(&persistence.AgentJob{}).Where("id = ? AND status = 'running' AND lease_version = ? AND run_token_hash = ?", current.ID, current.LeaseVersion, persistence.Hash(rawToken)).Updates(updates).Error
 		}
+		if current.Type == "support_generation" {
+			if _, err := validateSupportJobTx(tx, current, now); err != nil {
+				code, terminal := supportJobFailureCode(err)
+				if !terminal {
+					return err
+				}
+				updates["status"], updates["error_code"], updates["error_message"] = "failed", code, err.Error()
+				return tx.Model(&persistence.AgentJob{}).Where("id = ? AND status = 'running' AND lease_version = ? AND run_token_hash = ?", current.ID, current.LeaseVersion, persistence.Hash(rawToken)).Updates(updates).Error
+			}
+		}
 		if runErr != nil {
 			if errors.Is(runErr, ErrRevision) {
 				updates["status"], updates["error_code"], updates["error_message"] = "failed", "REVISION_MISMATCH", runErr.Error()

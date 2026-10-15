@@ -210,7 +210,7 @@ func (s *harnessProxy) rewriteRequest(ctx context.Context, body []byte, creds *M
 	//    expanded here rather than in the host, so every one of them passes an ownership check
 	//    (doc/chat-features.md §4.4).
 	payload["messages"] = s.sanitizeMessages(ctx, run.UserID, payload["messages"], instructions)
-	payload["tools"] = agent.WireTools(s.svc.tools.Definitions(ToolReadonly, ToolProposal))
+	payload["tools"] = agent.WireTools(s.svc.tools.Definitions(ToolReadonly, ToolProposal, ToolWrite))
 	payload["tool_choice"] = "auto"
 
 	// 3. The reasoning level is the host's choice but must stay inside the enum
@@ -355,6 +355,7 @@ type proxyReader struct {
 	parser     *agent.StreamParser
 	lastCheck  time.Time
 	closed     bool
+	readEOF    bool
 }
 
 func (r *proxyReader) Read(p []byte) (int, error) {
@@ -371,6 +372,11 @@ func (r *proxyReader) Read(p []byte) (int, error) {
 	}
 	if err != nil {
 		if errors.Is(err, io.EOF) {
+			r.readEOF = true
+			if closeErr := r.parser.Close(r.transcript.ctx); closeErr != nil {
+				r.transcript.fail(closeErr)
+				return n, closeErr
+			}
 			r.transcript.finish(r.parser)
 		} else {
 			r.transcript.fail(err)
@@ -383,7 +389,11 @@ func (r *proxyReader) Read(p []byte) (int, error) {
 func (r *proxyReader) Close() error {
 	if !r.closed {
 		r.closed = true
-		r.transcript.finish(r.parser)
+		if r.readEOF {
+			r.transcript.finish(r.parser)
+		} else {
+			r.transcript.fail(errors.New("model stream closed before EOF"))
+		}
 	}
 	return r.upstream.Close()
 }
@@ -516,13 +526,19 @@ func (t *harnessTranscript) ToolCallDelta(ctx context.Context, delta agent.ToolC
 		t.callOrder = append(t.callOrder, delta.Index)
 	}
 	if delta.ID != "" {
+		if slot.id != "" && slot.id != delta.ID {
+			return fmt.Errorf("%w: call identity changed mid-stream", ErrToolCallIDCollision)
+		}
 		slot.id = delta.ID
 	}
 	if delta.Name != "" {
+		if slot.name != "" && slot.name != delta.Name {
+			return fmt.Errorf("%w: tool name changed mid-stream", ErrToolCallIDCollision)
+		}
 		slot.name = delta.Name
 	}
 	slot.args.WriteString(delta.Arguments)
-	if slot.partID == "" && slot.name != "" {
+	if slot.partID == "" && slot.name != "" && slot.id != "" {
 		part, idx, err := t.createPart("tool-call", slot.id, slot.name, "{}")
 		if err != nil {
 			return err
@@ -546,20 +562,15 @@ func (t *harnessTranscript) Finish(_ context.Context, reason string) error {
 // the part for the client (§2.6). Index allocation goes through the database so the tool execution
 // surface cannot take the same one.
 //
-// A tool-call part is keyed by its call id, and the same id can arrive twice: a host may execute a
-// call before the proxy finished reading the stream, so the tool surface can have created the row
-// first (§4.4.1). Reusing it is what keeps (run_id, tool_call_id) unique.
+// Only the model proxy creates tool-call parts. Reusing an id in another slot,
+// response or concurrent stream is an identity collision, never permission to
+// rewrite a previously registered call.
 func (t *harnessTranscript) createPart(kind, id, name, argsJSON string) (*persistence.AgentMessagePart, int, error) {
 	if kind == "tool-call" && id != "" {
-		if existing, err := t.svc.repo().GetPartByToolCallID(t.ctx, t.run.UserID, id); err == nil {
-			if existing.MessageID != t.sess.assistantID {
-				// The call id is unique per user, so a hit on another message means the model reused an id
-				// from an earlier run. Adopting that row would write this run's result onto another run's
-				// transcript, and the global unique index forbids a second row: fail loudly instead.
-				return nil, 0, fmt.Errorf("%w: %s", ErrToolCallIDCollision, id)
-			}
-			t.mirrorPart(existing)
-			return existing, existing.Idx, nil
+		if _, err := t.svc.repo().GetPartByToolCallID(t.ctx, t.run.UserID, id); err == nil {
+			return nil, 0, fmt.Errorf("%w: %s", ErrToolCallIDCollision, id)
+		} else if !persistence.IsNotFound(err) {
+			return nil, 0, err
 		}
 	}
 	if kind == "reasoning" && id != "" {
@@ -583,6 +594,7 @@ func (t *harnessTranscript) createPart(kind, id, name, argsJSON string) (*persis
 		part.ToolCallID = &callID
 		part.ToolName = name
 		part.ArgsJSON = argsJSON
+		part.ToolModelTurn = t.run.ModelCalls + 1
 	case "reasoning":
 		part.ID = id
 	}
@@ -595,17 +607,7 @@ func (t *harnessTranscript) createPart(kind, id, name, argsJSON string) (*persis
 		part.Idx = idx
 		if err := repo.CreatePartAtIdx(t.ctx, part); err != nil {
 			if persistence.IsUniqueViolation(err) && part.ToolCallID != nil {
-				// The tool surface won the race for THIS run's part; adopt its row rather than
-				// duplicating the call. A row belonging to another run is a collision, not a race.
-				found, lookupErr := repo.GetPartByToolCallID(t.ctx, t.run.UserID, *part.ToolCallID)
-				if lookupErr != nil {
-					return lookupErr
-				}
-				if found.MessageID != t.sess.assistantID {
-					return fmt.Errorf("%w: %s", ErrToolCallIDCollision, *part.ToolCallID)
-				}
-				*part = *found
-				return nil
+				return fmt.Errorf("%w: %s", ErrToolCallIDCollision, *part.ToolCallID)
 			}
 			return err
 		}
@@ -664,16 +666,30 @@ func (t *harnessTranscript) finish(parser *agent.StreamParser) {
 			_ = t.sess.emitSet(protocol.PartPath(t.sess.assistantIdx, slot.idx), updated)
 		}
 	}
-	if parser != nil {
-		if reason := parser.Result().FinishReason; reason != "" {
-			t.finishRS = reason
-		}
-	}
+	// finishRS comes only from an actual provider Finish event. Result() also
+	// infers "stop" for an incomplete stream and cannot prove readiness.
 	_ = t.sess.saveState()
 	// One proxied call is one turn of the budget (§6). Counting it here rather than at entry
 	// means a call that never produced a stream does not consume the budget.
 	if _, err := t.svc.repo().CountModelCall(ctx, t.run.UserID, t.run.ID); err == nil {
 		t.run.ModelCalls++
+		// Partial/broken responses are retained as history, never executable.
+		if !t.failed && (t.finishRS == "tool_calls" || t.finishRS == "stop") {
+			for _, index := range t.callOrder {
+				slot := t.calls[index]
+				if slot == nil || slot.partID == "" {
+					continue
+				}
+				args := slot.args.String()
+				if strings.TrimSpace(args) == "" {
+					args = "{}"
+				}
+				if !json.Valid([]byte(args)) {
+					continue
+				}
+				_ = t.svc.repo().FinalizeToolCall(ctx, t.run.UserID, slot.partID, t.run.ModelCalls, args)
+			}
+		}
 	}
 }
 

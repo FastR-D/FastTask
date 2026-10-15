@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/FastR-D/FastTask/internal/agent/protocol"
 	"github.com/FastR-D/FastTask/internal/persistence"
@@ -27,9 +28,12 @@ var (
 // >15 methods) as a cohesive unit and embedded back, so AgentService.ResolveApproval
 // resolves by promotion and SubmitCommands routes add-tool-result receipts to it unchanged.
 type approvalService struct {
-	app   *App
-	repo  *persistence.AgentRepository
-	store *persistence.Store
+	// Receipt requests can arrive twice (two tabs or a retry). Serialize their
+	// read/apply/record sequence so a duplicate never overwrites the first result.
+	receipts sync.Mutex
+	app      *App
+	repo     *persistence.AgentRepository
+	store    *persistence.Store
 	// svc reaches the harness units a resolved proposal has to notify: under a host the same
 	// turn continues instead of a new job being queued (doc/harness.md §7).
 	svc *AgentService
@@ -63,6 +67,8 @@ func firstToolResult(commands []Command) (Command, bool) {
 // Ordering (§7.3): auth (done by the caller) → apply/reject → record tool result
 // → wake Worker. On apply failure the run is NOT resumed and the error is returned.
 func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cmd Command) (SubmitResult, error) {
+	s.receipts.Lock()
+	defer s.receipts.Unlock()
 	toolCallID := strings.TrimSpace(cmd.ToolCallID)
 	if toolCallID == "" {
 		return SubmitResult{}, ErrEmptyCommand
@@ -90,7 +96,8 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	if run.Status != persistence.RunAwaitingApproval {
+	detached := run.HarnessMode != "" && run.Status == persistence.RunInterrupted && !run.CancelRequested
+	if run.CancelRequested || (run.Status != persistence.RunAwaitingApproval && !detached) {
 		return SubmitResult{}, ErrApprovalNotAwaiting
 	}
 
@@ -101,6 +108,12 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 	decision.Decision = strings.ToLower(strings.TrimSpace(decision.Decision))
 	if decision.Decision != "approve" && decision.Decision != "reject" {
 		return SubmitResult{}, fmt.Errorf("%w: decision must be approve or reject", ErrEmptyCommand)
+	}
+	if cmd.DetachHarness && run.HarnessMode == HarnessModeWASM && run.Status == persistence.RunAwaitingApproval {
+		run, err = s.detachPendingBrowserApproval(ctx, userID, run.ID, part.ID)
+		if err != nil {
+			return SubmitResult{}, err
+		}
 	}
 
 	// The client has already rendered chunks [0, CheckpointSeq); the continuation
@@ -125,17 +138,47 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 		// ApplyProposal (structural, base-revision guarded); the daily plan applies
 		// via ApplyDailyPlanProposal (deterministic top-3 selection, §6).
 		var resultJSON []byte
-		if part.ToolName == "propose_daily_plan" {
+		switch part.ToolName {
+		case "propose_goal_with_tasks":
+			if proposal.Kind != "goal_with_tasks" {
+				return SubmitResult{}, ErrValidation
+			}
+			goal, count, applyErr := s.app.ApplyGoalWithTasks(ctx, userID, &proposal, run.ThreadID)
+			if applyErr != nil {
+				s.markProposalConflict(ctx, proposal.ID)
+				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
+				s.releaseHarnessRun(ctx, userID, run, part.ID)
+				return SubmitResult{}, applyErr
+			}
+			resultJSON, _ = json.Marshal(map[string]any{"decision": "approve", "applied": true, "kind": "goal_with_tasks", "goal_id": goal.ID, "created_tasks": count, "proposal_id": proposal.ID})
+		case "propose_goal_update":
+			if proposal.Kind != "goal_update" {
+				return SubmitResult{}, ErrValidation
+			}
+			goal, applyErr := s.app.ApplyGoalUpdateProposal(ctx, userID, &proposal)
+			if applyErr != nil {
+				s.markProposalConflict(ctx, proposal.ID)
+				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
+				s.releaseHarnessRun(ctx, userID, run, part.ID)
+				return SubmitResult{}, applyErr
+			}
+			resultJSON, _ = json.Marshal(map[string]any{"decision": "approve", "applied": true, "kind": "goal_update", "goal_id": goal.ID, "revision": goal.Revision, "proposal_id": proposal.ID})
+		case "propose_daily_plan":
+			if proposal.Kind != "daily_plan" && proposal.Kind != "task_tree_patch" {
+				return SubmitResult{}, ErrValidation
+			}
 			var payload dailyPlanPayload
 			if err := json.Unmarshal([]byte(proposal.PatchJSON), &payload); err != nil {
 				s.markProposalConflict(ctx, proposal.ID)
 				s.recordConflict(ctx, userID, part.ID, "the daily plan proposal could not be read")
+				s.releaseHarnessRun(ctx, userID, run, part.ID)
 				return SubmitResult{}, fmt.Errorf("%w: malformed daily plan proposal", ErrValidation)
 			}
 			plan, items, applyErr := s.app.ApplyDailyPlanProposal(ctx, userID, &proposal, payload)
 			if applyErr != nil {
 				s.markProposalConflict(ctx, proposal.ID)
 				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
+				s.releaseHarnessRun(ctx, userID, run, part.ID)
 				if errors.Is(applyErr, ErrRevision) {
 					return SubmitResult{}, ErrRevision
 				}
@@ -146,23 +189,29 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 				"plan_id": plan.ID, "revision": plan.CurrentRevision,
 				"item_count": len(items), "proposal_id": proposal.ID,
 			})
-		} else {
+		case "propose_task_tree_patch":
+			if proposal.Kind != "task_tree_patch" {
+				return SubmitResult{}, ErrValidation
+			}
 			var patches []map[string]any
 			if err := json.Unmarshal([]byte(proposal.PatchJSON), &patches); err != nil {
-				return SubmitResult{}, err
+				s.markProposalConflict(ctx, proposal.ID)
+				s.recordConflict(ctx, userID, part.ID, "the task tree proposal could not be read; read the current tree and submit a corrected proposal")
+				s.releaseHarnessRun(ctx, userID, run, part.ID)
+				return SubmitResult{}, fmt.Errorf("%w: malformed task tree proposal", ErrValidation)
 			}
 			// ApplyProposal re-validates ownership, base revision, parent/child and
 			// cycles inside its transaction (invariant 4). A moved base revision yields
 			// ErrRevision → 412, and the proposal is marked conflict, never overwritten.
 			newRevision, applyErr := s.app.ApplyProposal(ctx, userID, &proposal, patches, proposal.BaseRevision)
 			if applyErr != nil {
+				s.markProposalConflict(ctx, proposal.ID)
 				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
 				// A host is waiting on this decision, so the run has to go back to running even
 				// though the apply failed: the model gets the conflict as its tool result and can
 				// re-propose in the same turn (doc/harness.md §7). The user still sees 412.
-				s.releaseHarnessRun(ctx, userID, run)
+				s.releaseHarnessRun(ctx, userID, run, part.ID)
 				if errors.Is(applyErr, ErrRevision) {
-					s.markProposalConflict(ctx, proposal.ID)
 					return SubmitResult{}, ErrRevision
 				}
 				return SubmitResult{}, applyErr
@@ -171,7 +220,27 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 				"decision": "approve", "applied": true, "kind": "task_tree_patch",
 				"tree_revision": newRevision, "proposal_id": proposal.ID,
 			})
+		default:
+			return SubmitResult{}, fmt.Errorf("%w: unsupported proposal tool", ErrValidation)
 		}
+		// Applying a tree is distinct from arranging today. Project the actual
+		// current plan after commit; preserve old receipt fields for compatibility.
+		var receipt map[string]any
+		if err := json.Unmarshal(resultJSON, &receipt); err != nil {
+			return SubmitResult{}, err
+		}
+		goalID := proposal.GoalID
+		if createdGoal, ok := receipt["goal_id"].(string); ok {
+			goalID = createdGoal
+		}
+		receipt["today_summary"] = s.app.approvalTodaySummary(ctx, userID, goalID)
+		if part.ToolName == "propose_task_tree_patch" {
+			var treeRevision int
+			if err := s.store.DB.WithContext(ctx).Model(&persistence.TaskTreeRevision{}).Where("goal_id = ? AND user_id = ?", goalID, userID).Select("COALESCE(MAX(revision),0)").Scan(&treeRevision).Error; err == nil {
+				receipt["tree_revision"] = treeRevision
+			}
+		}
+		resultJSON, _ = json.Marshal(receipt)
 		if err := s.recordApproval(ctx, userID, part.ID, protocol.ApprovalApproved, string(resultJSON)); err != nil {
 			return SubmitResult{}, err
 		}
@@ -181,8 +250,15 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 		if part.ProposalID != nil {
 			var proposal persistence.Proposal
 			err := s.store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", *part.ProposalID, userID).First(&proposal).Error
-			if err == nil {
-				_, _ = s.app.RejectProposal(ctx, userID, proposal.GoalID, proposal.ID, proposal.Revision)
+			if err != nil {
+				return SubmitResult{}, err
+			}
+			result := s.store.DB.WithContext(ctx).Model(&proposal).Where("user_id = ? AND status = 'pending' AND revision = ?", userID, proposal.Revision).Updates(map[string]any{"status": "rejected", "revision": proposal.Revision + 1, "updated_at": persistence.Now()})
+			if result.Error != nil {
+				return SubmitResult{}, result.Error
+			}
+			if result.RowsAffected != 1 {
+				return SubmitResult{}, ErrApprovalDuplicate
 			}
 		}
 		resultJSON, _ := json.Marshal(map[string]any{
@@ -193,6 +269,16 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 		}
 	}
 
+	if current, err := s.repo.GetRun(ctx, userID, run.ID); err != nil {
+		return SubmitResult{}, err
+	} else if IsTerminalRunStatus(current.Status) {
+		// A staged proposal survives loss of its browser. Resolve the user's
+		// explicit decision without reviving that host or automatically running a model.
+		if err := s.refreshDetachedApproval(ctx, userID, current, part.ID); err != nil {
+			return SubmitResult{}, err
+		}
+		return SubmitResult{ThreadID: run.ThreadID, RunID: run.ID, FromSeq: fromSeq, NoStream: true}, nil
+	}
 	if run.HarnessMode != "" {
 		// A host is waiting on the long poll, so the SAME turn continues: no new job, no new
 		// run, and no second stream (doc/harness.md §7). This replaces the requeue below and
@@ -212,19 +298,26 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 // recovery half of an approval that could not be applied: the decision happened, so the run must
 // not stay parked, and the model learns the outcome from the recorded conflict
 // (doc/harness.md §7).
-func (s *approvalService) releaseHarnessRun(ctx context.Context, userID string, run *persistence.AgentRun) {
-	if run.HarnessMode == "" || run.Status != persistence.RunAwaitingApproval {
+func (s *approvalService) releaseHarnessRun(ctx context.Context, userID string, run *persistence.AgentRun, partID string) {
+	if run.HarnessMode == "" {
 		return
 	}
-	_ = s.repo.SetRunStatus(ctx, userID, run.ID, persistence.RunRunning, "", "")
+	_ = s.continueHarnessRun(ctx, userID, run, partID)
 }
 
 // continueHarnessRun puts a parked run back to running and pushes the resolved part to the
 // stream that is still open (§7). The host learns the decision from its long poll; the user
 // sees it here.
 func (s *approvalService) continueHarnessRun(ctx context.Context, userID string, run *persistence.AgentRun, partID string) error {
-	if err := s.repo.SetRunStatus(ctx, userID, run.ID, persistence.RunRunning, "", ""); err != nil {
+	status, err := s.setApprovalRunStatus(ctx, userID, run.ID)
+	if err != nil {
 		return err
+	}
+	if IsTerminalRunStatus(status) {
+		return s.refreshDetachedApproval(ctx, userID, run, partID)
+	}
+	if status == persistence.RunCancelling {
+		return nil
 	}
 	sess, err := s.svc.harnessService.harnessLifecycle.loadRunSession(ctx, run)
 	if err != nil {
@@ -234,6 +327,9 @@ func (s *approvalService) continueHarnessRun(ctx context.Context, userID string,
 		return nil
 	}
 	running := protocol.RunningStatus()
+	if status == persistence.RunAwaitingApproval {
+		running = protocol.RequiresActionStatus()
+	}
 	sess.state.Messages[sess.assistantIdx].Status = running
 	_ = sess.emitSet(protocol.MessageStatusPath(sess.assistantIdx), running)
 	if part, err := s.repo.GetPart(ctx, userID, partID); err == nil {
@@ -245,17 +341,20 @@ func (s *approvalService) continueHarnessRun(ctx context.Context, userID string,
 	}
 	// The resolved proposal drops off the pending list (§2.7).
 	sess.state.FastTask.PendingProposals = s.svc.pendingProposals(ctx, userID, run.ThreadID)
+	if thread, err := s.repo.GetThread(ctx, userID, run.ThreadID); err == nil && thread.GoalID != nil {
+		sess.state.FastTask.ActiveGoalID = *thread.GoalID
+	}
 	_ = sess.emitSet(protocol.FastTaskPath(), sess.state.FastTask)
 	return sess.saveState()
 }
 
 // recordConflict writes a failed apply onto the part as a structured error, so a host waiting
-// on the long poll learns the tree moved instead of waiting for a decision that will never
+// on the long poll learns the proposal basis moved instead of waiting for a decision that will never
 // come (§7.4). For a server-driven run it is a no-op: nothing is waiting.
 func (s *approvalService) recordConflict(ctx context.Context, userID, partID, reason string) {
 	payload, _ := json.Marshal(map[string]any{
 		"decision": "conflict", "applied": false,
-		"error":  "the task tree changed before this approval; the proposal was marked conflict",
+		"error":  "the approved change could not be applied; the proposal was marked conflict. Read the detail and current state, then propose a corrected change without claiming success",
 		"detail": reason,
 	})
 	_ = s.repo.UpdatePartResult(ctx, userID, partID, string(payload), true)

@@ -105,7 +105,7 @@ func (s *harnessLifecycle) saveCheckpoint(ctx context.Context, p HarnessPrincipa
 	if version == "" {
 		version = LibfxVersion
 	}
-	return s.repo().SaveThreadCheckpoint(ctx, p.UserID, p.ThreadID, in.Checkpoint, version)
+	return s.repo().SaveThreadCheckpoint(ctx, p.UserID, p.ThreadID, in.Checkpoint, version, p.RunID)
 }
 
 // ThreadCheckpoint is the read half of §6.1: what a host restores a thread from.
@@ -143,7 +143,7 @@ func (s *harnessLifecycle) PutThreadCheckpoint(ctx context.Context, p HarnessPri
 	if version == "" {
 		version = LibfxVersion
 	}
-	return s.repo().SaveThreadCheckpoint(ctx, p.UserID, p.ThreadID, checkpoint, version)
+	return s.repo().SaveThreadCheckpoint(ctx, p.UserID, p.ThreadID, checkpoint, version, p.RunID)
 }
 
 // --- run teardown ---

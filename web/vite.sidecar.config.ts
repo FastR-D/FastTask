@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config'
+import { defineConfig } from 'vite'
 
 // The sidecar build (doc/harness.md §8.2).
 //

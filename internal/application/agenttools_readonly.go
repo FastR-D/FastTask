@@ -48,9 +48,10 @@ func NewReadonlyTools(app *App) []Tool {
 
 		funcTool{def: agent.ToolDefinition{
 			Name:        "get_task_tree",
-			Description: "Get the full task tree and current tree revision for one goal. Use the revision as the base for any task-tree proposal.",
+			Description: "Get the task tree and current tree revision for one goal. Use the revision as the base for any task-tree proposal. To find an existing task the user explicitly wants to recover, pass include_deleted=true and inspect deleted_at/deletion_id. Restoring a selected task also restores its descendants from that same deletion batch; explain that scope before approval and do not recover unrelated deleted subtrees.",
 			Parameters: objectSchema(map[string]any{
-				"goal_id": stringProp("The goal whose task tree to read."),
+				"goal_id":         stringProp("The goal whose task tree to read."),
+				"include_deleted": map[string]any{"type": "boolean", "description": "Include recoverable deleted tasks with their original IDs, hierarchy and deletion state; defaults to false."},
 			}, "goal_id"),
 		}, fn: app.toolGetTaskTree},
 
@@ -106,7 +107,7 @@ func NewReadonlyTools(app *App) []Tool {
 func (a *App) toolListGoals(ctx context.Context, tc ToolContext, args map[string]any) (ToolResult, error) {
 	db := a.Store.DB.WithContext(ctx)
 	status := stringArg(args, "status")
-	q := db.Model(&persistence.Goal{}).Where("user_id = ?", tc.UserID)
+	q := db.Model(&persistence.Goal{}).Where("user_id = ? AND deleted_at IS NULL", tc.UserID)
 	if status != "" {
 		q = q.Where("status = ?", status)
 	} else {
@@ -124,7 +125,11 @@ func (a *App) toolListGoals(ctx context.Context, tc ToolContext, args map[string
 			"success_criteria": goal.SuccessCriteria, "target_date": goal.TargetDate, "revision": goal.Revision,
 		})
 	}
-	return ToolResult{Result: map[string]any{"count": len(items), "goals": items}}, nil
+	settings, err := a.GetPlanningSettings(ctx, tc.UserID)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	return ToolResult{Result: map[string]any{"count": len(items), "goals": items, "primary_goal_id": settings.PrimaryGoalID}}, nil
 }
 
 func (a *App) toolGetTaskTree(ctx context.Context, tc ToolContext, args map[string]any) (ToolResult, error) {
@@ -134,29 +139,41 @@ func (a *App) toolGetTaskTree(ctx context.Context, tc ToolContext, args map[stri
 	}
 	db := a.Store.DB.WithContext(ctx)
 	var goal persistence.Goal
-	if err := db.Where("id = ? AND user_id = ?", goalID, tc.UserID).First(&goal).Error; err != nil {
+	if err := db.Where("id = ? AND user_id = ? AND deleted_at IS NULL", goalID, tc.UserID).First(&goal).Error; err != nil {
 		if persistence.IsNotFound(err) {
 			return toolError("goal %s not found or not accessible", goalID), nil
 		}
 		return ToolResult{}, err
 	}
 	var tasks []persistence.Task
-	if err := db.Where("goal_id = ? AND user_id = ?", goalID, tc.UserID).Order("position, id").Find(&tasks).Error; err != nil {
+	includeDeleted, _ := args["include_deleted"].(bool)
+	query := db.Where("goal_id = ? AND user_id = ?", goalID, tc.UserID)
+	if !includeDeleted {
+		query = query.Where("deleted_at IS NULL")
+	}
+	if err := query.Order("position, id").Find(&tasks).Error; err != nil {
 		return ToolResult{}, err
 	}
 	var revision int
-	db.Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", goalID).Select("COALESCE(MAX(revision),0)").Scan(&revision)
+	if err := db.Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", goalID).Select("COALESCE(MAX(revision),0)").Scan(&revision).Error; err != nil {
+		return ToolResult{}, err
+	}
 	nodes := make([]map[string]any, 0, len(tasks))
+	deletedCount := 0
 	for _, task := range tasks {
+		if task.DeletedAt != nil {
+			deletedCount++
+		}
 		nodes = append(nodes, map[string]any{
 			"id": task.ID, "parent_id": task.ParentID, "type": task.Type, "title": task.Title,
-			"status": task.Status, "success_criteria": task.SuccessCriteria, "minimum_action": task.MinimumAction,
+			"status": task.Status, "description": task.Description, "success_criteria": task.SuccessCriteria, "minimum_action": task.MinimumAction,
+			"depends_on": task.DependsOn, "blocked_reason": task.BlockedReason, "deleted_at": task.DeletedAt, "deletion_id": task.DeletionID,
 			"priority": task.Priority, "estimate_minutes": task.EstimateMinutes, "position": task.Position, "revision": task.Revision,
 		})
 	}
 	return ToolResult{Result: map[string]any{
 		"goal_id": goal.ID, "goal_title": goal.Title, "goal_status": goal.Status,
-		"tree_revision": revision, "task_count": len(nodes),
+		"tree_revision": revision, "task_count": len(nodes), "deleted_task_count": deletedCount, "include_deleted": includeDeleted,
 		"tasks": nodes, "tree": BuildTree(tasks),
 	}}, nil
 }
@@ -190,7 +207,7 @@ func (a *App) toolGetDailyPlan(ctx context.Context, tc ToolContext, args map[str
 	projected := make([]map[string]any, 0, len(items))
 	coreCount := 0
 	for _, item := range items {
-		if item.Kind == "core" {
+		if item.Kind == "core" && item.Status != "skipped" && item.Status != "not_completed" {
 			coreCount++
 		}
 		projected = append(projected, map[string]any{
@@ -199,9 +216,13 @@ func (a *App) toolGetDailyPlan(ctx context.Context, tc ToolContext, args map[str
 			"completion_type": item.CompletionType, "target_minutes": item.TargetMinutes, "position": item.Position,
 		})
 	}
+	availability, err := a.GetPlanningAvailability(ctx, tc.UserID, plan.ID)
+	if err != nil {
+		return ToolResult{}, err
+	}
 	return ToolResult{Result: map[string]any{
 		"local_date": localDate, "timezone": zone, "plan_status": plan.Status,
-		"plan_revision": plan.CurrentRevision, "core_count": coreCount, "items": projected,
+		"plan_revision": plan.CurrentRevision, "core_count": coreCount, "items": projected, "availability": availability,
 	}}, nil
 }
 
@@ -259,7 +280,8 @@ func (a *App) toolListStalledTasks(ctx context.Context, tc ToolContext, args map
 	if err != nil {
 		return ToolResult{}, err
 	}
-	q := db.Model(&persistence.Task{}).Where("user_id = ?", tc.UserID)
+	q := db.Model(&persistence.Task{}).Where("user_id = ? AND deleted_at IS NULL", tc.UserID).
+		Where("EXISTS (SELECT 1 FROM goals WHERE goals.id = tasks.goal_id AND goals.user_id = tasks.user_id AND goals.deleted_at IS NULL)")
 	if goalID := stringArg(args, "goal_id"); goalID != "" {
 		q = q.Where("goal_id = ?", goalID)
 	}
@@ -312,6 +334,7 @@ func (a *App) toolGetTaskCoords(ctx context.Context, tc ToolContext, args map[st
 	}
 	db := a.Store.DB.WithContext(ctx)
 	q := db.Model(&persistence.TaskCoord{}).Where("user_id = ? AND lens = ?", tc.UserID, lens)
+	q = q.Where("EXISTS (SELECT 1 FROM tasks JOIN goals ON goals.id = tasks.goal_id WHERE tasks.id = task_coords.task_id AND tasks.user_id = task_coords.user_id AND tasks.deleted_at IS NULL AND goals.deleted_at IS NULL)")
 	if taskID := stringArg(args, "task_id"); taskID != "" {
 		q = q.Where("task_id = ?", taskID)
 	}

@@ -110,5 +110,6 @@ func BuiltinRouteRegistrars(d RouteDeps, agent *application.AgentService) []Rout
 		lensRoutes{d}, planRoutes{d}, sessionRoutes{d}, conversationRoutes{d},
 		jobRoutes{d}, deviceRoutes{d}, panelRoutes{d}, importRoutes{d},
 		integrationStatusRoutes{d}, adminRoutes{d}, notificationRoutes{d},
+		integrationContentRoutes{d},
 	}, NewHarnessRoutes(d, agent))
 }

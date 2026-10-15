@@ -1,450 +1,208 @@
-# FastTask / 3Signals
+# FastTask
 
-FastTask 是一个面向研究生和科研人员的长期目标推进系统。它把抽象目标持续拆成可执行任务树，并从活跃任务中为每天选择最多三个核心推进项，提供最小行动、专注计时、进度证据、对话式修正、墨水屏视图和 FastResearch Panel 摘要。
+FastTask 是面向科研工作的长期目标与每日推进工作台。把目标拆成有具体产出的小步骤，通常每天安排三项，超出的顺延；通过对话调整任务，并用实际成果和专注记录保留推进过程。
 
-本仓库包含可直接运行的 Go 服务、React 管理界面、SQLite Migration、持久化 Agent Worker、调度维护任务、测试和部署样例。
+服务由 Go、React 和 SQLite 组成，提供网页/PWA、HTTP API，以及墨水屏和 FastRD Panel 的今日任务视图。
 
-## 核心能力
+## 能做什么
 
-- 长期目标的创建、状态管理和 Revision 保护。
-- 里程碑、任务、行动组成的多层任务树。
-- 手工任务管理和 LLM 结构化任务树提案。
-- 每日 `0..3` 个核心推进项，候选不足时不填充占位任务。
-- `result`、`step`、`time`、`minimum_action` 四类当日推进证据。
-- 当日计划项完成与底层任务完成严格分离。
-- 番茄和自由专注 Session，时长由服务端计算。
-- 流式对话 Agent（assistant-transport SSE）、只读工具循环、任务树/计划提案与用户审批、断线续流；浏览器录音和异步转写作业。
-- 持久化 Agent Job、Attempt、Lease、Fencing Token、重试和取消。
-- 墨水屏独立只读 Token、ETag 和 `304 Not Modified`。
-- FastResearch Panel 只读摘要接口。
-- 任务坐标透镜、周复盘与可选的目标地图。
-- FastInsight、FastNews、FastRead、FastWrite 通用外部导入收件箱，支持来源去重、用户审批和任务转换。
-- 通知系统：Telegram 机器人、Bark、FCM 和 APNs 四个通道，持久投递队列、退避重试、地址失效退役和投递日志。
-- 统一后台管理平台：管理员用户、活跃会话、OpenAI-compatible 模型 Provider、通知通道与接收端，以及后续管理模块入口。
-- 可选 FastRead/FastWrite 健康探测，不影响 FastTask Readiness。
-- Gin + Huma v2，自动生成 OpenAPI 和 API 文档。
-- SQLite WAL、版本化 SQL Migration、一致性备份和恢复验证。
-- 响应式桌面/移动 Web 管理界面，可安装 PWA（离线只读今日计划与任务树快照）。
+- **管理目标与任务树**：创建目标、里程碑和行动，编辑、移动、暂停、完成、重新打开；删除进入回收站，恢复时保留原有历史。
+- **安排今天与未来七天**：围绕主要科研目标安排真实可执行的叶子任务。通常每日三项，八项可形成 3/3/2；不足时说明依赖、预算或状态原因，不复制工作凑数。
+- **继续聊天补任务**：助手读取当前任务树后提出增删改或排期建议，用户确认后应用。有空位和剩余预算时可补到今天，已开始或有证据的承诺受到保护。
+- **遵守真实依赖**：需要前置产物的任务，必须等待前置 Task 最终完成。一般工作顺序可以用排序表达，不必人为增加硬依赖。
+- **分别记录小步骤与整项成果**：今日推进支持结果、步骤、计时和最小行动。今日完成可撤销，原成果事件与实际专注记录保留；整项任务完成需明确确认，也可与今日结果联合提交。
+- **自由补充学习**：添加阅读或学习内容，不计入核心三项，也不要求先完成全部核心项。
+- **直接进入对应工具**：今日行可打开 FastWrite、FastRead、FastNews、FastPPT、FastLab；网页地址在工具设置中配置。打开网页不会被视为任务完成。
+- **对话与专注**：流式聊天、可审批的结构化提案、专注计时、语音转写、后台作业与周复盘。未配置真实模型时界面会标识演示模式，手工任务管理和排期仍可使用。
 
-## 技术栈
+每日预算为 30–480 分钟，默认 120 分钟；30 分钟也可安排三个 10 分钟的真实步骤。自动重排保留有证据的工作。父项推进后再拆分时，孩子默认顺延；用户明确选择不同产出的独立小步骤，可在真实资格满足时安排到今日剩余空位。
 
-- Go（版本以 `go.mod` 的 `go`/`toolchain` 指令为准；`/health/version` 报告运行时实际版本）
-- Gin 1.11 + Huma v2.36
-- GORM + SQLite WAL
-- gocron v2
-- JWT + Argon2id
-- React + TypeScript + Vite + mdui（Material Web 组件）+ assistant-ui（Agent 对话区）+ vite-plugin-pwa
-- Vitest + Go `testing` + `httptest`
+排期作业结果未知时，同一页面提供“核对上次安排”：沿用原请求内容和幂等键，或查询已知作业，不另外创建作业。成功后读取当前计划；明确失败或取消后先刷新基线。此恢复状态不承诺跨整页刷新保留。
 
-## 目录
+## 构建与启动
+
+### 依赖
+
+- Go：`go.mod` 声明 Go 1.26.0，工具链为 **Go 1.26.8**。
+- Node.js 与 npm：Docker 前端构建使用 **Node 22.22.2**；本地可使用同版本，并通过 `npm ci` 安装锁定依赖。
+- C 编译器与 CGO：SQLite 驱动需要 `CGO_ENABLED=1`。Linux 构建环境可安装 `build-essential`、`libsqlite3-dev`、`tzdata`、`ca-certificates`；其他系统使用对应工具包。
+- FastCAS Go SDK：本地 `go.mod` 使用 `replace github.com/FastR-D/FastCAS/sdk/go => ../FastCAS/sdk/go`，必须准备相邻目录中的 SDK。
+
+建议目录布局：
 
 ```text
-cmd/fasttask/              CLI 和服务入口
-internal/agent/            ChatProvider 端口、OpenAI-compatible LLM Adapter 与 assistant-transport 协议（protocol/）
-internal/application/      用例、领域编排、Worker
-internal/domain/           核心业务规则
-internal/httpapi/          Gin + Huma HTTP 契约
-internal/notify/           通知 Notifier Port 与 Telegram / Bark / FCM / APNs 适配器
-internal/persistence/      GORM Record、SQLite、Migration
-internal/platform/auth/    密码、JWT、Session 和 Refresh Token
-internal/scheduler/        租约、Outbox 和清理维护任务
-migrations/                发布用 SQL Migration
-web/                       React 管理界面
-scripts/e2e.mjs            真实 HTTP 用户场景测试
-deployments/systemd/       systemd 样例
-deployments/docker/        容器 entrypoint
-Dockerfile                 多阶段构建（web → go → alpine 运行时）
-docker-compose.yml         生产部署
-doc/                       架构、功能、接口和技术设计
+workspace/
+├── FastTask/
+└── FastCAS/
+    └── sdk/go/go.mod
 ```
 
-## 快速开始
+可从 `FastR-D/FastCAS` 获取 SDK；Dockerfile 当前固定到提交 `676d49b18f700c009f1f491280a93de7da294836`。本地使用同一版本可与容器构建保持一致。SDK 是构建依赖；没有启用 FastCAS 登录时，无需运行 FastCAS 服务。
 
-### 1. 安装依赖并构建前端
+尚未准备 SDK 时，在 FastTask 根目录执行：
 
 ```bash
-cd web
-npm install
-npm run build
-cd ..
+git clone https://github.com/FastR-D/FastCAS.git ../FastCAS
+git -C ../FastCAS checkout 676d49b18f700c009f1f491280a93de7da294836
 ```
 
-### 2. 启动服务
+### 本地运行
+
+以下命令使用 POSIX shell；Windows 可在 WSL 中执行。先进入 FastTask 根目录：
 
 ```bash
-go run ./cmd/fasttask serve --with-worker --with-scheduler
+npm --prefix web ci
+npm --prefix web run build
+mkdir -p bin
+CGO_ENABLED=1 go build -trimpath -o bin/fasttask ./cmd/fasttask
+./bin/fasttask serve
 ```
 
-默认监听：`http://127.0.0.1:10000`
+默认访问 `http://127.0.0.1:10000/`。首次启动会自动迁移数据库并初始化管理员；本地开发默认账号为 `admin`，密码为 `fasttask-admin`，仅用于本机开发。
 
-首次启动会创建本地开发管理员：
+管理员环境变量只用于首次初始化；修改 `.env` 不会重设数据库中已有账号的密码。
 
-```text
-账号：admin
-密码：fasttask-admin
+`serve` 默认同时启动 Worker 和 Scheduler，后台作业及跨日维护可正常运行。生产运行需要同时保留二进制、`web/dist` 和可写的数据目录；网页资源由服务从磁盘提供。
+
+其他运行命令：
+
+```bash
+./bin/fasttask version
+./bin/fasttask migrate
+./bin/fasttask doctor
+./bin/fasttask worker
+./bin/fasttask scheduler
 ```
 
-该默认账号只用于本地开发。生产环境必须设置 `FASTTASK_ADMIN_PASSWORD` 和高强度 `FASTTASK_JWT_SECRET`。
-
-### 3. 打开界面和 API 文档
-
-- 管理界面：`http://127.0.0.1:10000/`
-- API Docs：`http://127.0.0.1:10000/api/v1/docs`
-- OpenAPI JSON：`http://127.0.0.1:10000/api/v1/openapi.json`
-- Readiness：`http://127.0.0.1:10000/health/ready`
+独立运行 Worker 或 Scheduler 时，可用 `serve --with-worker=false --with-scheduler=false` 关闭服务内相应角色。`migrate`、`doctor` 与服务启动会执行数据库迁移，升级前先备份。
 
 ## 配置
 
-服务会从环境变量读取配置，并在仓库根目录存在 `.env` 时加载尚未由进程环境设置的变量。`.env` 已被 `.gitignore` 排除。
+配置从进程环境读取，也会加载当前工作目录下的 `.env`；已经设置的进程环境变量优先。不要把 `.env`、数据库、备份或访问凭据提交到仓库。
 
-常用变量：
+| 变量 | 默认值或用途 |
+| --- | --- |
+| `FASTTASK_LISTEN` / `FASTTASK_PORT` | `127.0.0.1` / `10000` |
+| `FASTTASK_PUBLIC_URL` | 默认本机服务地址；部署时设为用户实际访问的 URL |
+| `FASTTASK_DATABASE` | `data/fasttask.db` |
+| `FASTTASK_WEB_DIST` | `web/dist` |
+| `FASTTASK_AUDIO_DIR` / `FASTTASK_ATTACHMENT_DIR` | `data/audio` / `data/attachments` |
+| `FASTTASK_ENV` | `development`；生产使用 `production` |
+| `FASTTASK_ADMIN_USER` / `FASTTASK_ADMIN_PASSWORD` | 首次初始化管理员；生产必须替换默认密码 |
+| `FASTTASK_JWT_SECRET` | 用户令牌签名密钥；至少 24 字符，生产使用随机值 |
+| `FASTTASK_PANEL_JWT_SECRET` | 服务令牌签名密钥；默认沿用 JWT 密钥，可单独配置至少 24 字符的随机值 |
+| `FASTTASK_PROVIDER_ENCRYPTION_KEY` | 生产必须单独设置至少 32 字符的随机值，且不同于 JWT 密钥；用于加密模型和集成凭据 |
+| `FASTTASK_TRUSTED_PROXIES` | 可信代理 IP/CIDR，逗号分隔；按实际代理配置，代码默认 `10.22.33.0/24` |
+| `OPENAI_API_BASE_URL` / `OPENAI_MODEL` / `OPENAI_API_KEY` | OpenAI-compatible 模型地址、名称与密钥；地址通常以 `/v1` 结尾 |
+| `OPENAI_TRANSCRIPTION_MODEL` | 真实音频转写模型；未配置时明确使用演示转写 |
+| `FASTTASK_LOG_FORMAT` / `FASTTASK_LOG_LEVEL` | `text` / `info`；可设 `json` 及 `debug/info/warn/error` |
+| `FASTTASK_NOTIFICATION_ENABLED` | 默认 `true`；通道和接收端由后台配置 |
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `FASTTASK_LISTEN` | `127.0.0.1` | 监听地址 |
-| `FASTTASK_PORT` | `10000` | HTTP 端口 |
-| `FASTTASK_PUBLIC_URL` | `http://127.0.0.1:10000` | OpenAPI 和 CORS 公共地址 |
-| `FASTTASK_TRUSTED_PROXIES` | `10.22.33.0/24` | 逗号分隔的可信反向代理 IP/CIDR，仅这些来源可提供转发头 |
-| `FASTTASK_DATABASE` | `data/fasttask.db` | SQLite 文件 |
-| `FASTTASK_WEB_DIST` | `web/dist` | 前端生产构建目录 |
-| `FASTTASK_AUDIO_DIR` | `data/audio` | 待转写音频的受限临时目录，作业完成后删除 |
-| `FASTTASK_ENV` | `development` | 环境；`production` 会拒绝默认密钥 |
-| `FASTTASK_JWT_SECRET` | 本地开发值 | JWT HMAC 密钥，生产至少 24 字符且不可使用默认值 |
-| `FASTTASK_ADMIN_USER` | `admin` | 首次启动管理员账号 |
-| `FASTTASK_ADMIN_PASSWORD` | `fasttask-admin` | 首次启动管理员密码 |
-| `FASTTASK_ADMIN_NAME` | `FastTask Admin` | 管理员显示名 |
-| `FASTTASK_PANEL_JWT_SECRET` | 与 JWT Secret 相同 | Panel/外部 Worker 短期 Service JWT 签名密钥；单独设置时至少 24 字符 |
-| `FASTTASK_FASTREAD_URL` | 空 | 可选 FastRead Base URL，例如直接后端 `http://127.0.0.1:8483` 或 Docker/Nginx `http://127.0.0.1:3015` |
-| `FASTTASK_FASTWRITE_URL` | 空 | 可选 FastWrite Base URL，例如 `http://127.0.0.1:3003` |
-| `FASTTASK_INTEGRATION_TIMEOUT_MS` | `2000` | 外部健康探测超时，范围 100 至 10000 毫秒 |
-| `FASTTASK_NOTIFICATION_ENABLED` | `true` | 通知总开关；关闭后配置仍可读，投递空转 |
-| `FASTTASK_NOTIFICATION_TIMEOUT_MS` | `10000` | 单次提供方调用超时，范围 1000 至 60000 毫秒 |
-| `FASTTASK_NOTIFICATION_BATCH` | `20` | 一次投递排水认领的消息数，范围 1 至 100 |
-| `FASTTASK_NOTIFICATION_RETENTION_HOURS` | `336` | 投递日志保留时长（小时），范围 1 至 2160 |
-| `FASTTASK_LOG_FORMAT` | `text` | 结构化日志格式，`text` 或 `json`；写到 stderr |
-| `FASTTASK_LOG_LEVEL` | `info` | `debug`、`info`、`warn`、`error`。日志包含每个 API 请求一行（含 `request_id`，不含查询串）、Panic 堆栈和 500 的内部原因，不含密码、Token 或凭据 |
-| `OPENAI_API_BASE_URL` | 空 | OpenAI-compatible `/v1` Base URL |
-| `OPENAI_MODEL` | 空 | 模型名 |
-| `OPENAI_API_KEY` | 空 | API Key |
-| `OPENAI_TRANSCRIPTION_MODEL` | 空 | OpenAI-compatible 音频转写模型；为空时明确使用演示转写 |
+管理员也可在“后台 → 模型管理”配置默认 OpenAI-compatible Provider。服务端保存加密凭据，浏览器和 sidecar 通过 FastTask 代理调用模型，不接收模型 API Key。
 
-LLM 未配置时，Worker 使用确定性本地 Provider，所有手工功能和测试仍可运行。LLM 配置完整时，任务树提案和对话回复使用真实模型；模型输出仍会经过 JSON 和领域校验，且任务树变更必须由用户确认。设置 `OPENAI_TRANSCRIPTION_MODEL` 后，语音作业会把真实音频发送到兼容的 `/audio/transcriptions` 接口；未设置时结果会明确标注为演示转写，不冒充真实识别。
+生产 `.env` 至少包含以下内容，并替换所有示例值。各密钥分别生成，可用 `openssl rand -hex 32` 生成随机值：
 
-环境变量只是本地启动和兜底配置。管理员可以在后台创建多个 OpenAI-compatible Provider，设置其中一个为默认；Worker 在每个 Agent Job 执行前解析默认配置，切换后无需重启。Provider API Key 使用服务端密钥通过 AES-GCM 加密入库，API 响应只返回掩码。
-
-生产配置示例：
-
-```bash
+```dotenv
 FASTTASK_ENV=production
-FASTTASK_LISTEN=127.0.0.1
-FASTTASK_PORT=10000
 FASTTASK_PUBLIC_URL=https://task.example.com
-FASTTASK_DATABASE=/var/lib/fasttask/fasttask.db
-FASTTASK_WEB_DIST=/opt/fasttask/web/dist
-FASTTASK_JWT_SECRET=<至少 32 字节随机密钥>
-FASTTASK_ADMIN_PASSWORD=<高强度初始密码>
-OPENAI_API_BASE_URL=https://provider.example/v1
-OPENAI_MODEL=<model-name>
-OPENAI_API_KEY=<secret>
-OPENAI_TRANSCRIPTION_MODEL=<speech-to-text-model>
+FASTTASK_JWT_SECRET=REPLACE_WITH_A_UNIQUE_RANDOM_SECRET
+FASTTASK_PANEL_JWT_SECRET=REPLACE_WITH_ANOTHER_RANDOM_SECRET
+FASTTASK_PROVIDER_ENCRYPTION_KEY=REPLACE_WITH_A_SEPARATE_RANDOM_SECRET
+FASTTASK_ADMIN_PASSWORD=REPLACE_WITH_A_STRONG_INITIAL_PASSWORD
 ```
 
-不要把真实密钥提交到 Git、写入日志或放入前端环境变量。
+限制配置和数据目录的访问权限，以专用普通用户运行服务。公网部署使用 HTTPS，并仅信任实际反向代理；SSE 对话连接应关闭代理缓冲并设置足够的读取超时。浏览器录音和 PWA 安装需要安全上下文，通常为 HTTPS 或 localhost。
 
-## CLI
-
-```bash
-go run ./cmd/fasttask serve            # HTTP + Worker + Scheduler（默认全开）
-go run ./cmd/fasttask worker           # 仅持久化 Agent Worker，可独立扩缩
-go run ./cmd/fasttask scheduler        # 仅维护调度任务，可独立运行
-go run ./cmd/fasttask migrate
-go run ./cmd/fasttask doctor
-go run ./cmd/fasttask harden
-go run ./cmd/fasttask backup --output backups/manual.db
-go run ./cmd/fasttask version
-```
-
-`serve` 默认随进程启动 Worker 与 Scheduler，可用 `--with-worker=false` / `--with-scheduler=false` 关闭；`worker` 与 `scheduler` 子命令则把这两个角色拆成独立进程（`doc/wiring.md` §3、§8），便于分别扩缩。整个运行时由 fx 组合根装配（`internal/bootstrap`）。
-
-`harden` 会生成新的生产 JWT/Panel Secret 和管理员密码，写入权限为 `0600` 的 `.env`，同步更新数据库管理员密码并撤销旧会话。命令不会把密钥或密码输出到终端；管理员密码可在服务器本机 `.env` 的 `FASTTASK_ADMIN_PASSWORD` 中查看。
-
-生产构建：
-
-```bash
-mkdir -p bin
-go build -trimpath -o bin/fasttask ./cmd/fasttask
-```
-
-## 测试
-
-### 后端单元、集成和 HTTP 契约测试
-
-```bash
-go test ./...
-go test -race ./...
-go vet ./...
-```
-
-覆盖内容包括：
-
-- 每日候选稳定排序和最多三个规则。
-- 目标和任务状态转换。
-- 任务树循环检测。
-- 最小行动和时间完成不自动完成底层任务。
-- 辅助任务必须在全部核心项满足后创建。
-- 服务端 Session 时长和单活动 Session 约束。
-- Agent Job 持久化、Lease 和提案保存。
-- Agent 对话恢复读：最近会话的权威状态、未 checkpoint 时由持久化消息重建、临时 `__LOCALID_` 续流只解析到调用者自己的在途运行、无历史和跨用户均为 `204`。
-- 真实 SQLite Migration、WAL、外键、事务回滚和数据库重开。
-- SQLite 一致性备份和恢复读取。
-- User、Device、Panel 认证边界和跨用户 `404`。
-- ETag、`If-Match`、幂等重放、幂等键冲突和设备 `304`。
-- 同日重规划 Revision、已满足核心名额保留和旧项 `superseded`。
-- 计划关闭时未满足项转为 `not_completed`。
-- 跨用户 Task/PlanItem 引用拒绝和直接伪造 `satisfied` 拒绝。
-- Panel Service JWT Audience/Scope/代表用户 Claim 和 Agent Callback 租约栅栏。
-- 真实音频内容传给 STT Adapter，并在作业完成后清理临时文件。
-- 登录、目标、任务、计划、对话、语音、设备和 Panel 的 HTTP 闭环。
-- OpenAPI 路径和 Security Scheme。
-- 坐标取值域、四区边界稳定性和未知透镜拒绝。
-- 坐标首次写入创建、缺失或过期 `If-Match` 分别返回 `428` 与 `412`、跨用户 `404`、越界 `422`。
-- Agent 提案落坐标、坐标缺失或越界时提案仍成功、`pinned` 坐标不被 Agent 覆盖。
-- ISO 周窗口跨年边界、非法周号拒绝、总结句优先级和空周合法结果。
-- 周复盘四区聚合、`invalidated` 排除、`stopped` 计入、未标注分钟不进四区、`time`/`minimum_action` 不算实质推进。
-- 目标地图叶子筛选、未标注节点缺省坐标和跨用户 `404`。
-- v3 旧库升级到 v4 后 Readiness 正常且既有数据未丢。
-
-### 前端测试和生产构建
-
-```bash
-cd web
-npm run test
-npm run build
-```
-
-### 真实 LLM 测试
-
-真实模型测试默认跳过，避免普通测试产生外部请求或费用。配置好 OpenAI-compatible 变量后执行：
-
-```bash
-set -a
-source .env
-set +a
-FASTTASK_REAL_LLM_TEST=1 go test ./internal/agent -run TestRealConfiguredModel -count=1 -v
-```
-
-该测试要求模型返回合法的科研任务 JSON，并检查所有必需字段。
-
-### 真实 HTTP 用户场景
-
-服务运行后执行：
-
-```bash
-node scripts/e2e.mjs
-```
-
-脚本实际完成：登录、目标创建和幂等重放、LLM 任务树作业、提案确认、每日计划、最小行动完成、底层任务状态校验、同日重规划 Revision 2、对话 Agent、设备 Poll/304、Panel 摘要，以及通知通道创建、凭据校验、接收端登记、广播、立即投递和投递记录核对。
-
-若测试服务不在 `10000` 端口：
-
-```bash
-FASTTASK_E2E_URL=http://127.0.0.1:10001 node scripts/e2e.mjs
-```
-
-通知段默认把通道指向一个不可达地址，因此不需要真实提供方即可跑完整条链路（断言凭据校验如实报告失败、消息被认领并进入退避重试）。指向一个会应答的替身（Telegram Bot API 或 Bark 的形状）即断言真实送达：
-
-```bash
-FASTTASK_E2E_PROVIDER=http://127.0.0.1:18099 node scripts/e2e.mjs
-```
-
-## 关键业务语义
-
-### 每日三个任务是上限
-
-计划可以有零个、一个、两个或三个核心项。候选不足、任务阻塞或没有合法最小行动时，不创建无关占位任务。
-
-### 当日满足不等于任务完成
-
-完成最小行动、一个关键步骤或约定专注时间，只把 `DailyPlanItem` 标记为 `satisfied`。底层 `Task` 只有通过独立完成接口提交最终结果证据后才进入 `completed`。
-
-### Agent 不直接修改业务数据
-
-任务树生成保存为 Proposal。用户确认时，服务重新检查所有权、Tree Revision 和字段约束，然后在一个事务中应用。迟到或过期 Agent 结果不能覆盖新版本。
-
-### 设备是独立只读身份
-
-墨水屏 Token 仅在创建或轮换时返回一次，数据库只保存 SHA-256 摘要。设备只能读取当天最多三个核心项，不能调用用户写接口。
-
-### 后台管理有独立授权边界
-
-`/api/v1/admin/*` 只允许数据库中当前状态为 active、role 为 admin 的用户访问。用户禁用、密码重置和会话撤销会立即撤销刷新与访问会话；最后一名活跃管理员不能被降级或禁用。用户变更、Provider 变更、默认模型切换，以及通知通道与接收端的创建、修改、删除、凭据校验、试发和广播，都写入 `admin_audit_events`。审计记录只写「谁改了什么」，不写填写的凭据或设备地址。
-
-通知凭据（Bot Token、服务账号 JSON、`.p8` 私钥）与接收端地址（Chat ID、Bark Device Key、FCM 注册 Token、APNs Device Token）都用 `FASTTASK_PROVIDER_ENCRYPTION_KEY` 派生的 AES-GCM 密钥加密入库，接口只返回掩码提示，永不回显明文；编辑时留空即保留原凭据。地址按设备凭据同等对待：持有 FCM Token 就等于拥有向该设备推送的能力。详见 [`doc/notification.md`](doc/notification.md) §7。
-
-## 数据库和备份
-
-SQLite 启用：
-
-```text
-PRAGMA journal_mode=WAL
-PRAGMA foreign_keys=ON
-PRAGMA busy_timeout=5000
-PRAGMA synchronous=NORMAL
-```
-
-不要在服务运行时只复制主 DB 文件并忽略 WAL。请使用：
-
-```bash
-bin/fasttask backup --output backups/fasttask.db
-```
-
-备份命令使用 SQLite `VACUUM INTO` 生成一致性文件，然后只读打开**备份文件本身**执行 `PRAGMA integrity_check` 并核对 Schema 版本；校验失败的文件会被删除。备份文件权限为 `0600`（其中有密码哈希和加密的 Provider 凭据），已存在的目标文件不会被覆盖。
-
-恢复：
-
-```bash
-bin/fasttask backup --verify backups/fasttask.db   # 恢复前确认备份完整且 Schema 与当前二进制一致
-# 停止服务（SQLite 单写者），保留旧库以便回退
-mv /var/lib/fasttask/fasttask.db /var/lib/fasttask/fasttask.db.before-restore
-rm -f /var/lib/fasttask/fasttask.db-wal /var/lib/fasttask/fasttask.db-shm
-cp backups/fasttask.db /var/lib/fasttask/fasttask.db && chmod 600 /var/lib/fasttask/fasttask.db
-# 启动服务后检查 /health/ready
-```
-
-旧 WAL 必须与旧库一起移走：留下的 `-wal` 文件属于另一个数据库，会在下次打开时被回放到恢复的文件上。
-
-### Schema 版本
-
-当前 `ExpectedSchemaVersion = 11`（`000009_fastcas` 新增可选统一身份的三张表，`000010_notifications` 新增 `notification_channels`、`notification_targets` 和 `notification_messages`，`000011_query_indexes` 只为高频查询补索引，不改表、不改数据）。
-
-`serve` 启动时会自动执行 Migration。若用旧二进制创建的数据库直接跑新二进制而没有迁移，`/health/ready` 会返回 `503`，此时先执行：
-
-```bash
-bin/fasttask migrate
-```
-
-升级前建议先 `bin/fasttask backup`。坐标、身份与通知都只落在新表，不修改既有表结构，既有数据不受影响。
-
-## tmux 运行
-
-本地或临时运行方式，不是生产形态：生产用下面的 Docker（或 systemd）。tmux 里的裸二进制与容器**不能同时持有同一个数据库**——SQLite 单写者约束，切换前先确认另一边已停止。
-
-```bash
-tmux new-session -d -s fasttask \
-  'cd /root/repo/FastTask && ./bin/fasttask serve --with-worker --with-scheduler'
-
-tmux attach -t fasttask
-tmux capture-pane -pt fasttask
-tmux kill-session -t fasttask
-```
-
-## systemd
-
-样例位于 `deployments/systemd/fasttask.service`。生产部署建议使用专用 `fasttask` 用户，配置 `EnvironmentFile`、最小文件权限、反向代理 TLS 和单实例写入约束。
+启用 FastCAS 登录时，必须同时配置 `FASTTASK_FASTCAS_ISSUER`、`FASTTASK_FASTCAS_CLIENT_ID`、`FASTTASK_FASTCAS_CLIENT_SECRET`、`FASTTASK_FASTCAS_REDIRECT_URI`；全部留空则保留本地账号登录。
 
 ## Docker 部署
 
-实验室主机的生产形态是容器：`docker compose up -d` 起一个 `fasttask` 容器，进程内同时跑 HTTP、Worker 和 Scheduler，数据落在宿主机一个目录里。设计与取舍见 `doc/tech.md` §21.5。
+Dockerfile 构建网页与 Go 服务，并下载上述固定版本的 FastCAS SDK。构建需要访问 npm、Go 模块与 SDK 下载源；可通过 `GOPROXY`、`APK_MIRROR`、`FASTCAS_REF` 构建参数调整。使用 BuildKit 的 `fastcas-sdk` 命名构建上下文也可提供本地 SDK，其根目录须包含 `FastCAS/sdk/go`。
 
-镜像由仓库根目录的 `Dockerfile` 多阶段构建：Node 构建前端，Go（CGO + SQLite）链接真实 FastCAS SDK 并编译单二进制，运行时基于 alpine，只包含二进制、前端产物和 `tzdata`。镜像内没有 Node，因此不能承载可选 sidecar，Agent 走浏览器内 WASM Host（见「当前外部边界」与 `doc/harness.md` §16）。
-
-### 配置
-
-Compose 直接读取仓库根目录的 `.env`，既用于变量插值也作为容器环境，密钥只存在这一个文件里（已被 `.gitignore` 排除）。其中两个变量只服务于 Compose：
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `DOCKER_NAME` | `fasttask` | Compose 项目名、镜像名和容器名 |
-| `DOCKER_DATA_PATH` | `/root/dockerData/fasttask` | 宿主机数据目录，挂载到容器 `/var/lib/fasttask` |
-
-构建期可用 `FASTCAS_REF`、`GOPROXY`、`APK_MIRROR` 覆盖 FastCAS SDK 提交、Go 模块代理和 Alpine 镜像源；`OPENAI_API_BASE_URL_CONTAINER` 覆盖容器内访问宿主 LLM 网关的地址。
-
-`.env` 里有两个值是宿主视角的，Compose 已在容器内覆盖，直接透传会让容器起不来且看起来像应用 Bug：
-
-- `FASTTASK_LISTEN`：容器内必须绑 `0.0.0.0`，否则发布端口转发不到进程；宿主侧地址写在 `ports` 里（默认 `${FASTTASK_LISTEN}:${FASTTASK_PORT}`，与迁移前的裸二进制部署同一地址端口，反向代理无需改动）。
-- `OPENAI_API_BASE_URL`：容器内的 `localhost` 是容器自己，宿主网关经 `host.docker.internal`（`extra_hosts: host-gateway`）访问。
-
-还有一个值需要按容器网络改写：`FASTTASK_TRUSTED_PROXIES`。经发布端口进入的连接，在容器里看到的对端是 Docker 网桥网关（如 `172.18.0.1`），不是宿主上的反向代理，因此裸二进制时代的值（`10.22.33.0/24`）在容器里不再匹配，`X-Forwarded-For` 会被忽略，所有用户共用网关这一个地址——登录限速、访问日志都按这个地址计。服务会在日志里打印一次 `ignoring X-Forwarded-For from a peer that is not a trusted proxy … peer=172.18.0.1` 提示这种情况。修正方法：在 `.env` 里把网关所在网段加进去，例如 `FASTTASK_TRUSTED_PROXIES=172.16.0.0/12`。**前提**是发布端口只绑在反向代理才能访问的地址上（`127.0.0.1` 或内网地址）：经 docker-proxy 进来的直连客户端同样显示为网关地址，若端口对公网开放，信任网关就等于允许任何人伪造来源 IP。
-
-容器内所有可写路径都已固定到 `/var/lib/fasttask` 下：数据库、WAL、待转写音频、图片附件，以及 `fasttask backup` 的默认 `backups/` 输出。工作目录就是状态目录。
-
-### 首次部署
+准备好生产 `.env`，可另加 `DOCKER_DATA_PATH=./data` 指定宿主数据目录，然后运行：
 
 ```bash
 docker compose build
-
-# 绑定挂载在宿主机上是 root 所有，容器以非特权 fasttask 用户运行。
-# uid:gid 从镜像里读，不要凭记忆写死：
-docker run --rm --entrypoint id fasttask:local fasttask
-chown -R 100:101 "$DOCKER_DATA_PATH" && chmod 750 "$DOCKER_DATA_PATH"
-
-# 用旧数据库升级时先备份，再迁移；serve 启动也会自动迁移，
-# 但显式 migrate 能在服务对外之前看到迁移结果。
-docker compose run --rm fasttask backup
-docker compose run --rm fasttask migrate
-
+# 首次绑定数据目录时修正容器用户权限，完成后退出
+docker compose run --rm --user 0 fasttask version
 docker compose up -d
-curl -sS http://127.0.0.1:10000/health/ready     # {"status":"ready"}
-curl -sS http://127.0.0.1:10000/health/version
+docker compose logs -f fasttask
 ```
 
-首次迁移前请先在数据副本上验证：把 `fasttask.db` 复制到一个临时目录，用 `docker run --rm --user 0 --env-file .env -v <临时目录>:/var/lib/fasttask fasttask:local migrate` 跑一遍，确认 schema 版本、行数与 `PRAGMA integrity_check`，再动真实数据。`--user 0` 只用于修复挂载目录所有权，entrypoint 仍会在启动服务前降权到 `fasttask`。
+镜像默认以普通用户运行，数据保存到 `/var/lib/fasttask`。数据库、音频和附件路径应使用容器内路径，宿主目录由 `DOCKER_DATA_PATH` 挂载。现有 Compose 固定映射容器端口 `10000`，修改端口时须同步调整映射。
 
-### 日常运维
+Compose 使用 `OPENAI_API_BASE_URL_CONTAINER` 覆盖容器中的模型地址，默认指向宿主机 `http://host.docker.internal:3000/v1`；使用远程模型服务时请明确设置该变量。容器中的 `localhost` 指容器自身。可信代理范围也应按容器实际收到的来源地址配置。
+
+### 可选 Node sidecar
+
+默认对话宿主运行在浏览器 WebAssembly 中，需要浏览器支持 JSPI。缺少该能力的浏览器可使用可选 Node sidecar；手工任务功能不依赖 sidecar。
 
 ```bash
-docker compose ps                       # 状态与 healthcheck 结果
-docker compose logs -f fasttask         # json-file，单文件 10MB、保留 3 个
-docker compose exec fasttask fasttask backup
-docker compose exec fasttask fasttask doctor
-docker compose restart fasttask         # SIGTERM，30s 宽限（应用排水预算 15s）
-docker compose down                     # 保留数据目录
+npm --prefix web run build:sidecar
 ```
 
-升级：`FASTTASK_COMMIT=$(git rev-parse HEAD) docker compose build && docker compose run --rm fasttask backup && docker compose run --rm fasttask migrate && docker compose up -d`。`/health/version` 返回 `version`、`commit`、`build_time` 和 `go`，用来确认跑的是哪次构建。`restart: unless-stopped`，宿主重启后容器自动回来；容器不存活时数据目录仍在宿主机上，可直接被下一个容器或裸二进制接管。
+产物为 `sidecar/dist/host.mjs`。在原生部署中设置 `FASTTASK_SIDECAR_ENABLED=true`，必要时设置 `FASTTASK_SIDECAR_NODE_PATH`、`FASTTASK_SIDECAR_ENTRY`、`FASTTASK_SIDECAR_SOCKET`。默认由 Go 服务启动并管理 sidecar。运行环境须保留 `web/node_modules` 中的 `libfx` 及适合当前系统和架构的依赖，不能只复制 `host.mjs`。
 
-### 排障
+若 sidecar 由外部进程管理器启动，Go 端设置 `FASTTASK_SIDECAR_SPAWN=false`；两端使用同一 `FASTTASK_SIDECAR_SECRET`。Node 端的 `FASTTASK_SIDECAR_ENDPOINT=unix://<socket路径>` 对应 Go 端的 socket，`FASTTASK_SERVER_ORIGIN` 指向可达的 FastTask 服务，`FASTTASK_WEB_ROOT` 指向含依赖的 web 目录。现有 Alpine Docker 镜像没有 Node，不包含 sidecar；需要该回退宿主时使用原生 Node 部署。sidecar 只负责对话运行，不直接访问 SQLite。
 
-| 现象 | 原因与处理 |
-|---|---|
-| `/health/ready` 返回 `503` | 数据库 Schema 不是当前二进制期望的版本。先 `fasttask backup`，再 `fasttask migrate`。`/health/live` 只表示进程在跑。 |
-| 日志出现 `ignoring X-Forwarded-For from a peer that is not a trusted proxy` | 反向代理不在 `FASTTASK_TRUSTED_PROXIES` 里，所有用户共用代理的地址。按上文「配置」把代理（容器里是网桥网关）加入该变量。 |
-| 登录返回 `429` | 同一来源/账号短时间内失败过多（见 `doc/tech.md`「登录限速」），封禁最长 15 分钟，重启进程也会清零。 |
-| 500 错误 | 响应只给 `X-Request-ID`；日志里同一 `request_id` 的 `unhandled application error` 或 `http handler panic` 行给出原因。 |
-| 作业一直「运行中」 | Worker 每 30 秒续租；进程消失后 2 分钟内调度器把作业放回队列，用完重试次数则以 `LEASE_EXPIRED` 失败。日志里 `agent job` 开头的行记录每次失败。 |
-| 恢复前想确认备份可用 | `fasttask backup --verify <文件>`：只读打开备份，检查完整性和 Schema 版本。 |
+## 数据备份与恢复
 
-日志写到 stderr（容器内即 `docker compose logs`），默认文本格式，`FASTTASK_LOG_FORMAT=json` 可接日志采集；不会记录密码、Token、API Key 或查询串。
+SQLite 使用 WAL。运行中的数据库应使用一致性备份命令，不要只复制主 `.db` 文件：
 
-## 当前外部边界
+```bash
+./bin/fasttask backup --output backups/manual.db
+./bin/fasttask backup --verify backups/manual.db
+```
 
-- LLM：已实现 OpenAI-compatible Chat Completions Adapter。
-- 语音：MVP 已实现录音上传、受限临时存储、持久化转写 Job、OpenAI-compatible STT Adapter 和作业完成清理；没有 STT 模型配置时使用明确标注的演示转写。
-- FastResearch Panel：提供只读摘要。服务身份使用短期 JWT，必须包含 `fasttask-panel-api` Audience、`panel:summary:read` Scope 和签名的代表用户 Claim。
-- 墨水屏：后端 Poll 契约已完成，真实硬件固件不在本仓库范围内，可按 OpenAPI 接入。
-- FastResearch 工具：已实现 `/api/v1/imports` 通用收件箱。用户或带 `imports:write` Scope 的服务可导入候选事项；用户可通过 ETag 审批后创建或关联 Task。带 `imports:read` Scope 的服务只能读取被代表用户的导入事项。
-- 集成状态：管理员可调用 `GET /api/v1/integrations/status` 查看 FastRead/FastWrite 可选健康探测结果，并明确 FastInsight/FastNews CLI Runner 尚未实现。
-- 通知：已实现 Telegram 机器人、Bark、FCM HTTP v1 和 APNs HTTP/2 四个提供方，凭据与地址加密存储，投递走带租约与退避的持久队列。浏览器 Web Push、邮件和飞书尚未实现；FCM 与 APNs 的真实设备端（注册 Token 的取得）不在本仓库范围内，客户端按 `POST /api/v1/notifications/targets` 登记即可。
+容器中可执行：
 
-## 设计文档
+```bash
+docker compose exec fasttask fasttask backup --output /var/lib/fasttask/backups/manual.db
+```
 
-- `doc/arch.md`
-- `doc/func.md`
-- `doc/interface.md`
-- `doc/tech.md`
-- [`doc/lens.md`](doc/lens.md)：决策透镜、周复盘与目标地图的产品判断
-- [`doc/lens-impl.md`](doc/lens-impl.md)：决策透镜的可执行实现规格
-- [`doc/notification.md`](doc/notification.md)：通知系统——四个提供方的契约、加密存储、队列与退避投递、后台管理界面
-- [`doc/integration/README.md`](doc/integration/README.md)：FastInsight、FastNews、FastRead、FastWrite 对接与协作总览
+同时备份附件、必要的音频文件及配置密钥，备份文件应离机保存并限制访问。尤其保留 `FASTTASK_PROVIDER_ENCRYPTION_KEY`，否则数据库中的加密凭据无法解密。
 
-### Agent、组合根、前端与 PWA（已实现）
+恢复前停止所有会写数据库的服务、Worker 和 Scheduler，验证备份，保留原数据库及其 WAL/SHM 文件后再替换为备份；恢复附件目录与原配置密钥，检查文件权限后启动服务。应用没有自动恢复流程。
 
-以下文档描述的能力均已落地并通过测试：
+## API 与设备接入
 
-- [`doc/agent.md`](doc/agent.md) / [`doc/agent-impl.md`](doc/agent-impl.md)：Agent 运行时——assistant-transport SSE 传输（`POST /api/v1/agent/{commands,resume,resume-state}`，按 ADR-0002 绕过 Huma）、只读工具循环、提案审批（决定经 `add-tool-result` 回传、HTTP 处理器同步 `ApplyProposal`）、断线续流与启动时中断回收；数据落在 migration `000005_agent_runtime`。
-- [`doc/wiring.md`](doc/wiring.md)：fx 组合根（`internal/bootstrap`）与 `application.App` 的服务拆分，`serve` / `worker` / `scheduler` 三个可独立运行的角色。
-- [`doc/frontend.md`](doc/frontend.md)：`web/src/agent/` 的 assistant-ui 对话区（`AgentChat` 挂载点、纯 converter、`makeAssistantToolUI` 审批卡片、协商录音格式的语音输入）。
-- [`doc/pwa.md`](doc/pwa.md)：可安装 PWA——manifest、injectManifest Service Worker（按用户隔离缓存键的离线只读快照）、access token 内存 + refresh token 持久化的认证模型。
-- [`doc/adr/README.md`](doc/adr/README.md)：架构决策记录索引。
+服务运行后可直接查看完整接口：
 
-实现中的 HTTP DTO 和 OpenAPI 是字段级事实来源；文档用于解释产品语义、架构边界和演进决策。
+- `/api/v1/docs`：API 文档。
+- `/api/v1/openapi.json`：OpenAPI 描述。
+- `/health/ready`：运行就绪状态。
+- `/health/version`：构建与运行版本。
+
+| 操作 | 接口 |
+| --- | --- |
+| 登录 / 刷新会话 | `POST /api/v1/auth/login`、`POST /api/v1/auth/refresh` |
+| 目标与任务 | `/api/v1/goals`、`/api/v1/tasks` |
+| 今日完整列表 | `GET /api/v1/daily-plans/current` |
+| 七日排期 | `GET /api/v1/schedule` |
+| 排期设置 | `GET/PUT /api/v1/planning-settings` |
+| 生成或重排作业 | `POST /api/v1/daily-plans/generation-jobs` |
+| 查询作业 | `GET /api/v1/agent-jobs/{job_id}` |
+| 记录今日推进 | `POST /api/v1/daily-plans/{plan_id}/items/{item_id}/completions` |
+| 撤销今日推进 | `POST /api/v1/daily-plans/{plan_id}/items/{item_id}/reopenings` |
+| 墨水屏读取 | `GET /api/v1/devices/self/poll` |
+| Panel 摘要 / 完整今日列表 | `GET /api/v1/panel/summary`、`GET /api/v1/panel/tasks` |
+
+用户接口使用 `Authorization: Bearer <access_token>`。今日响应含 `plan`、原有 `items`、共享投影 `today_items` 和不足原因 `availability`。从 `today_items` 读取条目 ID、`item_etag`、承诺、状态、能力及工具入口；不要把计划 ETag 当作条目 ETag。
+
+记录小步骤的请求示例：
+
+```http
+POST /api/v1/daily-plans/{plan_id}/items/{item_id}/completions
+Authorization: Bearer <access_token>
+If-Match: <item_etag>
+Idempotency-Key: <本次命令的唯一键>
+Content-Type: application/json
+
+{"type":"step","summary":"完成一个具体小步骤，并保存可核对的产出"}
+```
+
+撤销调用上表的 `/reopenings` 接口，提交 `{"summary":"纠正误标记"}`，并使用最新条目 ETag。一次新命令使用新幂等键；结果未知的重试沿用原键和原请求内容。计时完成还需引用有效 `work_session_ids`。若明确联合确认整项任务，提交 `complete_task:true` 和当前 `task_if_match`；撤销今日推进仍保留独立的整项任务成果。
+
+墨水屏使用设备页签发的独立 `X-Device-Token`。Panel 使用用户认证，或代表相应用户且带 `panel:summary:read` / `panel:tasks:read` 范围的服务令牌。设备和 Panel 的只读权限不授予完成或撤销权限；需要写入时使用用户接口和用户授权。
+
+网页、墨水屏和 Panel 读取同一份今日安排及共享任务投影；设备与 Panel 列表支持 `ETag`、`If-None-Match` 和 `304`。硬件显示、外部 Panel 客户端以及五个工具系统的实际业务联调由各部署方完成；FastTask 提供接口与网页入口，不把外部系统动作自动认定为已完成科研产出。

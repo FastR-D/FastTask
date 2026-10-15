@@ -29,9 +29,10 @@ type AgentService struct {
 	tools *ToolRegistry
 	// sidecar drives the runs whose host is the Node process instead of the browser
 	// (doc/harness.md §8). Nil in the common case: the sidecar is a fallback.
-	sidecar      SidecarDriver
-	limits       LoopLimits
-	systemPrompt string
+	sidecar               SidecarDriver
+	limits                LoopLimits
+	toolTimeoutConfigured bool
+	systemPrompt          string
 	// approvalService carries the §7 approval-receipt flow, embedded so
 	// s.ResolveApproval resolves by promotion (wiring.md §9: AgentService declares
 	// ≤15 methods). Its own app/repo/store fields shadow nothing at depth 0.
@@ -145,7 +146,7 @@ func WithToolRegistry(registry *ToolRegistry) AgentOption {
 
 // WithLoopLimits overrides the §6 bounds (used by tests).
 func WithLoopLimits(limits LoopLimits) AgentOption {
-	return func(s *AgentService) { s.limits = limits }
+	return func(s *AgentService) { s.limits = limits; s.toolTimeoutConfigured = limits.ToolTimeout > 0 }
 }
 
 // WithSystemPrompt overrides the server-side system prompt. The client-supplied
@@ -231,6 +232,7 @@ func normalizeReasoningLevel(level string) string {
 // loop, otherwise runs use the deterministic fallback.
 func NewAgentService(app *App, opts ...AgentOption) *AgentService {
 	builtIn := append(NewReadonlyTools(app), NewProposalTools(app)...)
+	builtIn = append(builtIn, NewWorkspaceTools(app)...)
 	registry, err := NewToolRegistry(builtIn...)
 	if err != nil {
 		// Unreachable for the built-in set (unique names, no identity fields).
@@ -279,6 +281,15 @@ func (s *AgentService) credentials(ctx context.Context) (*ModelCredentials, erro
 	return s.creds(ctx)
 }
 
+// Availability reports configuration, never credentials or a model health check.
+func (s *AgentService) Availability(ctx context.Context) (bool, string, error) {
+	creds, err := s.credentials(ctx)
+	if err != nil || creds == nil {
+		return false, "", err
+	}
+	return true, creds.Model, nil
+}
+
 // Repository exposes the underlying agent repository for the HTTP layer's
 // streaming reads (chunk replay, run lookup). All access stays user-scoped.
 func (s *AgentService) Repository() *persistence.AgentRepository { return s.repo }
@@ -319,6 +330,9 @@ type Command struct {
 	ToolName   string          `json:"toolName,omitempty"`
 	Result     json.RawMessage `json:"result,omitempty"`
 	IsError    bool            `json:"isError,omitempty"`
+	// A restored browser can settle its exact pending proposal without reviving
+	// the vanished wasm host. Only a standalone user approval receipt may set it.
+	DetachHarness bool `json:"detachHarness,omitempty"`
 }
 
 // CommandMessage is the message payload of an add-message command (§2.3).
@@ -383,7 +397,30 @@ var ErrEmptyCommand = errors.New("agent command has no message text")
 // An add-tool-result command is routed to the approval flow instead (§7.2): it resolves the
 // pending proposal and continues the SAME run rather than creating one.
 func (s *AgentService) SubmitCommands(ctx context.Context, userID string, req CommandsRequest) (SubmitResult, error) {
+	for _, command := range req.Commands {
+		if command.DetachHarness && (command.Type != "add-tool-result" || len(req.Commands) != 1 || len(req.State) != 0) {
+			return SubmitResult{}, fmt.Errorf("%w: detached approval requires one independent add-tool-result command without state or a new message", ErrEmptyCommand)
+		}
+	}
 	if cmd, ok := firstToolResult(req.Commands); ok {
+		if cmd.DetachHarness && req.ThreadID != nil {
+			part, err := s.repo.GetPartByToolCallID(ctx, userID, cmd.ToolCallID)
+			if err != nil {
+				return SubmitResult{}, err
+			}
+			message, err := s.repo.GetMessage(ctx, userID, part.MessageID)
+			if err != nil {
+				return SubmitResult{}, err
+			}
+			if message.ThreadID != strings.TrimSpace(*req.ThreadID) {
+				return SubmitResult{}, gorm.ErrRecordNotFound
+			}
+		}
+		for _, command := range req.Commands {
+			if command.Type == "add-message" {
+				return SubmitResult{}, fmt.Errorf("%w: send an approval receipt separately from a new message", ErrEmptyCommand)
+			}
+		}
 		return s.ResolveApproval(ctx, userID, cmd)
 	}
 	text, images, err := extractUserMessage(req.Commands)

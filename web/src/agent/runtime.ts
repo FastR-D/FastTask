@@ -1,18 +1,151 @@
-import { useAssistantTransportRuntime, type AssistantRuntime, type AttachmentAdapter } from '@assistant-ui/react'
-import { ensureFreshAccessToken } from '../api'
-import { cancelActiveRun, driveRun, selectMode } from '../harness'
+import { useAui, useAssistantTransportRuntime, useAssistantTransportState, type AssistantRuntime, type AttachmentAdapter } from '@assistant-ui/react'
+import { AssistantMessageAccumulator, AssistantTransportDecoder, unstable_createInitialMessage } from 'assistant-stream'
+import { asAsyncIterableStream, type ReadonlyJSONValue } from 'assistant-stream/utils'
+import { useEffect, useRef } from 'react'
+import { ensureFreshAccessToken, offlineSessionAvailable, readOfflineUser, refreshAccessTokenAfterUnauthorized } from '../api'
+import { activeRunId, cancelActiveRun, driveRun, selectMode } from '../harness'
 import { forcedModeOf, readModePreference } from './modePreference'
 import { convertState } from './converter'
-import type { ServerAgentState } from './state'
+import type { ApprovalDecision, ServerAgentState } from './state'
+import { threadState } from './threads'
+import { useComposerDraftUserId } from './ComposerDraft'
+import { writeComposerDraft } from './draft-storage'
+import { assertAccessOwner, SESSION_OWNER_CHANGED } from '../session-owner'
 
-// authHeaders is the only hook that runs before assistant-ui issues a request, so
-// it is the only place the access token can be refreshed for the three agent
-// endpoints (frontend.md §5). They bypass api.ts's reactive 401 retry, so the
-// token must be proactively valid here. It shares api.ts's single-flight refresh,
-// avoiding concurrent refresh-token rotation races.
-async function authHeaders(): Promise<Record<string, string>> {
+export function agentErrorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '请稍后重试'
+  if (message.includes('HARNESS_UNAVAILABLE')) return '当前浏览器无法直接运行研究助手，备用服务也未连接。请更新浏览器或联系管理员启用备用服务。'
+  if (/\bRUN_ACTIVE\b/.test(message) || message.includes('an agent run is already active')) return '当前账号还有对话正在生成，请回到正在生成的对话完成或停止后重试。'
+  if (message.includes('thread not found')) return '这段对话已不可用，请重新选择会话。'
+  if (message.includes('run is not awaiting approval')) return '这次对话已停止等待确认。请重新载入对话核对提案状态，再继续研究。'
+  if (message.includes('approval receipt already resolved')) return '这个提案已经处理过。请查看最新结果后继续研究。'
+  if (message.includes('the task tree changed before this approval')) return '任务已发生变化，这个提案已失效。请让助手根据最新任务重新提出建议。'
+  if (message.includes('the proposal basis changed before this approval')) return '相关任务或计划已发生变化，这个提案已失效。请让助手读取最新状态后重新提出建议。'
+  if (message.includes('authentication required')) return '登录已过期，请重新登录后继续。'
+  if (message.includes('internal server error') || message.includes('model configuration unavailable')) return '对话服务暂时不可用，请稍后重试。'
+  if (/failed to fetch|fetch failed|networkerror/i.test(message)) return '无法连接对话服务，请检查网络后重试。'
+  return message
+}
+
+function assertOwner(access: string | null, ownerId?: string, getUserId?: () => string | undefined): asserts access is string {
+  if (getUserId && !ownerId) throw new Error('账号信息正在载入，草稿已保留，请稍后发送。')
+  if (getUserId && getUserId() !== ownerId) throw new Error(SESSION_OWNER_CHANGED)
+  if (!access) {
+    if (offlineSessionAvailable()) {
+      if (ownerId && readOfflineUser()?.id !== ownerId) throw new Error(SESSION_OWNER_CHANGED)
+      throw new Error('需要联网，草稿已保留，请联网后重试。')
+    }
+    throw new Error('authentication required')
+  }
+  if (ownerId) assertAccessOwner(access, ownerId)
+}
+
+async function authHeaders(ownerId?: string, getUserId?: () => string | undefined): Promise<Record<string, string>> {
   const access = await ensureFreshAccessToken()
-  return access ? { Authorization: `Bearer ${access}` } : {}
+  assertOwner(access, ownerId, getUserId)
+  return { Authorization: `Bearer ${access}` }
+}
+
+type ProposalReceiptOptions = {
+  threadId?: string
+  state?: ServerAgentState
+  onState?: (state: ServerAgentState) => void
+  signal?: AbortSignal
+  ownerId?: string
+  getUserId?: () => string | undefined
+}
+
+// Decisions always use a separate receipt: even a stopped stream must not put
+// an old approval in the same SDK batch as the user's next message. A normal
+// worker can return its continuation here; decode its server state just as the
+// main transport does. Harness and interrupted-run receipts may only return DONE.
+export async function sendProposalDecision(
+  _streaming: boolean, toolCallId: string, toolName: string, result: ApprovalDecision,
+  _addResult: (result: ApprovalDecision) => void,
+  options: ProposalReceiptOptions = {},
+): Promise<void> {
+  const headers:Record<string,string>={ 'Content-Type': 'application/json', ...await authHeaders(options.ownerId, options.getUserId) }
+  const restoredRunId=options.state?.fasttask?.runId
+  const detachHarness=Boolean(restoredRunId&&activeRunId()!==restoredRunId)
+  const controller=new AbortController()
+  const timeout=setTimeout(()=>controller.abort(),20_000)
+  let response:Response
+  const body=JSON.stringify({ ...(options.threadId?{threadId:options.threadId}:{}), commands: [{ type: 'add-tool-result', toolCallId, toolName, ...(detachHarness?{detachHarness:true}:{}), result }] })
+  const signal=options.signal?AbortSignal.any([controller.signal,options.signal]):controller.signal
+  try {
+    response = await fetch('/api/v1/agent/commands', {
+      method: 'POST', headers,
+      body, signal,
+    })
+    if(response.status===401 && options.ownerId && !signal.aborted) {
+      const access=await refreshAccessTokenAfterUnauthorized(headers.Authorization.slice('Bearer '.length))
+      assertOwner(access,options.ownerId,options.getUserId)
+      if(signal.aborted)throw signal.reason
+      // Authentication rejected the first receipt before any business action.
+      // Replay this exact receipt once, never a message or a changed decision.
+      response=await fetch('/api/v1/agent/commands',{method:'POST',headers:{...headers,Authorization:`Bearer ${access}`},body,signal})
+    }
+  } finally { clearTimeout(timeout) }
+  if (!response.ok) {
+    let detail = '确认未能送达，请稍后重试。'
+    try { const problem = await response.json(); detail = problem.detail || detail } catch { /* keep the useful fallback */ }
+    throw new Error(agentErrorText(detail))
+  }
+  if(!response.body)throw new Error('确认响应不完整，请重新载入对话核对结果。')
+  const initial=options.state??{messages:[],isRunning:false,fasttask:{}}
+  let streamError:string|undefined
+  const stream=response.body.pipeThrough(new AssistantTransportDecoder({strict:true})).pipeThrough(new AssistantMessageAccumulator({
+    initialMessage:unstable_createInitialMessage({unstable_state:initial as unknown as ReadonlyJSONValue}),
+    strict:true,onError:error=>{streamError=error},
+  }))
+  for await(const chunk of asAsyncIterableStream(stream)) {
+    const next=chunk.metadata.unstable_state
+    if(next&&next!==initial)options.onState?.(next as unknown as ServerAgentState)
+  }
+  if(streamError)throw new Error(agentErrorText(streamError))
+}
+
+/** Synchronize the exact restored thread without remounting or clearing its composer. */
+export function useProposalDecision() {
+  const aui=useAui()
+  const userId=useComposerDraftUserId()
+  const currentOwner=useRef(userId)
+  currentOwner.current=userId
+  const owner=useRef(userId)
+  owner.current??=userId
+  const state=useAssistantTransportState<ServerAgentState>(value=>value as unknown as ServerAgentState)
+  const stateRef=useRef(state)
+  stateRef.current=state
+  const requests=useRef(new Set<AbortController>())
+  useEffect(()=>()=>{for(const controller of requests.current)controller.abort()},[])
+  return async(toolCallId:string,toolName:string,result:ApprovalDecision)=>{
+    const initial=stateRef.current,threadId=initial.fasttask?.threadId
+    if(!threadId)throw new Error('无法确认提案所属的对话，请重新载入后重试。')
+    const controller=new AbortController()
+    requests.current.add(controller)
+    const importState=(next:ServerAgentState)=>{
+      if(controller.signal.aborted)return
+      if(next.fasttask?.threadId!==threadId)throw new Error('提案响应的对话不一致，请重新载入后核对。')
+      stateRef.current=next
+      aui.thread.importExternalState(next)
+    }
+    let deliveryError:unknown
+    try {
+      try { await sendProposalDecision(false,toolCallId,toolName,result,()=>{}, {threadId,state:initial,onState:importState,signal:controller.signal,ownerId:owner.current,getUserId:()=>currentOwner.current}) }
+      catch(error) { deliveryError=error }
+      if(!controller.signal.aborted) {
+        try {
+          const basis=stateRef.current
+          const latest=await threadState(threadId)
+          // The user or another server stream may advance this thread while
+          // the GET is in flight. That newer transcript must not be rolled back.
+          if(stateRef.current===basis)importState(latest)
+        }
+        catch(error) { if(!deliveryError)deliveryError=new Error(`确认请求已送达，但最新对话未能载入。请重新载入对话核对结果：${agentErrorText(error)}`) }
+      }
+      if(deliveryError)throw deliveryError
+    } finally { requests.current.delete(controller) }
+  }
 }
 
 // lastUserText is the message the runtime is sending. The harness host needs the text to prompt with
@@ -65,10 +198,14 @@ export function harnessRunOf(response: Response): string | null {
 }
 
 export type AgentRuntimeOptions = {
+  /** Stable reader of the real account prop; it never remounts the SDK runtime. */
+  getUserId?: () => string | undefined
   /** The image attachment adapter (doc/chat-features.md §4.2). Omitted in tests that do not exercise it. */
   attachments?: AttachmentAdapter
   /** Called when a run's stream ends, so the conversation list can re-read titles and recency (§2). */
   onThreadChanged?: () => void
+  /** Only server-confirmed applied results refresh business views, once per tool call. */
+  onBusinessChanged?: () => void
 }
 
 // useAgentRuntime wires the assistant-transport runtime. ALL transport wiring is
@@ -78,6 +215,8 @@ export function useAgentRuntime(
   onNotice: (message: string) => void,
   options: AgentRuntimeOptions = {},
 ): AssistantRuntime {
+  const owner=useRef(options.getUserId?.())
+  const sentAuth=useRef<{ownerId?:string;access:string}|null>(null)
   const runtime = useAssistantTransportRuntime<ServerAgentState>({
     // MUST be explicit: the default protocol is "data-stream", and omitting this
     // silently speaks the wrong protocol — the stream looks fine but messages never
@@ -88,11 +227,24 @@ export function useAgentRuntime(
     resumeStateApi: '/api/v1/agent/resume-state',
     initialState,
     converter: convertState,
-    headers: authHeaders,
+    headers: async()=>{
+      owner.current??=options.getUserId?.()
+      const headers=await authHeaders(owner.current,options.getUserId)
+      sentAuth.current={ownerId:owner.current,access:headers.Authorization.slice('Bearer '.length)}
+      return headers
+    },
     // assistant-ui's in-memory thread list assigns a __LOCALID_... remoteId
     // before the first command. Only the ID returned by FastTask in state is a
     // server thread; sending the temporary ID makes the first message a 404.
-    prepareSendCommandsRequest: prepareAgentCommand,
+    prepareSendCommandsRequest: async body=>{
+      const prepared=await prepareAgentCommand(body)
+      const access=await ensureFreshAccessToken()
+      assertOwner(access,owner.current,options.getUserId)
+      // SDK captured its headers before the awaited host probe. A peer may have
+      // rotated them in the meantime; stop before sending known-stale headers.
+      if(sentAuth.current?.access!==access)throw new Error('登录状态已更新，草稿已保留，请再次发送。')
+      return prepared
+    },
     // Attachments are in the transport options, and the adapter uploads to our own storage so a message
     // carries a reference instead of bytes (doc/chat-features.md §4.1, §4.2).
     ...(options.attachments ? { adapters: { attachments: options.attachments } } : {}),
@@ -104,24 +256,63 @@ export function useAgentRuntime(
       const runId = harnessRunOf(response)
       if (!runId) return
       void driveRun({ runId, text: lastUserText, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
-        onNotice(`对话驱动失败：${error instanceof Error ? error.message : '请稍后重试'}`)
+        onNotice(`对话驱动失败：${agentErrorText(error)}`)
       })
     },
-    // The stop button cancels through the server first: cancelling is the user's power, and a host may
-    // not cancel its own run (§5.2, §10.2).
-    onCancel: () => {
+    // assistant-ui also invokes onCancel({error}) after a transport failure.
+    // A dropped stream or reload must preserve the pending proposal; only an
+    // explicit stop (without an error) requests cancellation on the server.
+    onCancel: ({ error }) => {
+      if (error) return
       void cancelActiveRun().catch(() => undefined)
     },
-    onError: (error, { commands }) => {
+    onError: async (error, { commands }) => {
       const unsent = commands.find(command => command.type === 'add-message')
       if (unsent?.type === 'add-message') {
         const text = unsent.message.parts
           .flatMap(part => part.type === 'text' ? [part.text] : [])
           .join('')
-        if (text) runtime.thread.composer.setText(text)
+        if (text) {
+          if(options.getUserId && owner.current && options.getUserId()!==owner.current) {
+            const current=runtime.thread.getState().state
+            const threadId=current&&typeof current==='object'&&'threadId' in current&&typeof current.threadId==='string'?current.threadId:initialState.fasttask?.threadId
+            writeComposerDraft(owner.current,threadId,text)
+          }
+          else runtime.thread.composer.setText(text)
+        }
       }
-      onNotice(`对话发送失败：${error.message}`)
+      if(/\b(?:Status 401:|status 401:)/.test(error.message) && sentAuth.current?.ownerId) {
+        try {
+          const access=await refreshAccessTokenAfterUnauthorized(sentAuth.current.access)
+          assertOwner(access,sentAuth.current.ownerId,options.getUserId)
+          onNotice(unsent?'登录已恢复，草稿已保留，请再次发送。':'登录已恢复，请重新载入对话继续。')
+        } catch(recoveryError) { onNotice(`对话发送失败：${agentErrorText(recoveryError)}`) }
+        return
+      }
+      onNotice(`对话发送失败：${agentErrorText(error)}`)
     },
   })
+  const businessRef = useRef(options.onBusinessChanged)
+  businessRef.current = options.onBusinessChanged
+  const seen = useRef(new Set<string>())
+  useEffect(() => {
+    const inspect = () => {
+      let changed = false
+      for (const message of runtime.thread.getState().messages) {
+        for (const part of message.content) {
+          if (part.type !== 'tool-call' || part.isError || !part.result || typeof part.result !== 'object') continue
+          if ((part.result as {applied?: unknown}).applied !== true || seen.current.has(part.toolCallId)) continue
+          seen.current.add(part.toolCallId)
+          changed = true
+        }
+      }
+      if (changed) businessRef.current?.()
+    }
+    // Seed known results on restore without calling an old approval a new edit.
+    for (const message of initialState.messages) for (const part of message.parts) {
+      if (part.type === 'tool-call' && part.result && typeof part.result === 'object' && (part.result as {applied?: unknown}).applied === true) seen.current.add(part.toolCallId)
+    }
+    return runtime.thread.subscribe(inspect)
+  }, [runtime])
   return runtime
 }

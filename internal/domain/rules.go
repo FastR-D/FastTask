@@ -18,6 +18,8 @@ var externalImportSources = map[string]bool{
 	"fastnews":    true,
 	"fastread":    true,
 	"fastwrite":   true,
+	"fastppt":     true,
+	"fastlab":     true,
 }
 
 var externalImportKinds = map[string]bool{
@@ -32,7 +34,8 @@ type Candidate struct {
 	ID             string
 	Status         string
 	Priority       int
-	Estimate       int
+	Position       int
+	Estimate       int // Total task workload; never a promise to finish it today.
 	MinimumAction  string
 	GoalActive     bool
 	DependencyDone bool
@@ -40,21 +43,26 @@ type Candidate struct {
 
 func SelectDailyCandidates(candidates []Candidate, availableMinutes int) []Candidate {
 	selected := make([]Candidate, 0, 3)
+	seen := map[string]bool{}
 	for _, candidate := range candidates {
-		if !candidate.GoalActive || !candidate.DependencyDone || candidate.MinimumAction == "" {
+		if candidate.ID == "" || seen[candidate.ID] || !candidate.GoalActive || !candidate.DependencyDone || strings.TrimSpace(candidate.MinimumAction) == "" {
 			continue
 		}
 		if candidate.Status != "ready" && candidate.Status != "in_progress" {
 			continue
 		}
-		if availableMinutes > 0 && candidate.Estimate > availableMinutes*2 {
-			continue
-		}
+		// A daily commitment is a bounded advancement slice, not a promise to
+		// finish the entire task estimate. The planner applies the daily budget
+		// to slot count and target minutes instead of starving long research work.
 		selected = append(selected, candidate)
+		seen[candidate.ID] = true
 	}
 	sort.SliceStable(selected, func(i, j int) bool {
 		if selected[i].Priority != selected[j].Priority {
 			return selected[i].Priority > selected[j].Priority
+		}
+		if selected[i].Position != selected[j].Position {
+			return selected[i].Position < selected[j].Position
 		}
 		return selected[i].ID < selected[j].ID
 	})
@@ -65,20 +73,31 @@ func SelectDailyCandidates(candidates []Candidate, availableMinutes int) []Candi
 }
 
 func ValidateGoalTransition(from, to string) error {
-	if from == to {
-		return nil
-	}
 	allowed := map[string]map[string]bool{
-		"draft":     {"active": true, "abandoned": true},
-		"active":    {"paused": true, "completed": true, "abandoned": true},
-		"paused":    {"active": true, "abandoned": true},
-		"completed": {"archived": true},
-		"abandoned": {"archived": true},
+		"draft":     {"active": true, "abandoned": true, "archived": true},
+		"active":    {"paused": true, "completed": true, "abandoned": true, "archived": true},
+		"paused":    {"active": true, "abandoned": true, "archived": true},
+		"completed": {"active": true, "archived": true},
+		"abandoned": {"active": true, "archived": true},
+		"archived":  {"active": true},
+	}
+	if _, ok := allowed[from]; ok && from == to {
+		return nil
 	}
 	if !allowed[from][to] {
 		return ErrInvalidTransition
 	}
 	return nil
+}
+
+// Completion is evidence-bearing and has its own endpoint. Ordinary edits can
+// pause/resume or cancel/reconsider work, but cannot fabricate or undo a result.
+func ValidateTaskTransition(from, to string) error {
+	open := map[string]bool{"ready": true, "in_progress": true, "blocked": true, "paused": true, "cancelled": true, "superseded": true}
+	if open[from] && open[to] {
+		return nil
+	}
+	return ErrInvalidTransition
 }
 
 func ValidateCompletionType(value string, allowedCSV string) bool {

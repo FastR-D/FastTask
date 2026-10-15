@@ -1,6 +1,8 @@
 import type { FxAgent, FxTurn, FxTurnEvent, HostTool } from './runtime'
 import { createGatewayFetch } from './shim'
 import { buildHostTools, type ToolCallResult, type ToolDef } from './tools'
+import { ToolCallBindings } from './tool-identity'
+import { retryToolNetworkRequest } from './tool-request'
 
 // The sidecar's run driver (doc/harness.md §8).
 //
@@ -115,7 +117,9 @@ export async function driveSidecarRun(deps: SidecarDeps, request: SidecarRunRequ
 
     const manifest = (await deps.call('GET', '/agent/tools', token.current)) as { tools?: ToolDef[] }
     diagnostics({ type: 'sidecar.manifest', tools: manifest.tools?.length ?? 0 })
-    const tools = buildHostTools(manifest.tools ?? [], (name, input, signal) => callTool(deps, token, request.run_id, name, input, signal, diagnostics), {
+    const bindings = new ToolCallBindings()
+    const tools = buildHostTools(manifest.tools ?? [], (name, input, signal, toolCallId) => callTool(deps, token, request.run_id, name, input, signal, toolCallId, diagnostics), {
+      bindings,
       onWarn: message => diagnostics({ type: 'sidecar.warning', message }),
     })
 
@@ -128,6 +132,7 @@ export async function driveSidecarRun(deps: SidecarDeps, request: SidecarRunRequ
       onEvent: diagnostics,
       tools,
       fetch: createGatewayFetch({
+        bindings,
         runId: request.run_id,
         harnessToken: () => token.current,
         serverOrigin: deps.serverOrigin,
@@ -209,6 +214,7 @@ async function callTool(
   name: string,
   input: unknown,
   signal: AbortSignal,
+  toolCallId: string,
   diagnostics?: (event: { type: string; [key: string]: unknown }) => void,
 ): Promise<ToolCallResult> {
   // A failed call goes back to the model as an ordinary tool error, so nothing else would ever record it —
@@ -221,10 +227,10 @@ async function callTool(
   diagnostics?.({ type: 'sidecar.tool_call', name })
   let outcome: Record<string, unknown>
   try {
-    outcome = await deps.call('POST', `/agent/runs/${encodeURIComponent(runId)}/tools/${encodeURIComponent(name)}`, token.current, {
-      // libfx hands execute() a signal and no call id, so the server correlates by name (§4.4.1).
-      input: input ?? {},
-    })
+    outcome = await retryToolNetworkRequest(() => deps.call('POST', `/agent/runs/${encodeURIComponent(runId)}/tools/${encodeURIComponent(name)}`, token.current, {
+      tool_call_id: toolCallId,
+      input,
+    }), signal)
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error))
   }

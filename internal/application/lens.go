@@ -49,9 +49,8 @@ func (a *LensService) SetTaskCoord(ctx context.Context, userID, taskID, lens str
 	rationale = truncateRationale(rationale)
 	coord := persistence.TaskCoord{}
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		var task persistence.Task
-		if err := tx.Where("id = ? AND user_id = ?", taskID, userID).First(&task).Error; err != nil {
-			return notFound(err)
+		if _, err := RequireLiveTaskTx(tx, userID, taskID); err != nil {
+			return err
 		}
 		existing, found, err := findCoord(tx, userID, taskID, lens)
 		if err != nil {
@@ -256,6 +255,7 @@ func lastProgressByTask(db *gorm.DB, userID string) (map[string]time.Time, error
 	err := db.Table("progress_events").
 		Select("task_id, MAX(occurred_at) AS last_at").
 		Where("user_id = ? AND task_id IS NOT NULL AND type IN ?", userID, []string{"result", "step"}).
+		Where("NOT EXISTS (SELECT 1 FROM progress_events reversal WHERE reversal.user_id = progress_events.user_id AND reversal.type = 'daily_item_reopened' AND json_valid(reversal.evidence_json) AND json_extract(reversal.evidence_json, '$.reverses_event_id') = progress_events.id)").
 		Group("task_id").
 		Scan(&rows).Error
 	if err != nil {
@@ -508,6 +508,7 @@ func weeklyEvidence(db *gorm.DB, userID, startDate, endDate string) (ReviewEvide
 		Where("dpi.user_id = ?", userID).
 		Where("dpi.kind = ?", "core").
 		Where("dpi.status = ?", "satisfied").
+		Where("dpi.plan_revision = dp.current_revision").
 		Where("dp.local_date >= ? AND dp.local_date <= ?", startDate, endDate).
 		Group("dpi.completion_type").
 		Scan(&rows).Error
@@ -559,7 +560,9 @@ func tasksByID(db *gorm.DB, userID string, ids []string) (map[string]persistence
 		return result, nil
 	}
 	var tasks []persistence.Task
-	if err := db.Where("user_id = ? AND id IN ?", userID, ids).Find(&tasks).Error; err != nil {
+	if err := db.Where("user_id = ? AND id IN ? AND deleted_at IS NULL", userID, ids).
+		Where("EXISTS (SELECT 1 FROM goals WHERE goals.id = tasks.goal_id AND goals.user_id = tasks.user_id AND goals.deleted_at IS NULL)").
+		Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 	for _, task := range tasks {
@@ -602,9 +605,9 @@ func (a *LensService) GoalMap(ctx context.Context, userID, goalID, lens string) 
 		return nil, domain.ErrLens
 	}
 	db := a.Store.DB.WithContext(ctx)
-	var goal persistence.Goal
-	if err := db.Where("id = ? AND user_id = ?", goalID, userID).First(&goal).Error; err != nil {
-		return nil, notFound(err)
+	goal, err := RequireLiveGoalTx(db, userID, goalID)
+	if err != nil {
+		return nil, err
 	}
 	var user persistence.User
 	if err := db.Where("id = ?", userID).First(&user).Error; err != nil {
@@ -614,12 +617,12 @@ func (a *LensService) GoalMap(ctx context.Context, userID, goalID, lens string) 
 	now := persistence.Now()
 
 	var tasks []persistence.Task
-	if err := db.Where("goal_id = ? AND user_id = ?", goalID, userID).Order("position, id").Find(&tasks).Error; err != nil {
+	if err := db.Where("goal_id = ? AND user_id = ? AND deleted_at IS NULL", goalID, userID).Order("position, id").Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 	parents := map[string]bool{}
 	for _, task := range tasks {
-		if task.ParentID != nil && *task.ParentID != "" {
+		if task.ParentID != nil && *task.ParentID != "" && task.Status != "cancelled" && task.Status != "superseded" {
 			parents[*task.ParentID] = true
 		}
 	}

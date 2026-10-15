@@ -17,12 +17,12 @@ export function jobPollDelay(attempt: number): number {
 // finished.
 export async function waitJob(
   id: string,
-  { budgetMs = 5 * 60_000, sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)), now = () => Date.now() } = {},
+  { budgetMs = 5 * 60_000, sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)), now = () => Date.now(), readJob = async (jobID:string) => (await request<Job>(`/agent-jobs/${jobID}`)).data } = {},
 ): Promise<Job> {
   const deadline = now() + budgetMs
   for (let attempt = 0; ; attempt++) {
     await sleep(jobPollDelay(attempt))
-    const { data } = await request<Job>(`/agent-jobs/${id}`)
+    const data = await readJob(id)
     if (TERMINAL.includes(data.status)) return data
     if (now() >= deadline) throw new Error('作业仍在运行，完成后可在「任务队列」查看结果')
   }

@@ -13,7 +13,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/fx v1.24.0
-	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.48.0
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.30.1

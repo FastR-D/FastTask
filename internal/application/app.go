@@ -44,6 +44,7 @@ type App struct {
 	*LensService
 	*DeviceService
 	*IntegrationService
+	*RemoteToolService
 	*AdminService
 	*JobService
 	*GoalService
@@ -74,19 +75,22 @@ func NewWithSecret(store *persistence.Store, secret string, materializers ...Job
 // order: IntegrationService needs GoalService.createTaskTx, ProgressService needs
 // PlanService.satisfyItemTx.
 func newApp(store *persistence.Store, secret string, materializers []JobMaterializer) *App {
-	var providerKey, notificationKey []byte
+	var providerKey, notificationKey, integrationKey []byte
 	if secret != "" {
 		providerKey, notificationKey = deriveSecretKey(secret), deriveNotificationKey(secret)
+		integrationKey = deriveLabeledKey("fasttask:integration-credential:v1:", secret)
 	}
 	goals := NewGoalService(store)
 	plans := NewPlanService(store)
 	notifications := NewNotificationService(store, notificationKey)
+	imports := NewIntegrationService(store, goals)
 	return &App{
 		Store:              store,
 		ProviderService:    NewProviderService(store, providerKey),
 		LensService:        NewLensService(store),
 		DeviceService:      NewDeviceService(store),
-		IntegrationService: NewIntegrationService(store, goals),
+		IntegrationService: imports,
+		RemoteToolService:  NewRemoteToolService(store, integrationKey),
 		AdminService:       NewAdminService(store),
 		JobService:         NewJobService(store, materializers),
 		GoalService:        goals,
@@ -99,47 +103,34 @@ func newApp(store *persistence.Store, secret string, materializers []JobMaterial
 }
 
 func (a *GoalService) CreateGoal(ctx context.Context, userID string, goal *persistence.Goal) error {
-	now := persistence.Now()
-	goal.ID, goal.UserID, goal.Status, goal.Revision = persistence.NewID("goal"), userID, "active", 1
-	goal.CreatedAt, goal.UpdatedAt = now, now
 	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		if err := tx.Create(goal).Error; err != nil {
-			return err
-		}
-		return createOutbox(tx, userID, "goal.created", map[string]any{"goal_id": goal.ID})
+		return a.createGoalTx(tx, userID, goal)
 	})
 }
 
 func (a *GoalService) UpdateGoal(ctx context.Context, userID, id string, expected int, changes map[string]any) (*persistence.Goal, error) {
-	var goal persistence.Goal
-	if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).First(&goal).Error; err != nil {
-		return nil, notFound(err)
-	}
-	if goal.Revision != expected {
-		return nil, ErrRevision
-	}
-	if next, ok := changes["status"].(string); ok {
-		if err := domain.ValidateGoalTransition(goal.Status, next); err != nil {
-			return nil, ErrConflict
-		}
-	}
-	changes["revision"], changes["updated_at"] = goal.Revision+1, persistence.Now()
-	result := a.Store.DB.WithContext(ctx).Model(&persistence.Goal{}).Where("id = ? AND user_id = ? AND revision = ?", id, userID, expected).Updates(changes)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	if result.RowsAffected != 1 {
-		return nil, ErrRevision
-	}
-	if err := a.Store.DB.WithContext(ctx).First(&goal, "id = ?", id).Error; err != nil {
-		return nil, err
-	}
-	return &goal, nil
+	var goal *persistence.Goal
+	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		var err error
+		goal, err = a.updateGoalTx(tx, userID, id, expected, changes)
+		return err
+	})
+	return goal, err
 }
 
 func (a *GoalService) CreateTask(ctx context.Context, userID string, task *persistence.Task) error {
+	return a.createTask(ctx, userID, task, false)
+}
+
+// CreateTaskWithExplicitPriority preserves a supplied zero priority. Legacy Go
+// callers of CreateTask still get the existing zero-value default of 50.
+func (a *GoalService) CreateTaskWithExplicitPriority(ctx context.Context, userID string, task *persistence.Task) error {
+	return a.createTask(ctx, userID, task, true)
+}
+
+func (a *GoalService) createTask(ctx context.Context, userID string, task *persistence.Task, explicitPriority bool) error {
 	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		return a.createTaskTx(tx, userID, task, "manual task creation", "user")
+		return a.createTaskWithPriorityTx(tx, userID, task, "manual task creation", "user", explicitPriority)
 	})
 }
 
@@ -192,9 +183,8 @@ func (a *IntegrationService) CreateExternalImport(ctx context.Context, userID st
 	item.CreatedAt, item.UpdatedAt = now, now
 	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		if item.SuggestedGoalID != nil {
-			var goal persistence.Goal
-			if err := tx.Where("id = ? AND user_id = ?", *item.SuggestedGoalID, userID).First(&goal).Error; err != nil {
-				return notFound(err)
+			if _, err := RequireLiveGoalTx(tx, userID, *item.SuggestedGoalID); err != nil {
+				return err
 			}
 		}
 		if err := tx.Create(item).Error; err != nil {
@@ -224,9 +214,11 @@ func (a *IntegrationService) ConvertExternalImport(ctx context.Context, userID, 
 			if strings.TrimSpace(*command.ExistingTaskID) == "" {
 				return ErrValidation
 			}
-			if err := tx.Where("id = ? AND user_id = ?", *command.ExistingTaskID, userID).First(&task).Error; err != nil {
-				return notFound(err)
+			liveTask, err := RequireLiveTaskTx(tx, userID, *command.ExistingTaskID)
+			if err != nil {
+				return err
 			}
+			task = *liveTask
 		} else {
 			if strings.TrimSpace(command.GoalID) == "" && item.SuggestedGoalID != nil {
 				command.GoalID = *item.SuggestedGoalID
@@ -245,7 +237,17 @@ func (a *IntegrationService) ConvertExternalImport(ctx context.Context, userID, 
 			}
 		}
 		now := persistence.Now()
-		result := tx.Model(&persistence.ExternalImport{}).Where("id = ? AND user_id = ? AND revision = ? AND status = 'candidate'", item.ID, userID, expected).Updates(map[string]any{"status": "converted", "task_id": task.ID, "decision_note": strings.TrimSpace(command.DecisionNote), "decided_at": now, "revision": expected + 1, "updated_at": now})
+		updates := map[string]any{"status": "converted", "task_id": task.ID, "decision_note": strings.TrimSpace(command.DecisionNote), "decided_at": now, "revision": expected + 1, "updated_at": now}
+		if command.ExistingTaskID != nil {
+			metadata, restored, err := reattachTaskMaterialMetadata(item, task.ID, now)
+			if err != nil {
+				return err
+			}
+			if restored {
+				updates["metadata_json"] = metadata
+			}
+		}
+		result := tx.Model(&persistence.ExternalImport{}).Where("id = ? AND user_id = ? AND revision = ? AND status = 'candidate'", item.ID, userID, expected).Updates(updates)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -295,81 +297,76 @@ func (a *IntegrationService) RejectExternalImport(ctx context.Context, userID, i
 }
 
 func (a *GoalService) UpdateTask(ctx context.Context, userID, id string, expected int, changes map[string]any) (*persistence.Task, error) {
-	var task persistence.Task
+	var task *persistence.Task
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&task).Error; err != nil {
-			return notFound(err)
-		}
-		if task.Revision != expected {
-			return ErrRevision
-		}
-		if status, ok := changes["status"].(string); ok && status == "completed" {
-			return ErrValidation
-		}
-		if parent, ok := changes["parent_id"].(string); ok && parent != "" {
-			var tasks []persistence.Task
-			if err := tx.Where("goal_id = ? AND user_id = ?", task.GoalID, userID).Find(&tasks).Error; err != nil {
-				return err
-			}
-			parents := map[string]string{}
-			valid := false
-			for _, item := range tasks {
-				if item.ParentID != nil {
-					parents[item.ID] = *item.ParentID
-				}
-				if item.ID == parent {
-					valid = true
-				}
-			}
-			if !valid || domain.WouldCreateCycle(task.ID, parent, parents) {
-				return ErrValidation
-			}
-		}
-		changes["revision"], changes["updated_at"] = task.Revision+1, persistence.Now()
-		result := tx.Model(&persistence.Task{}).Where("id = ? AND user_id = ? AND revision = ?", id, userID, expected).Updates(changes)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return ErrRevision
-		}
-		return a.snapshotTaskTree(tx, userID, task.GoalID, "manual task update", "user")
+		var err error
+		task, err = a.updateTaskTx(tx, userID, id, expected, changes)
+		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	if err := a.Store.DB.WithContext(ctx).First(&task, "id = ?", id).Error; err != nil {
-		return nil, err
-	}
-	return &task, nil
+	return task, err
 }
 
 func (a *PlanService) ReplanDailyPlan(ctx context.Context, userID, localDate, timezone string, taskIDs []string, available, expected int) (*persistence.DailyPlan, []persistence.DailyPlanItem, error) {
 	var plan persistence.DailyPlan
 	var resultItems []persistence.DailyPlanItem
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		// Store.Transaction can retry after SQLite busy rolls an attempt back.
+		// Its in-memory snapshots must not retain clones from that failed attempt.
+		resultItems = nil
 		if err := tx.Where("user_id = ? AND local_date = ? AND timezone = ?", userID, localDate, timezone).First(&plan).Error; err != nil {
 			return notFound(err)
 		}
 		if plan.Revision != expected {
 			return ErrRevision
 		}
+		if plan.Status != "active" {
+			return ErrConflict
+		}
+		tasks, settings, err := eligiblePlanningTasksTx(tx, userID, taskIDs)
+		if err != nil {
+			return err
+		}
+		if len(taskIDs) > 0 && len(tasks) == 0 {
+			return ErrValidation
+		}
+		resolvedAvailable, err := resolvePlanningBudget(available, settings)
+		if err != nil {
+			return err
+		}
 		var oldItems []persistence.DailyPlanItem
 		if err := tx.Where("plan_id = ? AND plan_revision = ? AND status != 'superseded'", plan.ID, plan.CurrentRevision).Order("position, id").Find(&oldItems).Error; err != nil {
 			return err
 		}
+		protected, err := protectedPlanItemsTx(tx, userID, plan, oldItems)
+		if err != nil {
+			return err
+		}
+		scopeTasks, err := planningTaskIndexTx(tx, userID)
+		if err != nil {
+			return err
+		}
+		protectedParents := protectedPlanParentIDs(oldItems, protected, scopeTasks)
+		selectedScopes := map[string][]string{}
 		now := persistence.Now()
 		newRevision := plan.CurrentRevision + 1
 		satisfiedTaskIDs := map[string]bool{}
-		coreSlots := 3
+		logicalByTask := map[string]string{}
 		for _, item := range oldItems {
-			if item.Status == "satisfied" {
+			if item.TaskID != nil {
+				logicalByTask[*item.TaskID] = logicalItemID(item)
+			}
+			if protected[item.ID] {
+				retained, err := retainProtectedItemForReplanTx(tx, userID, plan, item)
+				if err != nil {
+					return err
+				}
+				if !retained {
+					continue // Original corrected row and its evidence stay in history.
+				}
 				copy := item
+				copy.LogicalID = logicalItemID(item)
 				copy.ID, copy.PlanRevision, copy.Revision, copy.CreatedAt, copy.UpdatedAt = persistence.NewID("dpi"), newRevision, 1, now, now
 				resultItems = append(resultItems, copy)
-				if copy.Kind == "core" {
-					coreSlots--
-				}
 				if copy.TaskID != nil {
 					satisfiedTaskIDs[*copy.TaskID] = true
 				}
@@ -377,27 +374,20 @@ func (a *PlanService) ReplanDailyPlan(ctx context.Context, userID, localDate, ti
 				return err
 			}
 		}
-		if coreSlots < 0 {
-			coreSlots = 0
-		}
-		var tasks []persistence.Task
-		query := tx.Table("tasks").Select("tasks.*").Joins("JOIN goals ON goals.id = tasks.goal_id").Where("tasks.user_id = ? AND goals.status = 'active'", userID)
-		if len(taskIDs) > 0 {
-			query = query.Where("tasks.id IN ?", taskIDs)
-		}
-		if err := query.Find(&tasks).Error; err != nil {
-			return err
-		}
+		_, coreSlots, targetMinutes := remainingPlanBudget(resultItems, resolvedAvailable)
 		candidates := make([]domain.Candidate, 0, len(tasks))
 		byID := map[string]persistence.Task{}
 		for _, task := range tasks {
 			if satisfiedTaskIDs[task.ID] {
 				continue
 			}
+			if len(taskIDs) == 0 && taskDescendsFrom(task, protectedParents, scopeTasks) {
+				continue
+			}
 			byID[task.ID] = task
-			candidates = append(candidates, domain.Candidate{ID: task.ID, Status: task.Status, Priority: task.Priority, Estimate: task.EstimateMinutes, MinimumAction: task.MinimumAction, GoalActive: true, DependencyDone: true})
+			candidates = append(candidates, domain.Candidate{ID: task.ID, Status: task.Status, Priority: task.Priority, Position: task.Position, Estimate: task.EstimateMinutes, MinimumAction: task.MinimumAction, GoalActive: true, DependencyDone: true})
 		}
-		selected := domain.SelectDailyCandidates(candidates, available)
+		selected := domain.SelectDailyCandidates(candidates, resolvedAvailable)
 		if len(selected) > coreSlots {
 			selected = selected[:coreSlots]
 		}
@@ -409,8 +399,26 @@ func (a *PlanService) ReplanDailyPlan(ctx context.Context, userID, localDate, ti
 		}
 		for _, candidate := range selected {
 			task := byID[candidate.ID]
-			taskID := task.ID
-			resultItems = append(resultItems, persistence.DailyPlanItem{ID: persistence.NewID("dpi"), UserID: userID, PlanID: plan.ID, PlanRevision: newRevision, TaskID: &taskID, Kind: "core", Title: task.Title, Commitment: "推进：" + task.SuccessCriteria, MinimumAction: task.MinimumAction, AllowedTypes: "result,step,time,minimum_action", TargetMinutes: 50, Status: "planned", Position: position, Revision: 1, CreatedAt: now, UpdatedAt: now})
+			if len(taskIDs) > 0 {
+				if chain, valid := planningParentChain(task, scopeTasks); valid {
+					selectedScopes[task.ID] = chain
+				}
+			}
+			item := newScheduledItem(userID, plan.ID, newRevision, position, resolvedAvailable, task, now)
+			item.TargetMinutes = targetMinutes
+			item.Commitment = dailyTaskCommitment(task, targetMinutes)
+			logicalID := logicalByTask[task.ID]
+			if logicalID == "" {
+				var err error
+				logicalID, err = historicalLogicalItemIDTx(tx, userID, plan.ID, task.ID)
+				if err != nil {
+					return err
+				}
+			}
+			if logicalID != "" {
+				item.LogicalID = logicalID
+			}
+			resultItems = append(resultItems, item)
 			position++
 		}
 		if len(resultItems) > 0 {
@@ -418,25 +426,27 @@ func (a *PlanService) ReplanDailyPlan(ctx context.Context, userID, localDate, ti
 				return err
 			}
 		}
-		input, _ := json.Marshal(map[string]any{"task_ids": taskIDs, "available_minutes": available, "algorithm": plan.AlgorithmVersion, "base_revision": expected})
+		input, _ := json.Marshal(map[string]any{"task_ids": taskIDs, "available_minutes": resolvedAvailable, "algorithm": plan.AlgorithmVersion, "base_revision": expected, "selected_task_parent_chains": selectedScopes})
 		snapshot, _ := json.Marshal(resultItems)
 		revision := persistence.DailyPlanRevision{ID: persistence.NewID("planrev"), PlanID: plan.ID, Revision: newRevision, InputSnapshot: string(input), InputHash: persistence.Hash(string(input)), PlanSnapshot: string(snapshot), Reason: "same-day replanning", CreatedAt: now}
 		if err := tx.Create(&revision).Error; err != nil {
 			return err
 		}
-		update := tx.Model(&persistence.DailyPlan{}).Where("id = ? AND revision = ?", plan.ID, expected).Updates(map[string]any{"current_revision": newRevision, "revision": expected + 1, "status": "active", "updated_at": now})
+		freezePlanWithCore(&plan, now, hasCoreItem(resultItems))
+		update := tx.Model(&persistence.DailyPlan{}).Where("id = ? AND revision = ?", plan.ID, expected).Updates(map[string]any{"current_revision": newRevision, "revision": expected + 1, "status": "active", "updated_at": now, "frozen_at": plan.FrozenAt})
 		if update.Error != nil {
 			return update.Error
 		}
 		if update.RowsAffected != 1 {
 			return ErrRevision
 		}
-		return createOutbox(tx, userID, "daily_plan.replanned", map[string]any{"plan_id": plan.ID, "revision": newRevision})
+		if err := createOutbox(tx, userID, "daily_plan.replanned", map[string]any{"plan_id": plan.ID, "revision": newRevision}); err != nil {
+			return err
+		}
+		// Keep the plan revision paired with the items built in this transaction.
+		return tx.Where("id = ? AND user_id = ?", plan.ID, userID).First(&plan).Error
 	})
 	if err != nil {
-		return nil, nil, err
-	}
-	if err := a.Store.DB.WithContext(ctx).First(&plan, "id = ?", plan.ID).Error; err != nil {
 		return nil, nil, err
 	}
 	return &plan, resultItems, nil
@@ -467,12 +477,9 @@ func (a *PlanService) CloseDailyPlan(ctx context.Context, userID, planID string,
 		if result.RowsAffected != 1 {
 			return ErrRevision
 		}
-		return nil
+		return tx.Where("id = ? AND user_id = ?", plan.ID, userID).First(&plan).Error
 	})
 	if err != nil {
-		return nil, err
-	}
-	if err := a.Store.DB.WithContext(ctx).First(&plan, "id = ?", plan.ID).Error; err != nil {
 		return nil, err
 	}
 	return &plan, nil
@@ -481,74 +488,124 @@ func (a *PlanService) CloseDailyPlan(ctx context.Context, userID, planID string,
 func (a *GoalService) CompleteTask(ctx context.Context, userID, id string, expected int, eventType, summary string, reopen bool) (*persistence.Task, error) {
 	var task persistence.Task
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&task).Error; err != nil {
-			return notFound(err)
-		}
-		if task.Revision != expected {
-			return ErrRevision
-		}
-		status := "completed"
-		if reopen {
-			if task.Status != "completed" {
-				return ErrConflict
-			}
-			status, eventType = "in_progress", "task_reopened"
-		} else if strings.TrimSpace(summary) == "" || task.SuccessCriteria == "" {
-			return ErrValidation
-		}
-		now := persistence.Now()
-		if result := tx.Model(&persistence.Task{}).Where("id = ? AND revision = ?", id, expected).Updates(map[string]any{"status": status, "revision": expected + 1, "updated_at": now}); result.Error != nil || result.RowsAffected != 1 {
-			if result.Error != nil {
-				return result.Error
-			}
-			return ErrRevision
-		}
-		event := persistence.ProgressEvent{ID: persistence.NewID("progress"), UserID: userID, GoalID: &task.GoalID, TaskID: &task.ID, Type: eventType, Summary: summary, EvidenceJSON: "[]", OccurredAt: now, CreatedAt: now}
-		if err := tx.Create(&event).Error; err != nil {
+		if err := a.completeTaskTx(tx, userID, id, expected, eventType, summary, reopen, "[]", &task); err != nil {
 			return err
 		}
-		if err := a.snapshotTaskTree(tx, userID, task.GoalID, eventType, "user"); err != nil {
-			return err
-		}
-		return createOutbox(tx, userID, "task.status_changed", map[string]any{"task_id": id, "status": status})
+		// Return this mutation's committed version, not a later opposite write
+		// that may arrive before the HTTP response and its idempotency cache.
+		return tx.Where("id = ? AND user_id = ?", id, userID).First(&task).Error
 	})
 	if err != nil {
-		return nil, err
-	}
-	if err := a.Store.DB.WithContext(ctx).First(&task, "id = ?", id).Error; err != nil {
 		return nil, err
 	}
 	return &task, nil
 }
 
-func (a *PlanService) CreateDailyPlan(ctx context.Context, userID, localDate, timezone string, taskIDs []string, available int) (*persistence.DailyPlan, []persistence.DailyPlanItem, error) {
-	var tasks []persistence.Task
-	query := a.Store.DB.WithContext(ctx).Table("tasks").Select("tasks.*").Joins("JOIN goals ON goals.id = tasks.goal_id").Where("tasks.user_id = ? AND goals.status = 'active'", userID)
-	if len(taskIDs) > 0 {
-		query = query.Where("tasks.id IN ?", taskIDs)
+// completeTaskTx is shared by the standalone task endpoint and an explicit
+// daily result that also delivers the entire leaf task. Callers compose this in
+// their existing transaction so neither evidence layer can be partially saved.
+func (a *GoalService) completeTaskTx(tx *gorm.DB, userID, id string, expected int, eventType, summary string, reopen bool, evidenceJSON string, task *persistence.Task) error {
+	live, err := RequireLiveTaskTx(tx, userID, id)
+	if err != nil {
+		return err
 	}
-	if err := query.Find(&tasks).Error; err != nil {
+	*task = *live
+	if task.Revision != expected {
+		return ErrRevision
+	}
+	status := "completed"
+	if reopen {
+		if task.Status != "completed" {
+			return ErrConflict
+		}
+		status, eventType = "in_progress", "task_reopened"
+	} else {
+		if strings.TrimSpace(summary) == "" || task.SuccessCriteria == "" || (eventType != "result" && eventType != "step") {
+			return ErrValidation
+		}
+		if task.Status == "completed" || task.Status == "cancelled" || task.Status == "superseded" {
+			return ErrConflict
+		}
+		eligible, err := taskExecutableTx(tx, userID, id)
+		if err != nil {
+			return err
+		}
+		if !eligible {
+			return ErrConflict
+		}
+	}
+	now := persistence.Now()
+	if result := tx.Model(&persistence.Task{}).Where("id = ? AND revision = ?", id, expected).Updates(map[string]any{"status": status, "revision": expected + 1, "updated_at": now}); result.Error != nil || result.RowsAffected != 1 {
+		if result.Error != nil {
+			return result.Error
+		}
+		return ErrRevision
+	}
+	event := persistence.ProgressEvent{ID: persistence.NewID("progress"), UserID: userID, GoalID: &task.GoalID, TaskID: &task.ID, Type: eventType, Summary: summary, EvidenceJSON: evidenceJSON, OccurredAt: now, CreatedAt: now}
+	if err := tx.Create(&event).Error; err != nil {
+		return err
+	}
+	if err := a.snapshotTaskTree(tx, userID, task.GoalID, eventType, "user"); err != nil {
+		return err
+	}
+	if !reopen {
+		subtree, err := subtreeTasksTx(tx, userID, *task)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(subtree))
+		for _, descendant := range subtree {
+			ids = append(ids, descendant.ID)
+		}
+		if err := releaseTodayItemsTx(tx, userID, ids, now); err != nil {
+			return err
+		}
+	}
+	if err := refreshLifecycleScheduleTx(tx, userID, now); err != nil {
+		return err
+	}
+	return createOutbox(tx, userID, "task.status_changed", map[string]any{"task_id": id, "status": status})
+}
+
+func (a *PlanService) CreateDailyPlan(ctx context.Context, userID, localDate, timezone string, taskIDs []string, available int) (*persistence.DailyPlan, []persistence.DailyPlanItem, error) {
+	if err := ParseDateInZone(localDate, timezone); err != nil {
 		return nil, nil, err
 	}
-	candidates := make([]domain.Candidate, 0, len(tasks))
-	byID := map[string]persistence.Task{}
-	for _, task := range tasks {
-		byID[task.ID] = task
-		candidates = append(candidates, domain.Candidate{ID: task.ID, Status: task.Status, Priority: task.Priority, Estimate: task.EstimateMinutes, MinimumAction: task.MinimumAction, GoalActive: true, DependencyDone: true})
-	}
-	selected := domain.SelectDailyCandidates(candidates, available)
-	now := persistence.Now()
-	plan := persistence.DailyPlan{ID: persistence.NewID("plan"), UserID: userID, LocalDate: localDate, Timezone: timezone, Status: "active", AlgorithmVersion: "deterministic-v1", CurrentRevision: 1, Revision: 1, CreatedAt: now, UpdatedAt: now}
-	items := make([]persistence.DailyPlanItem, 0, len(selected))
-	for position, candidate := range selected {
-		task := byID[candidate.ID]
-		id := task.ID
-		items = append(items, persistence.DailyPlanItem{ID: persistence.NewID("dpi"), UserID: userID, PlanID: plan.ID, PlanRevision: 1, TaskID: &id, Kind: "core", Title: task.Title, Commitment: "推进：" + task.SuccessCriteria, MinimumAction: task.MinimumAction, AllowedTypes: "result,step,time,minimum_action", TargetMinutes: 50, Status: "planned", Position: position + 1, Revision: 1, CreatedAt: now, UpdatedAt: now})
-	}
-	input, _ := json.Marshal(map[string]any{"task_ids": taskIDs, "available_minutes": available, "algorithm": plan.AlgorithmVersion})
-	planJSON, _ := json.Marshal(items)
-	revision := persistence.DailyPlanRevision{ID: persistence.NewID("planrev"), PlanID: plan.ID, Revision: 1, InputSnapshot: string(input), InputHash: persistence.Hash(string(input)), PlanSnapshot: string(planJSON), Reason: "initial generation", CreatedAt: now}
+	var plan persistence.DailyPlan
+	var items []persistence.DailyPlanItem
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		tasks, settings, err := eligiblePlanningTasksTx(tx, userID, taskIDs)
+		if err != nil {
+			return err
+		}
+		if len(taskIDs) > 0 && len(tasks) == 0 {
+			return ErrValidation
+		}
+		resolvedAvailable, err := resolvePlanningBudget(available, settings)
+		if err != nil {
+			return err
+		}
+		byID := map[string]persistence.Task{}
+		for _, task := range tasks {
+			byID[task.ID] = task
+		}
+		selected := domain.SelectDailyCandidates(candidatesForTasks(tasks), resolvedAvailable)
+		if slots := planningSlots(resolvedAvailable); len(selected) > slots {
+			selected = selected[:slots]
+		}
+		now := persistence.Now()
+		plan = persistence.DailyPlan{ID: persistence.NewID("plan"), UserID: userID, LocalDate: localDate, Timezone: timezone, Status: "active", AlgorithmVersion: "deterministic-v1", CurrentRevision: 1, Revision: 1, CreatedAt: now, UpdatedAt: now}
+		loc, _ := time.LoadLocation(timezone)
+		if localDate <= now.In(loc).Format("2006-01-02") && len(selected) > 0 {
+			plan.FrozenAt = &now
+		}
+		items = make([]persistence.DailyPlanItem, 0, len(selected))
+		for position, candidate := range selected {
+			items = append(items, newScheduledItem(userID, plan.ID, 1, position+1, resolvedAvailable, byID[candidate.ID], now))
+		}
+		input, _ := json.Marshal(map[string]any{"task_ids": taskIDs, "available_minutes": resolvedAvailable, "algorithm": plan.AlgorithmVersion})
+		planJSON, _ := json.Marshal(items)
+		revision := persistence.DailyPlanRevision{ID: persistence.NewID("planrev"), PlanID: plan.ID, Revision: 1, InputSnapshot: string(input), InputHash: persistence.Hash(string(input)), PlanSnapshot: string(planJSON), Reason: "initial generation", CreatedAt: now}
 		if err := tx.Create(&plan).Error; err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				return ErrConflict
@@ -580,39 +637,67 @@ func (a *PlanService) AddPlanItem(ctx context.Context, userID, planID string, ex
 		if plan.Revision != expectedPlan {
 			return ErrRevision
 		}
+		if plan.Status != "active" {
+			return ErrConflict
+		}
 		var existingTask int64
 		if item.Kind == "core" && item.TaskID == nil {
 			return ErrValidation
 		}
 		if item.TaskID != nil {
-			var task persistence.Task
-			if err := tx.Where("id = ? AND user_id = ?", *item.TaskID, userID).First(&task).Error; err != nil {
-				return notFound(err)
+			if _, err := RequireLiveTaskTx(tx, userID, *item.TaskID); err != nil {
+				return err
 			}
-			if err := tx.Model(&persistence.DailyPlanItem{}).Where("plan_id = ? AND task_id = ? AND status != 'superseded'", planID, *item.TaskID).Count(&existingTask).Error; err != nil {
+			if item.Kind == "core" {
+				eligible, _, err := eligiblePlanningTasksTx(tx, userID, []string{*item.TaskID})
+				if err != nil {
+					return err
+				}
+				if len(eligible) != 1 {
+					return ErrValidation
+				}
+			}
+			if err := tx.Model(&persistence.DailyPlanItem{}).Where("plan_id = ? AND plan_revision = ? AND task_id = ? AND status != 'superseded'", planID, plan.CurrentRevision, *item.TaskID).Count(&existingTask).Error; err != nil {
 				return err
 			}
 			if existingTask > 0 {
 				return ErrConflict
 			}
 		}
-		var core, unsatisfied int64
-		if err := tx.Model(&persistence.DailyPlanItem{}).Where("plan_id = ? AND kind = 'core' AND status != 'superseded'", planID).Count(&core).Error; err != nil {
+		item.Title = strings.TrimSpace(item.Title)
+		item.Commitment = strings.TrimSpace(item.Commitment)
+		item.MinimumAction = strings.TrimSpace(item.MinimumAction)
+		if item.Kind != "core" && item.Kind != "support" && item.Kind != "input" {
+			return ErrValidation
+		}
+		if item.Title == "" || item.Commitment == "" || item.MinimumAction == "" || item.TargetMinutes < 1 || item.TargetMinutes > 480 {
+			return ErrValidation
+		}
+		var core int64
+		if err := tx.Model(&persistence.DailyPlanItem{}).Where("plan_id = ? AND plan_revision = ? AND kind = 'core' AND status NOT IN ('superseded','skipped')", planID, plan.CurrentRevision).Count(&core).Error; err != nil {
 			return err
 		}
-		if item.Kind == "core" && core >= 3 {
-			return domain.ErrCoreLimit
-		}
-		if item.Kind != "core" {
-			if err := tx.Model(&persistence.DailyPlanItem{}).Where("plan_id = ? AND kind = 'core' AND status != 'satisfied' AND status != 'superseded'", planID).Count(&unsatisfied).Error; err != nil {
+		if item.Kind == "core" {
+			settings, err := planningSettingsTx(tx, userID)
+			if err != nil {
 				return err
 			}
-			if unsatisfied > 0 {
-				return domain.ErrSupportBeforeCoreDone
+			if core >= int64(planningSlots(settings.DailyBudgetMinutes)) {
+				return domain.ErrCoreLimit
 			}
 		}
 		now := persistence.Now()
 		item.ID, item.UserID, item.PlanID, item.PlanRevision = persistence.NewID("dpi"), userID, planID, plan.CurrentRevision
+		item.LogicalID = item.ID
+		if item.TaskID != nil {
+			logicalID, err := historicalLogicalItemIDTx(tx, userID, planID, *item.TaskID)
+			if err != nil {
+				return err
+			}
+			if logicalID != "" {
+				item.LogicalID = logicalID
+			}
+		}
 		item.Status, item.Revision, item.CreatedAt, item.UpdatedAt = "planned", 1, now, now
 		if item.AllowedTypes == "" {
 			item.AllowedTypes = "result,step,time,minimum_action"
@@ -620,7 +705,8 @@ func (a *PlanService) AddPlanItem(ctx context.Context, userID, planID string, ex
 		if err := tx.Create(item).Error; err != nil {
 			return err
 		}
-		result := tx.Model(&persistence.DailyPlan{}).Where("id = ? AND revision = ?", planID, expectedPlan).Updates(map[string]any{"revision": expectedPlan + 1, "updated_at": now})
+		freezePlanWithCore(&plan, now, item.Kind == "core")
+		result := tx.Model(&persistence.DailyPlan{}).Where("id = ? AND revision = ?", planID, expectedPlan).Updates(map[string]any{"revision": expectedPlan + 1, "updated_at": now, "frozen_at": plan.FrozenAt})
 		if result.Error != nil {
 			return result.Error
 		}
@@ -646,7 +732,16 @@ func (a *PlanService) satisfyItemTx(tx *gorm.DB, itemID string, expected int, co
 	return nil
 }
 
-func (a *ProgressService) CompletePlanItem(ctx context.Context, userID, itemID string, expected int, completionType, summary string, sessionIDs []string) (*persistence.DailyPlanItem, error) {
+func (a *ProgressService) CompletePlanItem(ctx context.Context, userID, itemID string, expected int, completionType, summary string, sessionIDs []string, planIDs ...string) (*persistence.DailyPlanItem, error) {
+	command := PlanItemCompletionCommand{ItemID: itemID, Expected: expected, Type: completionType, Summary: summary, WorkSessionIDs: sessionIDs}
+	if len(planIDs) > 0 {
+		command.PlanID = planIDs[0]
+	}
+	return a.CompletePlanItemWithTask(ctx, userID, command)
+}
+
+func (a *ProgressService) CompletePlanItemWithTask(ctx context.Context, userID string, command PlanItemCompletionCommand) (*persistence.DailyPlanItem, error) {
+	itemID, expected, completionType, summary, sessionIDs := command.ItemID, command.Expected, command.Type, command.Summary, command.WorkSessionIDs
 	var item persistence.DailyPlanItem
 	err := a.Store.WithTx(ctx, func(tx *gorm.DB) error {
 		if err := tx.Where("id = ? AND user_id = ?", itemID, userID).First(&item).Error; err != nil {
@@ -655,26 +750,72 @@ func (a *ProgressService) CompletePlanItem(ctx context.Context, userID, itemID s
 		if item.Revision != expected {
 			return ErrRevision
 		}
+		if command.PlanID != "" && item.PlanID != command.PlanID {
+			return ErrNotFound
+		}
+		if err := actionablePlanItem(tx, userID, item); err != nil {
+			return err
+		}
 		if item.Status == "satisfied" {
+			if command.CompleteTask {
+				return ErrConflict
+			}
 			return nil
+		}
+		if item.Status != "planned" && item.Status != "in_progress" {
+			return ErrConflict
+		}
+		if item.TaskID != nil {
+			eligible, err := taskExecutableTx(tx, userID, *item.TaskID)
+			if err != nil {
+				return err
+			}
+			if !eligible {
+				return ErrConflict
+			}
 		}
 		if !domain.ValidateCompletionType(completionType, item.AllowedTypes) {
 			return ErrValidation
 		}
 		if completionType == "time" {
-			var total int64
-			if len(sessionIDs) == 0 {
-				return ErrValidation
-			}
-			if err := tx.Model(&persistence.WorkSession{}).Where("id IN ? AND user_id = ? AND daily_plan_item_id = ? AND status IN ('completed','stopped')", sessionIDs, userID, itemID).Select("COALESCE(SUM(duration_seconds),0)").Scan(&total).Error; err != nil {
+			var total int
+			var err error
+			sessionIDs, total, err = completionSessions(tx, userID, item, sessionIDs)
+			if err != nil {
 				return err
 			}
-			if total < int64(item.TargetMinutes*60) {
+			if total < item.TargetMinutes*60 {
 				return ErrValidation
 			}
+		} else {
+			sessionIDs = nil
 		}
 		if strings.TrimSpace(summary) == "" {
 			return ErrValidation
+		}
+		var entireTask *persistence.Task
+		if command.CompleteTask {
+			if completionType != "result" || item.TaskID == nil {
+				return ErrValidation
+			}
+			var err error
+			entireTask, err = RequireLiveTaskTx(tx, userID, *item.TaskID)
+			if err != nil {
+				return err
+			}
+			if command.ExpectedTask <= 0 {
+				return ErrPrecondition
+			}
+			if entireTask.Revision != command.ExpectedTask {
+				return ErrRevision
+			}
+			eligible, err := completeTaskFromDailyEligibleTx(tx, userID, *entireTask)
+			if err != nil {
+				return err
+			}
+			if !eligible {
+				return ErrConflict
+			}
 		}
 		now := persistence.Now()
 		// §4.1: the plan-item status change is a PlanService domain function; this
@@ -683,11 +824,101 @@ func (a *ProgressService) CompletePlanItem(ctx context.Context, userID, itemID s
 		if err := a.Plans.satisfyItemTx(tx, itemID, expected, completionType, summary, now); err != nil {
 			return err
 		}
-		event := persistence.ProgressEvent{ID: persistence.NewID("progress"), UserID: userID, TaskID: item.TaskID, PlanItemID: &item.ID, Type: completionType, Summary: summary, EvidenceJSON: "[]", OccurredAt: now, CreatedAt: now}
+		evidence, _ := json.Marshal(planItemEvidence{LogicalID: logicalPlanItemID(item), WorkSessionIDs: sessionIDs})
+		event := persistence.ProgressEvent{ID: persistence.NewID("progress"), UserID: userID, TaskID: item.TaskID, PlanItemID: &item.ID, Type: completionType, Summary: strings.TrimSpace(summary), EvidenceJSON: string(evidence), OccurredAt: now, CreatedAt: now}
 		if err := tx.Create(&event).Error; err != nil {
 			return err
 		}
-		return createOutbox(tx, userID, "daily_item.satisfied", map[string]any{"item_id": item.ID})
+		if err := touchPlanTx(tx, item.PlanID, now); err != nil {
+			return err
+		}
+		if entireTask != nil {
+			association, _ := json.Marshal(map[string]string{"daily_plan_item_id": item.ID, "daily_completion_event_id": event.ID, "logical_id": logicalPlanItemID(item)})
+			goals := NewGoalService(a.Store)
+			if err := goals.completeTaskTx(tx, userID, entireTask.ID, command.ExpectedTask, "result", strings.TrimSpace(summary), false, string(association), entireTask); err != nil {
+				return err
+			}
+		}
+		if err := createOutbox(tx, userID, "daily_item.satisfied", map[string]any{"item_id": item.ID}); err != nil {
+			return err
+		}
+		// Joint completion can also refresh the plan snapshot. Capture all of
+		// this transaction's final item fields before another caller can undo it.
+		return tx.Where("id = ? AND user_id = ?", itemID, userID).First(&item).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (a *PlanService) UpdatePlanItem(ctx context.Context, userID, planID, itemID string, expected int, changes map[string]any) (*persistence.DailyPlanItem, error) {
+	var item persistence.DailyPlanItem
+	if value, exists := changes["status"]; exists {
+		status, ok := value.(string)
+		if !ok || status != "skipped" {
+			return nil, ErrValidation
+		}
+	}
+	updates := make(map[string]any, len(changes)+2)
+	for key, value := range changes {
+		switch key {
+		case "title", "commitment", "minimum_action", "target_minutes", "position", "status":
+			updates[key] = value
+		default:
+			return nil, ErrValidation
+		}
+	}
+	if _, exists := updates["target_minutes"]; exists {
+		var minutes int
+		if err := changeInt(updates, "target_minutes", &minutes); err != nil || minutes < 1 || minutes > 480 {
+			return nil, ErrValidation
+		}
+		updates["target_minutes"] = minutes
+	}
+	err := a.Store.WithTx(ctx, func(tx *gorm.DB) error {
+		if err := tx.Where("id = ? AND plan_id = ? AND user_id = ?", itemID, planID, userID).First(&item).Error; err != nil {
+			return notFound(err)
+		}
+		if item.Revision != expected {
+			return ErrRevision
+		}
+		if err := actionablePlanItem(tx, userID, item); err != nil {
+			return err
+		}
+		if item.Status == "satisfied" {
+			// Completion corrections must retain a reversal event.
+			return ErrConflict
+		}
+		// Validate only submitted fields; older snapshots can be corrected one field
+		// at a time, and skipping must not rewrite unrelated historical values.
+		for _, key := range []string{"title", "commitment", "minimum_action"} {
+			if _, exists := updates[key]; !exists {
+				continue
+			}
+			var text string
+			if err := changeText(updates, key, &text); err != nil || text == "" {
+				return ErrValidation
+			}
+			updates[key] = text
+		}
+		if _, exists := updates["position"]; exists {
+			var position int
+			if err := changeInt(updates, "position", &position); err != nil || position < 0 {
+				return ErrValidation
+			}
+			updates["position"] = position
+		}
+		now := persistence.Now()
+		updates["revision"], updates["updated_at"] = expected+1, now
+		result := tx.Model(&persistence.DailyPlanItem{}).Where("id = ? AND revision = ?", itemID, expected).Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrRevision
+		}
+		return touchPlanTx(tx, planID, now)
 	})
 	if err != nil {
 		return nil, err
@@ -697,31 +928,14 @@ func (a *ProgressService) CompletePlanItem(ctx context.Context, userID, itemID s
 	}
 	return &item, nil
 }
-
-func (a *PlanService) UpdatePlanItem(ctx context.Context, userID, planID, itemID string, expected int, changes map[string]any) (*persistence.DailyPlanItem, error) {
-	var item persistence.DailyPlanItem
-	if status, exists := changes["status"].(string); exists && status != "skipped" {
-		return nil, ErrValidation
-	}
-	changes["revision"], changes["updated_at"] = expected+1, persistence.Now()
-	result := a.Store.DB.WithContext(ctx).Model(&persistence.DailyPlanItem{}).Where("id = ? AND plan_id = ? AND user_id = ? AND revision = ?", itemID, planID, userID, expected).Updates(changes)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	if result.RowsAffected != 1 {
-		return nil, ErrRevision
-	}
-	if err := a.Store.DB.WithContext(ctx).First(&item, "id = ?", itemID).Error; err != nil {
-		return nil, err
-	}
-	return &item, nil
-}
-
 func (a *ProgressService) StartSession(ctx context.Context, userID string, session *persistence.WorkSession) error {
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		var task persistence.Task
-		if err := tx.Where("id = ? AND user_id = ?", session.TaskID, userID).First(&task).Error; err != nil {
-			return notFound(err)
+		executable, err := taskExecutableTx(tx, userID, session.TaskID)
+		if err != nil {
+			return err
+		}
+		if !executable {
+			return ErrConflict
 		}
 		if session.DailyPlanItemID != nil {
 			var item persistence.DailyPlanItem
@@ -731,18 +945,32 @@ func (a *ProgressService) StartSession(ctx context.Context, userID string, sessi
 			if item.TaskID == nil || *item.TaskID != session.TaskID {
 				return ErrValidation
 			}
+			if err := actionablePlanItem(tx, userID, item); err != nil {
+				return err
+			}
+			if item.Status != "planned" && item.Status != "in_progress" {
+				return ErrConflict
+			}
+			session.DailyPlanItemLogicalID = logicalPlanItemID(item)
 		}
 		now := persistence.Now()
 		if session.StartedAt.IsZero() {
 			session.StartedAt = now
 		}
+		if session.StartedAt.After(now.Add(5 * time.Second)) {
+			return ErrValidation
+		}
 		session.ID, session.UserID, session.Status, session.Revision = persistence.NewID("work"), userID, "running", 1
+		session.LastTransitionAt = &session.StartedAt
 		session.CreatedAt, session.UpdatedAt = now, now
 		if session.SessionType == "" {
 			session.SessionType = "pomodoro"
 		}
 		if session.TargetMinutes == 0 {
 			session.TargetMinutes = 25
+		}
+		if session.TargetMinutes < 1 || session.TargetMinutes > 480 {
+			return ErrValidation
 		}
 		return tx.Create(session).Error
 	})
@@ -767,7 +995,12 @@ func (a *ProgressService) TransitionSession(ctx context.Context, userID, id stri
 		if at.IsZero() {
 			at = persistence.Now()
 		}
-		changes := map[string]any{"revision": expected + 1, "updated_at": persistence.Now()}
+		if at.After(persistence.Now().Add(5*time.Second)) || at.Before(session.StartedAt) || (session.PausedAt != nil && at.Before(*session.PausedAt)) || (session.LastTransitionAt != nil && at.Before(*session.LastTransitionAt)) {
+			return ErrValidation
+		}
+		// updated_at is processing time; it cannot order historical backfills.
+		// Keep the last accepted business time even when resume clears paused_at.
+		changes := map[string]any{"revision": expected + 1, "updated_at": persistence.Now(), "last_transition_at": at}
 		switch action {
 		case "pause":
 			if session.Status != "running" {
@@ -809,6 +1042,9 @@ func (a *ProgressService) TransitionSession(ctx context.Context, userID, id stri
 		}
 		if result.RowsAffected != 1 {
 			return ErrRevision
+		}
+		if action == "invalidate" {
+			return a.invalidateSessionCompletionTx(tx, userID, session)
 		}
 		return nil
 	})
@@ -911,9 +1147,28 @@ func (a *DeviceService) DeviceByToken(ctx context.Context, token string) (*persi
 func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal *persistence.Proposal, patches []map[string]any, expectedTreeRevision ...int) (int, error) {
 	created := 0
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		var err error
+		created, err = a.applyProposalTx(tx, userID, proposal, patches, expectedTreeRevision...)
+		return err
+	})
+	return created, err
+}
+
+// applyProposalTx also serves new-goal approval so the goal, tree and approval
+// land in one transaction; no partially created research workspace can escape.
+func (a *GoalService) applyProposalTx(tx *gorm.DB, userID string, proposal *persistence.Proposal, patches []map[string]any, expectedTreeRevision ...int) (int, error) {
+	created := 0
+	err := func() error {
 		var current persistence.Proposal
 		if err := tx.Where("id = ? AND user_id = ? AND status = 'pending'", proposal.ID, userID).First(&current).Error; err != nil {
 			return notFound(err)
+		}
+		goal, err := RequireLiveGoalTx(tx, userID, current.GoalID)
+		if err != nil {
+			return err
+		}
+		if goal.Status != "active" {
+			return ErrConflict
 		}
 		var treeRevision int
 		if err := tx.Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", current.GoalID).Select("COALESCE(MAX(revision),0)").Scan(&treeRevision).Error; err != nil {
@@ -926,17 +1181,24 @@ func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal
 			return ErrRevision
 		}
 		now := persistence.Now()
-		var existing []persistence.Task
-		if err := tx.Where("goal_id = ? AND user_id = ?", current.GoalID, userID).Find(&existing).Error; err != nil {
-			return err
-		}
 		byID := map[string]persistence.Task{}
 		parents := map[string]string{}
-		for _, task := range existing {
-			byID[task.ID] = task
-			if task.ParentID != nil {
-				parents[task.ID] = *task.ParentID
+		loadLiveTree := func() error {
+			var live []persistence.Task
+			if err := tx.Where("goal_id = ? AND user_id = ? AND deleted_at IS NULL", current.GoalID, userID).Find(&live).Error; err != nil {
+				return err
 			}
+			byID, parents = map[string]persistence.Task{}, map[string]string{}
+			for _, task := range live {
+				byID[task.ID] = task
+				if task.ParentID != nil {
+					parents[task.ID] = *task.ParentID
+				}
+			}
+			return nil
+		}
+		if err := loadLiveTree(); err != nil {
+			return err
 		}
 		refs := map[string]string{}
 		for i, patch := range patches {
@@ -947,10 +1209,10 @@ func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal
 			switch op {
 			case "create":
 				task := persistence.Task{ID: persistence.NewID("task"), UserID: userID, GoalID: current.GoalID, Type: textValue(patch["type"]), Title: textValue(patch["title"]), Description: textValue(patch["description"]), SuccessCriteria: textValue(patch["success_criteria"]), MinimumAction: textValue(patch["minimum_action"]), Priority: intValue(patch["priority"]), EstimateMinutes: intValue(patch["estimate_minutes"]), Position: i, Status: "ready", Revision: 1, CreatedAt: now, UpdatedAt: now}
-				if task.Type == "" || task.Title == "" || task.SuccessCriteria == "" || task.MinimumAction == "" {
+				if (task.Type != "milestone" && task.Type != "task" && task.Type != "action") || task.Title == "" || task.SuccessCriteria == "" || task.MinimumAction == "" {
 					return ErrValidation
 				}
-				if task.Priority == 0 {
+				if priority, specified := patch["priority"]; !specified || priority == nil {
 					task.Priority = 50
 				}
 				if task.EstimateMinutes == 0 {
@@ -959,16 +1221,40 @@ func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal
 				if task.Priority < 0 || task.Priority > 100 || task.EstimateMinutes < 1 || task.EstimateMinutes > 1440 || task.Position < 0 {
 					return ErrValidation
 				}
+				if err := validateTaskFields(&task); err != nil {
+					return err
+				}
 				parent := textValue(patch["parent_id"])
 				if parent == "" {
-					parent = refs[textValue(patch["parent_ref"])]
+					if ref := textValue(patch["parent_ref"]); ref != "" {
+						var found bool
+						parent, found = refs[ref]
+						if !found {
+							return ErrValidation
+						}
+					}
 				}
 				if parent != "" {
 					if _, ok := byID[parent]; !ok {
 						return ErrValidation
 					}
+					parentTask, err := RequireLiveTaskTx(tx, userID, parent)
+					if err != nil {
+						return err
+					}
+					if parentTask.Status == "completed" || parentTask.Status == "cancelled" || parentTask.Status == "superseded" {
+						return ErrValidation
+					}
 					task.ParentID = &parent
 					parents[task.ID] = parent
+				}
+				dependencies, _, err := taskDependenciesFromPatch(patch, refs)
+				if err != nil {
+					return err
+				}
+				task.DependsOn = dependencies
+				if err := validateTaskDependenciesTx(tx, task); err != nil {
+					return err
 				}
 				if err := tx.Create(&task).Error; err != nil {
 					return err
@@ -983,18 +1269,42 @@ func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal
 					refs[ref] = task.ID
 				}
 				created++
+			case "delete", "restore":
+				targetID := textValue(patch["target_id"])
+				var task persistence.Task
+				if err := tx.Where("id = ? AND user_id = ? AND goal_id = ?", targetID, userID, current.GoalID).First(&task).Error; err != nil {
+					return notFound(err)
+				}
+				if op == "delete" {
+					if _, err := a.deleteTaskTx(tx, userID, targetID, task.Revision); err != nil {
+						return err
+					}
+				} else {
+					_, err := a.restoreTaskTx(tx, userID, targetID, task.Revision)
+					if err != nil {
+						return err
+					}
+				}
+				// Lifecycle operations affect a whole deletion batch. Later ordered
+				// operations must see every restored/removed descendant and parent.
+				if err := loadLiveTree(); err != nil {
+					return err
+				}
 			case "update", "move", "supersede":
 				targetID := textValue(patch["target_id"])
 				task, ok := byID[targetID]
 				if !ok {
 					return ErrValidation
 				}
+				if _, err := RequireLiveTaskTx(tx, userID, targetID); err != nil {
+					return err
+				}
 				updates := map[string]any{"revision": task.Revision + 1, "updated_at": now}
 				if op == "supersede" {
 					updates["status"] = "superseded"
 				} else {
-					for _, field := range []string{"title", "description", "success_criteria", "minimum_action"} {
-						if value := textValue(patch[field]); value != "" {
+					for _, field := range []string{"type", "title", "description", "success_criteria", "minimum_action", "blocked_reason"} {
+						if value, exists := patch[field]; exists {
 							updates[field] = value
 						}
 					}
@@ -1006,7 +1316,10 @@ func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal
 					}
 					for _, field := range []string{"priority", "estimate_minutes", "position"} {
 						if _, exists := patch[field]; exists {
-							value := intValue(patch[field])
+							value := 0
+							if err := changeInt(patch, field, &value); err != nil {
+								return err
+							}
 							if field == "priority" && (value < 0 || value > 100) {
 								return ErrValidation
 							}
@@ -1019,14 +1332,28 @@ func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal
 							updates[field] = value
 						}
 					}
-					if op == "move" || patch["parent_id"] != nil || patch["parent_ref"] != nil {
+					_, hasParent := patch["parent_id"]
+					_, hasParentRef := patch["parent_ref"]
+					if op == "move" && !hasParent && !hasParentRef {
+						return ErrValidation
+					}
+					if op == "move" || hasParent || hasParentRef {
 						parent := textValue(patch["parent_id"])
 						if parent == "" {
-							parent = refs[textValue(patch["parent_ref"])]
+							if ref := textValue(patch["parent_ref"]); ref != "" {
+								var found bool
+								parent, found = refs[ref]
+								if !found {
+									return ErrValidation
+								}
+							}
 						}
 						if parent != "" {
 							if _, ok := byID[parent]; !ok || domain.WouldCreateCycle(targetID, parent, parents) {
 								return ErrValidation
+							}
+							if _, err := RequireLiveTaskTx(tx, userID, parent); err != nil {
+								return err
 							}
 							updates["parent_id"] = parent
 							parents[targetID] = parent
@@ -1035,14 +1362,19 @@ func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal
 							delete(parents, targetID)
 						}
 					}
+					if dependencies, changed, err := taskDependenciesFromPatch(patch, refs); err != nil {
+						return err
+					} else if changed {
+						updates["depends_on"] = dependencies
+					}
 				}
-				result := tx.Model(&persistence.Task{}).Where("id = ? AND user_id = ? AND revision = ?", targetID, userID, task.Revision).Updates(updates)
-				if result.Error != nil {
-					return result.Error
+				delete(updates, "revision")
+				delete(updates, "updated_at")
+				updated, err := a.updateTaskTx(tx, userID, targetID, task.Revision, updates, true)
+				if err != nil {
+					return err
 				}
-				if result.RowsAffected != 1 {
-					return ErrRevision
-				}
+				byID[targetID] = *updated
 				if op == "update" {
 					if coord, ok := coordFromPatch(patch); ok {
 						if err := updateAgentCoord(tx, userID, targetID, coord, now); err != nil {
@@ -1057,6 +1389,9 @@ func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal
 		if err := a.snapshotTaskTree(tx, userID, current.GoalID, "agent proposal applied", "agent"); err != nil {
 			return err
 		}
+		if err := refreshLifecycleScheduleTx(tx, userID, now); err != nil {
+			return err
+		}
 		result := tx.Model(&persistence.Proposal{}).Where("id = ? AND revision = ? AND status = 'pending'", current.ID, current.Revision).Updates(map[string]any{"status": "applied", "revision": current.Revision + 1, "updated_at": now})
 		if result.Error != nil {
 			return result.Error
@@ -1065,7 +1400,7 @@ func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal
 			return ErrRevision
 		}
 		return createOutbox(tx, userID, "task_tree.proposal_applied", map[string]any{"proposal_id": current.ID, "goal_id": current.GoalID})
-	})
+	}()
 	return created, err
 }
 
@@ -1111,13 +1446,20 @@ func (a *GoalService) snapshotTaskTree(tx *gorm.DB, userID, goalID, reason, sour
 }
 
 func (a *GoalService) createTaskTx(tx *gorm.DB, userID string, task *persistence.Task, reason, source string) error {
-	var goal persistence.Goal
-	if err := tx.Where("id = ? AND user_id = ?", task.GoalID, userID).First(&goal).Error; err != nil {
-		return notFound(err)
+	return a.createTaskWithPriorityTx(tx, userID, task, reason, source, false)
+}
+
+func (a *GoalService) createTaskWithPriorityTx(tx *gorm.DB, userID string, task *persistence.Task, reason, source string, explicitPriority bool) error {
+	goal, err := RequireLiveGoalTx(tx, userID, task.GoalID)
+	if err != nil {
+		return err
+	}
+	if goal.Status != "active" && goal.Status != "paused" {
+		return ErrConflict
 	}
 	if task.ParentID != nil {
-		var parent persistence.Task
-		if err := tx.Where("id = ? AND goal_id = ? AND user_id = ?", *task.ParentID, task.GoalID, userID).First(&parent).Error; err != nil {
+		parent, err := RequireLiveTaskTx(tx, userID, *task.ParentID)
+		if err != nil || parent.GoalID != task.GoalID || parent.Status == "completed" || parent.Status == "cancelled" || parent.Status == "superseded" {
 			return ErrValidation
 		}
 	}
@@ -1128,21 +1470,25 @@ func (a *GoalService) createTaskTx(tx *gorm.DB, userID string, task *persistence
 	if task.Type == "" {
 		task.Type = "task"
 	}
-	if task.Type != "milestone" && task.Type != "task" && task.Type != "action" || task.Title == "" || task.SuccessCriteria == "" || task.MinimumAction == "" || task.Priority < 0 || task.Priority > 100 || task.Position < 0 {
-		return ErrValidation
-	}
-	if task.Priority == 0 {
+	if task.Priority == 0 && !explicitPriority {
 		task.Priority = 50
 	}
 	if task.EstimateMinutes == 0 {
 		task.EstimateMinutes = 25
 	}
-	if task.EstimateMinutes < 1 || task.EstimateMinutes > 1440 {
-		return ErrValidation
+	if err := validateTaskFields(task); err != nil {
+		return err
 	}
 	now := persistence.Now()
 	task.ID, task.UserID, task.Status, task.Revision = persistence.NewID("task"), userID, "ready", 1
+	task.DeletedAt, task.DeletionID = nil, ""
 	task.CreatedAt, task.UpdatedAt = now, now
+	if task.DependsOn == nil {
+		task.DependsOn = []string{}
+	}
+	if err := validateTaskDependenciesTx(tx, *task); err != nil {
+		return err
+	}
 	if err := tx.Create(task).Error; err != nil {
 		return err
 	}

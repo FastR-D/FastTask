@@ -1,4 +1,7 @@
 import type { User } from './types'
+import { clearComposerDrafts } from './agent/draft-storage'
+import { assertAccessOwner, SESSION_OWNER_CHANGED } from './session-owner'
+export { assertAccessOwner } from './session-owner'
 
 const API = '/api/v1'
 const REFRESH_KEY = 'fasttask_refresh'
@@ -44,7 +47,9 @@ export function offlineSessionAvailable(): boolean {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message) }
+  // Only a refusal before this operation's first business fetch may prove
+  // requestSent=false. Network failures and rejected replays remain unknown.
+  constructor(public status: number, message: string, public readonly requestSent?: false) { super(message) }
 }
 
 // decodeExpiry reads the JWT `exp` claim (seconds) without verifying the
@@ -115,17 +120,26 @@ export function onSessionEnded(listener: () => void): () => void {
   sessionEndedListeners.add(listener)
   return () => { sessionEndedListeners.delete(listener) }
 }
-function notifySessionEnded() { sessionEndedListeners.forEach(listener => listener()) }
+function notifySessionEnded() {
+  clearComposerDrafts()
+  sessionEndedListeners.forEach(listener => listener())
+}
 
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', event => {
     // Another tab logged out or had its refresh rejected. This tab's in-memory access
     // token belongs to the same session family, so it is dropped too.
-    if (event.key === REFRESH_KEY && event.newValue === null && accessToken) {
+    if (event.key === REFRESH_KEY && event.newValue === null) {
       accessToken = null
       accessExpiry = 0
       lastRefreshResult = null
       notifySessionEnded()
+    } else if (event.key === REFRESH_KEY && event.newValue !== event.oldValue) {
+      // Rotation makes the old access session inactive on the server. Keep
+      // private drafts, but restore credentials before the next raw SDK send.
+      accessToken = null
+      accessExpiry = 0
+      lastRefreshResult = null
     }
   })
 }
@@ -157,12 +171,18 @@ async function refreshAccessLocked(): Promise<RefreshResult> {
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idem() },
       body: JSON.stringify({ refresh_token: refreshToken }),
     })
+    // Even a rejected response belongs to the token we presented, not a newer
+    // account installed by another tab while this request was pending.
+    if (readRefresh() !== refreshToken) return 'unavailable'
     if (refreshed.status === 401 || refreshed.status === 403) {
       await clearSession()
       return 'rejected'
     }
     if (!refreshed.ok) return 'unavailable'
     const credentials = await refreshed.json()
+    // A different tab/account may have replaced this session while the network
+    // request was in flight. Its credentials must not be overwritten by ours.
+    if (readRefresh() !== refreshToken) return 'unavailable'
     storeAccess(credentials.access_token)
     writeRefresh(credentials.refresh_token)
     rememberUser(credentials.user)
@@ -189,18 +209,34 @@ export async function ensureFreshAccessToken(): Promise<string | null> {
   return null
 }
 
-async function execute<T>(path: string, init: RequestInit, retry: boolean): Promise<{ data: T; etag: string | null }> {
+// Raw agent transports cannot use execute()'s retry. Recover credentials only;
+// the caller decides whether its original operation may safely be sent again.
+export async function refreshAccessTokenAfterUnauthorized(rejectedAccess?: string): Promise<string | null> {
+  if (accessToken && accessToken !== rejectedAccess && Date.now() < accessExpiry - EXPIRY_SKEW_MS) return accessToken
+  if (await singleFlightRefresh() === 'refreshed') return accessToken
+  return null
+}
+
+async function execute<T>(path: string, init: RequestInit, retry: boolean, expectedUserId?: string, businessRequestSent = false): Promise<{ data: T; etag: string | null }> {
   const headers = new Headers(init.headers)
   if (!(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
-  const access = token.get()
+  const access = expectedUserId === undefined ? token.get() : await ensureFreshAccessToken()
+  if (expectedUserId !== undefined) {
+    if (!access) {
+      const snapshot = await ownerOfflineSnapshot<T>(path, init, expectedUserId, businessRequestSent ? undefined : false)
+      if (snapshot) return snapshot
+    }
+    assertAccessOwner(access, expectedUserId)
+  }
   if (access) headers.set('Authorization', `Bearer ${access}`)
   let response: Response
   try {
+    businessRequestSent = true
     response = await fetch(`${API}${path}`, { ...init, headers })
   } catch (error) {
     if (offlineSessionAvailable()) {
       if (!init.method || init.method === 'GET') {
-        const snapshot = await readOfflineSnapshot<T>(path)
+        const snapshot = await readOfflineSnapshot<T>(path, expectedUserId)
         if (snapshot) return snapshot
       }
       throw new ApiError(0, '需要联网')
@@ -208,7 +244,16 @@ async function execute<T>(path: string, init: RequestInit, retry: boolean): Prom
     throw error
   }
   if (response.status === 401 && retry && path !== '/auth/login' && path !== '/auth/refresh') {
-    if (await singleFlightRefresh() === 'refreshed') return execute<T>(path, init, false)
+    if (expectedUserId !== undefined) {
+      const renewed = await refreshAccessTokenAfterUnauthorized(access ?? undefined)
+      if (!renewed) {
+        const snapshot = await ownerOfflineSnapshot<T>(path, init, expectedUserId)
+        if (snapshot) return snapshot
+      }
+      assertAccessOwner(renewed, expectedUserId)
+      return execute<T>(path, init, false, expectedUserId, businessRequestSent)
+    }
+    if (await singleFlightRefresh() === 'refreshed') return execute<T>(path, init, false, undefined, businessRequestSent)
   }
   if (!response.ok) {
     const problem = await response.json().catch(() => ({ detail: response.statusText }))
@@ -218,10 +263,20 @@ async function execute<T>(path: string, init: RequestInit, retry: boolean): Prom
   return { data: data as T, etag: response.headers.get('ETag') }
 }
 
-async function readOfflineSnapshot<T>(path: string): Promise<{ data: T; etag: string | null } | null> {
+async function ownerOfflineSnapshot<T>(path:string,init:RequestInit,expectedUserId:string,requestSent?:false){
+  if (!offlineSessionAvailable()) return null
+  if (readOfflineUser()?.id !== expectedUserId) throw new Error(SESSION_OWNER_CHANGED)
+  if (!init.method || init.method === 'GET') {
+    const snapshot = await readOfflineSnapshot<T>(path, expectedUserId)
+    if (snapshot) return snapshot
+  }
+  throw new ApiError(0, '需要联网', requestSent)
+}
+
+async function readOfflineSnapshot<T>(path: string, expectedUserId?:string): Promise<{ data: T; etag: string | null } | null> {
   if (!/^\/(daily-plans\/current|goals(?:\/[^/]+\/task-tree)?)$/.test(path)) return null
   const user = readOfflineUser()
-  if (!user || typeof caches === 'undefined') return null
+  if (!user || expectedUserId !== undefined && user.id !== expectedUserId || typeof caches === 'undefined') return null
   try {
     const key = new URL(`${API}${path}`, location.origin)
     key.searchParams.set('_u', user.id)
@@ -231,7 +286,7 @@ async function readOfflineSnapshot<T>(path: string): Promise<{ data: T; etag: st
   return null
 }
 
-export function request<T>(path: string, init: RequestInit = {}) { return execute<T>(path, init, true) }
+export function request<T>(path: string, init: RequestInit = {}, expectedUserId?: string) { return execute<T>(path, init, true, expectedUserId) }
 
 export function idem() { return crypto.randomUUID() }
 

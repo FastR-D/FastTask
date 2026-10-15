@@ -1,15 +1,20 @@
 export interface User { id: string; identifier: string; display_name: string; timezone: string; locale: string; role: string; status: string; revision: number; created_at: string }
-export interface Goal { id: string; title: string; description: string; success_criteria: string; status: string; target_date?: string; revision: number }
-export interface Task { id: string; goal_id: string; parent_id?: string; type: string; title: string; description: string; status: string; blocked_reason?: string; priority: number; estimate_minutes: number; success_criteria: string; minimum_action: string; revision: number }
+export interface Goal { id: string; title: string; description: string; success_criteria: string; status: string; target_date?: string; revision: number; deleted_at?: string }
+export interface Task { id: string; goal_id: string; parent_id?: string | null; depends_on?: string[]; type: string; title: string; description: string; status: string; blocked_reason?: string; priority: number; estimate_minutes: number; position?: number; success_criteria: string; minimum_action: string; revision: number; deleted_at?: string }
 export interface Plan { id: string; local_date: string; timezone: string; status: string; revision: number; current_revision: number }
-export interface PlanItem { id: string; daily_plan_id: string; task_id?: string; kind: string; title: string; commitment: string; minimum_action: string; status: string; target_minutes: number; revision: number }
+export type CompletionType = 'minimum_action' | 'step' | 'result' | 'time'
+export interface PlanItem { id: string; daily_plan_id: string; logical_id?: string; task_id?: string; kind: string; title: string; commitment: string; minimum_action: string; status: string; target_minutes: number; position?:number; revision: number; allowed_types?: string; completion_type?: CompletionType; completion_summary?: string; item_etag?: string; task_etag?: string; can_complete_task?: boolean; task_success_criteria?: string; workspace?: { system: string; label: string; url?: string } }
+export interface PlanningSettings { primary_goal_id: string | null; configured_primary_goal_id?:string|null; primary_goal_mode?:'automatic'|'fixed'; daily_budget_minutes: number; revision: number }
+export interface PlanAvailability { status: 'ready' | 'no_tasks' | 'waiting_dependencies' | 'no_ready_tasks' | 'withdrawn' | 'frozen' | 'closed'; reason: string; ready_count: number; waiting_count: number; can_replan: boolean }
+export interface ScheduledDay { plan: Plan; items: PlanItem[]; today_items?: PlanItem[]; availability?: PlanAvailability }
 export interface Job { id: string; type: string; status: string; retry_of_job_id?: string; subject_type?: string; subject_id?: string; output_json?: string; error_code?: string; error_message?: string; base_revision: number; attempt_count: number; max_attempts: number; cancel_requested: boolean; run_after: string; created_at: string; updated_at: string; started_at?: string; finished_at?: string; revision: number }
 export interface Device { id: string; name: string; kind: string; status: string; timezone: string; revision: number }
-export interface WorkSession { id: string; task_id: string; daily_plan_item_id?: string; status: string; target_minutes: number; duration_seconds: number; started_at: string; revision: number }
+export interface WorkSession { id: string; task_id: string; daily_plan_item_id?: string; daily_plan_item_logical_id?: string; status: string; target_minutes: number; duration_seconds: number; started_at: string; revision: number; paused_at?: string; paused_seconds?: number; ended_at?: string; note?: string }
 export interface Conversation { id: string; title: string; status: string; revision: number }
 export interface Message { id: string; role: string; content: string; created_at: string }
 export interface Proposal { id: string; goal_id: string; job_id: string; status: string; instruction: string; patch_json: string; base_revision: number; revision: number }
-export interface TaskTree { goal_id: string; revision: number; nodes: unknown[]; proposals: Proposal[] }
+export interface TaskTreeNode { task: Task; children: TaskTreeNode[] }
+export interface TaskTree { goal_id: string; revision: number; nodes: TaskTreeNode[]; proposals: Proposal[] }
 export interface SessionView { id: string; family_id: string; user_id: string; status: string; expires_at: string; created_at: string; updated_at: string }
 export interface ModelProvider { id: string; name: string; provider_type: string; base_url: string; model_name: string; transcription_model: string; api_key_hint: string; status: string; is_default: boolean; revision: number; created_at: string; updated_at: string }
 export interface AuditView { id: string; actor_user_id: string; target_user_id?: string; action: string; detail_json: string; created_at: string; actor_identifier: string; actor_display_name: string; target_identifier?: string; target_display_name?: string }

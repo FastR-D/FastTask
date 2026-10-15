@@ -77,3 +77,5 @@ export type ApprovalDecision = { decision: 'approve' } | { decision: 'reject'; r
 // Proposal tool names the server registers (phases D/E).
 export const TOOL_TASK_TREE_PATCH = 'propose_task_tree_patch'
 export const TOOL_DAILY_PLAN = 'propose_daily_plan'
+export const TOOL_GOAL_WITH_TASKS = 'propose_goal_with_tasks'
+export const TOOL_GOAL_UPDATE = 'propose_goal_update'

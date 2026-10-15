@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/FastR-D/FastTask/internal/persistence"
+	"gorm.io/gorm"
 )
 
 // The thread catalogue (doc/chat-features.md §2).
@@ -60,6 +61,31 @@ func viewOfThread(thread persistence.AgentThread) ThreadView {
 	}
 }
 
+// Untitled conversations use the first user text as a read-only display name.
+// This also covers old conversations and failed runs, without rewriting saved
+// names, changing recency, or asking a model to generate metadata.
+func (s *threadCatalogue) viewsWithThreadTitles(ctx context.Context, userID string, threads []persistence.AgentThread) ([]ThreadView, error) {
+	untitled := make([]string, 0, len(threads))
+	for _, thread := range threads {
+		if strings.TrimSpace(thread.Title) == "" {
+			untitled = append(untitled, thread.ID)
+		}
+	}
+	texts, err := s.repo().FirstThreadMessageTexts(ctx, userID, untitled)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]ThreadView, 0, len(threads))
+	for _, thread := range threads {
+		view := viewOfThread(thread)
+		if strings.TrimSpace(view.Title) == "" {
+			view.Title = deterministicTitle(texts[thread.ID])
+		}
+		views = append(views, view)
+	}
+	return views, nil
+}
+
 // ListAgentThreads returns a page of threads, newest activity first (§2.2).
 func (s *threadCatalogue) ListAgentThreads(ctx context.Context, userID, status, cursor string, limit int) (ThreadPage, error) {
 	if limit <= 0 || limit > 100 {
@@ -83,8 +109,9 @@ func (s *threadCatalogue) ListAgentThreads(ctx context.Context, userID, status, 
 		page.HasMore = true
 		threads = threads[:limit]
 	}
-	for _, thread := range threads {
-		page.Items = append(page.Items, viewOfThread(thread))
+	page.Items, err = s.viewsWithThreadTitles(ctx, userID, threads)
+	if err != nil {
+		return ThreadPage{}, err
 	}
 	if page.HasMore && len(threads) > 0 {
 		last := threads[len(threads)-1]
@@ -124,7 +151,22 @@ func decodeThreadCursor(cursor string) (time.Time, string, error) {
 // CreateAgentThread starts an empty thread (§2.2). assistant-ui calls this through its thread list
 // adapter's initialize(), so the id returned here becomes the client's remoteId.
 func (s *threadCatalogue) CreateAgentThread(ctx context.Context, userID string, goalID *string, title string) (ThreadView, error) {
-	thread, err := s.repo().CreateThread(ctx, userID, goalID, title)
+	var thread *persistence.AgentThread
+	err := s.svc.store.Transaction(ctx, func(tx *gorm.DB) error {
+		var binding *string
+		if goalID != nil {
+			// A saved conversation may outlive a goal, but a new binding must
+			// name this user's non-deleted goal. Paused goals remain discussable.
+			goal, err := RequireLiveGoalTx(tx, userID, strings.TrimSpace(*goalID))
+			if err != nil {
+				return err
+			}
+			binding = &goal.ID
+		}
+		var err error
+		thread, err = s.repo().WithTx(tx).CreateThread(ctx, userID, binding, title)
+		return err
+	})
 	if err != nil {
 		return ThreadView{}, err
 	}
@@ -137,7 +179,11 @@ func (s *threadCatalogue) GetAgentThread(ctx context.Context, userID, threadID s
 	if err != nil {
 		return ThreadView{}, err
 	}
-	return viewOfThread(*thread), nil
+	views, err := s.viewsWithThreadTitles(ctx, userID, []persistence.AgentThread{*thread})
+	if err != nil {
+		return ThreadView{}, err
+	}
+	return views[0], nil
 }
 
 // UpdateAgentThread renames a thread or replaces its client-owned display data (§2.2). Both pointers are

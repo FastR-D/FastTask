@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from 'node:zlib'
-import { defineConfig, type Plugin } from 'vitest/config'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
@@ -68,8 +68,8 @@ export default defineConfig({
         orientation: 'portrait',
         // §3.1: a single theme_color (the light value); the dark value stays in
         // index.html's prefers-color-scheme media-query meta.
-        theme_color: '#fef7ff',
-        background_color: '#fef7ff',
+        theme_color: '#f7f8fa',
+        background_color: '#f7f8fa',
         icons: [
           { src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
           { src: '/pwa-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
@@ -89,10 +89,7 @@ export default defineConfig({
       },
     }),
   ],
+  // Keep this workspace independent of CSS processors configured by a parent checkout.
+  css: { postcss: { plugins: [] } },
   server: { proxy: { '/api': 'http://127.0.0.1:10000', '/health': 'http://127.0.0.1:10000' } },
-  test: {
-    environment: 'jsdom',
-    environmentOptions: { jsdom: { url: 'http://localhost/' } },
-    setupFiles: './src/test-setup.ts',
-  },
 })

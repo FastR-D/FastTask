@@ -1,27 +1,30 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, completeFastCAS, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, onSessionEnded, readOfflineUser, rememberUser, request, token } from './api'
 import { FastCASAccount } from './FastCASAccount'
-import type { Device, Goal, Job, Plan, PlanItem, Proposal, Task, TaskTree, User, WorkSession } from './types'
+import type { Device, Goal, Job, User } from './types'
+import type { GoalChatRequest } from './agent'
 import { fieldValue, useMduiEvent } from './mdui-react'
 import { Admin } from './Admin'
-import { GoalMapView, Review } from './Lens'
+import { Review } from './Lens'
 import { PwaUpdate } from './PwaUpdate'
-import { AgentChat } from './agent'
-import { localDateInTimezone } from './date'
-import { waitJob } from './jobs'
+import { ResearchWorkspace } from './ResearchWorkspace'
+import { GoalManager } from './GoalManager'
+import { Integrations } from './Integrations'
+import { timezoneOrDefault } from './date'
+import { assertAccessOwner } from './session-owner'
+export { Today, focusEvidence } from './Today'
 
-type Tab = 'today' | 'goals' | 'dialogue' | 'jobs' | 'review' | 'devices' | 'admin' | 'account'
+type Tab = 'today' | 'goals' | 'jobs' | 'review' | 'devices' | 'admin' | 'account' | 'integrations'
 
 const NAV_ICONS: Record<Tab, string> = {
-  today: 'today', goals: 'account_tree', dialogue: 'forum', jobs: 'pending',
+  today: 'today', goals: 'account_tree', jobs: 'pending',
   review: 'fact_check', devices: 'devices', admin: 'admin_panel_settings', account: 'verified_user',
+  integrations: 'hub',
 }
-const BAR_TABS: Tab[] = ['today', 'goals', 'dialogue', 'jobs', 'review']
+const BAR_TABS: Tab[] = ['today', 'goals', 'review', 'jobs']
 
 // The API speaks English enums; the interface speaks Chinese. One map each, so a status is
 // never shown raw (`ACTIVE · TREE REV 10`) and never translated in three different places.
-const GOAL_STATUS: Record<string,string> = { active: '进行中', paused: '已暂停', completed: '已完成', archived: '已归档' }
-const TASK_STATUS: Record<string,string> = { ready: '待开始', in_progress: '进行中', blocked: '受阻', paused: '已暂停', completed: '已完成' }
 const DEVICE_STATUS: Record<string,string> = { active: '在用', disabled: '已停用', revoked: '已撤销' }
 
 export function App() {
@@ -57,7 +60,7 @@ export function App() {
   return (
     <>
       {authenticated
-        ? <Workspace onLogout={handleLogout} />
+        ? <Workspace onLogout={handleLogout} requireFreshProfile={callbackPending} />
         : <Login onLogin={() => setAuthenticated(true)} initialError={authError} />}
       <PwaUpdate />
     </>
@@ -115,22 +118,56 @@ function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialErr
   </main>
 }
 
-function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
+function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => void | Promise<void>;requireFreshProfile?:boolean }) {
   const [tab, setTab] = useState<Tab>('today')
-  const [user, setUser] = useState<User | null>(readOfflineUser)
+  const [user, setUser] = useState<User | null>(()=>requireFreshProfile?null:readOfflineUser())
+  const [profileError,setProfileError]=useState('')
+  const [profileAttempt,setProfileAttempt]=useState(0)
+  const timezone=user?timezoneOrDefault(user.timezone??''):undefined
   const [notice, setNotice] = useState('')
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [businessRevision, setBusinessRevision] = useState(0)
+  const [chatRequest, setChatRequest] = useState(0)
+  const chatSequence=useRef(0)
+  const [goalChatRequest,setGoalChatRequest]=useState<GoalChatRequest>()
+  const [toolTaskID, setToolTaskID] = useState('')
+  const businessChanged = useCallback(() => setBusinessRevision(value => value + 1), [])
+  const openChat = useCallback((goal?:Goal) => {
+    const request=++chatSequence.current
+    setGoalChatRequest(goal?{goalId:goal.id,title:goal.title,ownerId:user?.id,request}:undefined)
+    setTab('today');setChatRequest(request)
+  }, [user?.id])
+  const openTools = useCallback((taskID: string) => { setToolTaskID(taskID); setTab('integrations') }, [])
   const drawerRef = useRef<HTMLElement>(null)
   const snackbarRef = useRef<HTMLElement>(null)
-  useEffect(() => { request<User>('/me').then(r => { setUser(r.data); rememberUser(r.data) }).catch(e => { if (e instanceof ApiError && e.status === 401 && !offlineSessionAvailable()) onLogout() }) }, [onLogout])
+  useEffect(() => {
+    let alive=true
+    setProfileError('')
+    request<User>('/me').then(({data})=>{
+      if(!data?.id)throw new Error('未能确认当前账号，请重试。')
+      // The response may have started under a session that another tab has
+      // replaced. Never overwrite the new account's retained profile with it.
+      assertAccessOwner(token.get(),data.id)
+      if(alive){setUser(data);rememberUser(data)}
+    }).catch(error=>{
+      if(!alive)return
+      setProfileError(error instanceof Error?error.message:'暂时无法确认当前账号')
+      if(error instanceof ApiError&&error.status===401&&!offlineSessionAvailable())void onLogout()
+    })
+    return()=>{alive=false}
+  },[onLogout,profileAttempt])
   useMduiEvent(drawerRef, 'close', () => setDrawerOpen(false))
   useMduiEvent(snackbarRef, 'close', () => setNotice(''))
   const items = navItems(user)
   const currentLabel = items.find(([id]) => id === tab)?.[1] ?? ''
+  if(!user)return <main className="page"><h1>正在打开工作台</h1>
+    <p role={profileError?'alert':'status'}>{profileError?`暂时无法确认当前账号：${profileError}`:'正在确认当前账号…'}</p>
+    <div className="actions">{profileError&&<mdui-button variant="outlined" onClick={()=>setProfileAttempt(value=>value+1)}>重试确认账号</mdui-button>}<mdui-button variant="text" onClick={onLogout}>退出登录</mdui-button></div>
+  </main>
   return <mdui-layout className="app-layout">
     <mdui-navigation-drawer ref={drawerRef} className="app-drawer" modal close-on-esc close-on-overlay-click open={drawerOpen}>
       <div className="drawer-inner">
-        <div className="drawer-head"><span className="brand-mark">3</span><div><b>FastTask</b><small>research momentum</small></div></div>
+        <div className="drawer-head"><span className="brand-mark">3</span><div><b>FastTask</b><small>每天推进重要的事</small></div></div>
         <mdui-list className="drawer-nav">
           {items.map(([id, label]) => <mdui-list-item key={id} icon={NAV_ICONS[id]} active={tab === id} onClick={() => { setTab(id); setDrawerOpen(false) }}>{label}</mdui-list-item>)}
         </mdui-list>
@@ -158,13 +195,13 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
       <mdui-button-icon icon="logout" aria-label="退出登录" onClick={onLogout}/>
     </mdui-top-app-bar>
     <mdui-layout-main className="app-main">
-      <div className={tab==='dialogue' ? 'page page-dialogue' : 'page'}>
-        {tab==='today' && <Today onNotice={setNotice} timezone={user?.timezone}/>}
-        {tab==='goals' && <Goals onNotice={setNotice}/>}
-        {tab==='dialogue' && <AgentChat goalId={null} onNotice={setNotice}/>}
+      <ResearchWorkspace active={tab==='today'} timezone={timezone} userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} chatRequest={chatRequest} goalChatRequest={goalChatRequest} onOpenTools={openTools}/>
+      <div className="page" hidden={tab==='today'}>
+        {tab==='goals' && <GoalManager userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} onOpenChat={openChat}/>}
         {tab==='jobs' && <JobQueue onNotice={setNotice}/>}
         {tab==='review' && <Review onNotice={setNotice}/>}
-        {tab==='devices' && <Devices onNotice={setNotice} timezone={user?.timezone}/>}
+        {tab==='devices' && <Devices onNotice={setNotice} timezone={timezone}/>}
+        {tab==='integrations' && <Integrations user={user} onNotice={setNotice} onBusinessChanged={businessChanged} initialTaskID={toolTaskID}/>}
         {tab==='account' && <FastCASAccount/>}
         {tab==='admin' && user?.role==='admin' && <Admin user={user} onNotice={setNotice}/>}
       </div>
@@ -177,152 +214,11 @@ function Workspace({ onLogout }: { onLogout: () => void | Promise<void> }) {
 }
 
 function navItems(user: User | null): [Tab,string][] {
-  const items: [Tab,string][] = [['today','今日'],['goals','目标树'],['dialogue','对话'],['jobs','任务队列'],['review','复盘'],['devices','设备'],['account','账号认证']]
+  const items: [Tab,string][] = [['today','工作台'],['goals','目标任务'],['integrations','工具内容'],['review','复盘'],['jobs','后台作业'],['devices','设备'],['account','账号认证']]
   if (user?.role === 'admin') items.push(['admin','后台'])
   return items
 }
 
-function Today({ onNotice, timezone }: { onNotice: (s:string)=>void; timezone?: string }) {
-  const [plan, setPlan] = useState<Plan | null>(null)
-  const [items, setItems] = useState<PlanItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [session, setSession] = useState<WorkSession | null>(null)
-  const [elapsed, setElapsed] = useState(0)
-  async function load() {
-    setLoading(true)
-    try { const {data} = await request<{plan:Plan;items:PlanItem[]}>('/daily-plans/current'); setPlan(data.plan); setItems(data.items) }
-    catch (e) { if (!(e instanceof ApiError && e.status===404)) onNotice(e instanceof Error?e.message:'加载失败'); setPlan(null); setItems([]) }
-    finally { setLoading(false) }
-    const sessions = await request<{items:WorkSession[]}>('/work-sessions').catch(()=>null)
-    setSession(sessions?.data.items.find(s=>['running','paused'].includes(s.status)) || null)
-  }
-  useEffect(()=>{load()},[])
-  // One action at a time, named by what it is acting on, so the button that was pressed shows progress
-  // and a second press cannot send a duplicate (a fresh idempotency key each time) or a stale If-Match.
-  // The ref is the guard (clicks dispatched before React re-renders all see the same state); the state
-  // only drives what the buttons show.
-  const [busy,setBusy]=useState('')
-  const busyRef=useRef('')
-  async function guarded(key:string,action:()=>Promise<void>){if(busyRef.current)return;busyRef.current=key;setBusy(key);try{await action()}finally{busyRef.current='';setBusy('')}}
-  useEffect(()=>{if(!session||session.status!=='running')return;const startedAt=new Date(session.started_at).getTime();const tick=()=>setElapsed(Math.max(0,Math.floor((Date.now()-startedAt)/1000)));tick();const timer=setInterval(tick,1000);return()=>clearInterval(timer)},[session])
-	async function generate(replace=false) { if (!timezone) { onNotice('正在加载用户时区，请稍后重试'); return } const localDate=localDateInTimezone(new Date(),timezone); await guarded('plan',async()=>{ try { const {data}=await request<Job>('/daily-plans/generation-jobs',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({local_date:localDate,timezone,available_minutes:120,replace_existing:replace,base_revision:replace?plan?.revision:undefined})}); onNotice(`计划作业已创建：${data.id}`); const job=await waitJob(data.id);if(job.status!=='succeeded')throw new Error(job.error_message||'计划作业失败');await load() } catch(e){onNotice(errorText(e))} }) }
-  async function satisfy(item:PlanItem,type='minimum_action'){await guarded('satisfy:'+item.id,async()=>{try{await request(`/daily-plans/${item.daily_plan_id}/items/${item.id}/completions`,{method:'POST',headers:{'If-Match':etag('dpi',item.id,item.revision),'Idempotency-Key':idem()},body:JSON.stringify({type,summary:type==='minimum_action'?'已完成今天的最小行动':'已获得可验证推进'})});onNotice('已记录推进证据，底层任务仍保持开放');await load()}catch(e){onNotice(errorText(e))}})}
-  async function start(item:PlanItem){if(!item.task_id)return;await guarded('start:'+item.id,async()=>{try{const {data}=await request<WorkSession>('/work-sessions',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({task_id:item.task_id,daily_plan_item_id:item.id,session_type:'pomodoro',target_minutes:25,started_at:new Date().toISOString()})});setSession(data);onNotice('专注计时开始')}catch(e){onNotice(errorText(e))}})}
-  async function finish(){if(!session)return;await guarded('finish',async()=>{try{await request(`/work-sessions/${session.id}/completions`,{method:'POST',headers:{'If-Match':etag('work',session.id,session.revision),'Idempotency-Key':idem()},body:JSON.stringify({ended_at:new Date().toISOString(),outcome:'progressed',note:'从今日工作台完成'})});setSession(null);onNotice('专注记录已保存')}catch(e){onNotice(errorText(e))}})}
-  const coreItems = items.filter(i=>i.kind==='core')
-  const done = coreItems.filter(i=>i.status==='satisfied').length
-  const total = coreItems.length
-  return <section className="today-page">
-    <header className="page-head">
-      <div className="title-block"><p className="eyebrow">{new Date().toLocaleDateString('zh-CN',{timeZone:timezone,month:'long',day:'numeric',weekday:'long'})}</p><h1>今日推进</h1></div>
-      <div className="head-side">
-        {total>0&&<p className="head-stat"><strong>{done}<small>/{total}</small></strong><span>核心信号已满足</span></p>}
-        {plan&&<mdui-button variant="tonal" icon="refresh" disabled={busy==='plan'} loading={busy==='plan'} onClick={()=>generate(true)}>基于最新进展重规划</mdui-button>}
-      </div>
-    </header>
-    {session && <div className="focus-strip">
-      <div className="focus-info"><span className="pulse"/><b>专注进行中</b><span className="focus-timer">{Math.floor(elapsed/60).toString().padStart(2,'0')}:{(elapsed%60).toString().padStart(2,'0')}</span></div>
-      <mdui-button variant="filled" disabled={busy==='finish'} loading={busy==='finish'} onClick={finish}>结束并记录</mdui-button>
-    </div>}
-    {loading ? <div className="loading-block"><mdui-linear-progress/><p className="empty">正在整理今天的信号…</p></div> : !plan ? <div className="empty-state"><h2>今天还没有计划</h2><p>系统会从活跃目标中选择最多三个有明确最小行动的任务。</p><mdui-button variant="filled" icon="auto_awesome" disabled={busy==='plan'} loading={busy==='plan'} onClick={()=>generate(false)}>生成今日计划</mdui-button></div> : <>
-    <div className="today-grid">{coreItems.map(item=><mdui-card key={item.id} variant="outlined" className={item.status==='satisfied'?'signal-card done':'signal-card'}>
-      <div className="signal-content">
-        <p className="meta">{item.status==='satisfied'?'已满足':'核心推进'} · {item.target_minutes} 分钟</p>
-        <h2>{item.title}</h2>
-        <p>{item.commitment}</p>
-        <div className="minimum"><span>最小行动</span>{item.minimum_action}</div>
-        <div className="actions">
-          <mdui-button variant="outlined" icon="play_arrow" onClick={()=>start(item)} disabled={Boolean(session)||item.status==='satisfied'||Boolean(busy)} loading={busy==='start:'+item.id}>开始专注</mdui-button>
-          <mdui-button variant="filled" icon={item.status==='satisfied'?'check_circle':undefined} onClick={()=>satisfy(item)} disabled={item.status==='satisfied'||Boolean(busy)} loading={busy==='satisfy:'+item.id}>{item.status==='satisfied'?'已记录':'完成最小行动'}</mdui-button>
-        </div>
-      </div>
-    </mdui-card>)}</div>
-      {items.length===0&&<div className="empty-state"><h2>合法的空计划</h2><p>当前没有符合条件的任务。请先创建目标、补充最小行动或解除阻碍。</p></div>}
-    </>}
-  </section>
-}
-
-function Goals({ onNotice }: { onNotice:(s:string)=>void }) {
-	const [goals,setGoals]=useState<Goal[]>([]);const [tasks,setTasks]=useState<Task[]>([]);const [selected,setSelected]=useState<Goal|null>(null);const [showCreate,setShowCreate]=useState(false);const [tree,setTree]=useState<TaskTree|null>(null);const [treeETag,setTreeETag]=useState('');const [revisionInstruction,setRevisionInstruction]=useState('');const [view,setView]=useState<'list'|'map'>('list');const [focusTask,setFocusTask]=useState('')
-  const createDialogRef = useRef<HTMLElement>(null)
-  useMduiEvent(createDialogRef, 'close', () => setShowCreate(false))
-  const [goalDraft,setGoalDraft]=useState({title:'',criteria:'',target:'',description:''})
-  const [taskDraft,setTaskDraft]=useState({title:'',criteria:'',minimum:''})
-  // One mutation at a time: a second click on 创建 / 添加 / 确认应用 while the first is in flight would
-  // otherwise send a duplicate (fresh idempotency key) or a request against a revision about to change.
-  const [busy,setBusy]=useState<''|'goal'|'task'|'agent'|'proposal'>('')
-  // The tree shown must belong to the goal selected last: switching goals quickly must not let the
-  // slower response for the previous goal land under the new goal's heading.
-  const latestGoal=useRef('')
-	async function load(goal=selected, fresh=false){const refresh=fresh?`?_refresh=${idem()}`:'';const g=await request<{items:Goal[]}>(`/goals${refresh}`);setGoals(g.data.items);const t=await request<{items:Task[]}>('/tasks').catch(()=>null);if(t)setTasks(t.data.items);const active=goal||g.data.items[0]||null;if(!selected&&active)setSelected(active);if(active){latestGoal.current=active.id;const response=await request<TaskTree>(`/goals/${active.id}/task-tree${refresh}`);if(latestGoal.current!==active.id)return;setTree(response.data);setTreeETag(response.etag||etag('tree',active.id,response.data.revision))}}
-  const busyRef=useRef('')
-  async function guarded(kind:'goal'|'task'|'agent'|'proposal',action:()=>Promise<void>){if(busyRef.current)return;busyRef.current=kind;setBusy(kind);try{await action()}finally{busyRef.current='';setBusy('')}}
-  useEffect(()=>{load().catch(e=>onNotice(errorText(e)))},[])
-  async function createGoal(){if(!goalDraft.title.trim()||!goalDraft.criteria.trim())return;await guarded('goal',async()=>{try{const {data:goal}=await request<Goal>('/goals',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({title:goalDraft.title,description:goalDraft.description,success_criteria:goalDraft.criteria,target_date:goalDraft.target||null})});setShowCreate(false);setGoalDraft({title:'',criteria:'',target:'',description:''});setSelected(goal);onNotice('目标已创建');await load(goal,true)}catch(e){onNotice(errorText(e))}})}
-  async function addTask(){if(!selected||!taskDraft.title.trim()||!taskDraft.criteria.trim()||!taskDraft.minimum.trim())return;await guarded('task',async()=>{try{await request('/tasks',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({goal_id:selected.id,type:'task',title:taskDraft.title,description:'',success_criteria:taskDraft.criteria,minimum_action:taskDraft.minimum,estimate_minutes:50,priority:70,position:tasks.length})});setTaskDraft({title:'',criteria:'',minimum:''});onNotice('任务已加入目标树');await load(selected,true)}catch(e){onNotice(errorText(e))}})}
-	async function askAgent(revision=false){if(!selected)return;await guarded('agent',async()=>{try{const path=revision?'revision-jobs':'generation-jobs';const headers:Record<string,string>={'Idempotency-Key':idem()};if(revision)headers['If-Match']=treeETag;const instruction=revision?revisionInstruction:'生成三层以内的可执行任务树，每个任务必须有最小行动';const {data}=await request<Job>(`/goals/${selected.id}/task-tree/${path}`,{method:'POST',headers,body:JSON.stringify({instruction})});onNotice(`作业 ${data.id} 已进入队列`);const job=await waitJob(data.id);if(job.status!=='succeeded')throw new Error(job.error_message||'Agent 作业失败');await load(selected,true);setRevisionInstruction('')}catch(e){onNotice(errorText(e))}})}
-	async function decide(proposal:Proposal,apply:boolean){if(!selected)return;await guarded('proposal',async()=>{try{if(apply){await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/application`,{method:'POST',headers:{'If-Match':treeETag,'Idempotency-Key':idem()}});onNotice('提案已确认并应用')}else{await request(`/goals/${selected.id}/task-tree/proposals/${proposal.id}/rejection`,{method:'PUT',headers:{'If-Match':etag('proposal',proposal.id,proposal.revision)}});onNotice('提案已拒绝')}await load(selected,true)}catch(e){onNotice(errorText(e))}})}
-  return <section className="goals-page"><header className="page-head"><div className="title-block"><p className="eyebrow">{goals.length} 个长期目标</p><h1>目标树</h1></div><div className="head-side"><mdui-button variant="filled" icon={showCreate?'close':'add'} onClick={()=>setShowCreate(v=>!v)}>新建目标</mdui-button></div></header>
-    {showCreate&&<mdui-dialog close-on-esc ref={createDialogRef} className="goal-dialog" open headline="新建目标" description="长期目标定义方向，验收标准决定什么才算完成。">
-      <div className="form-stack">
-        <mdui-text-field label="目标标题" variant="outlined" required value={goalDraft.title} onInput={e=>setGoalDraft(d=>({...d,title:fieldValue(e)}))}/>
-        <mdui-text-field label="什么状态算真正完成？" variant="outlined" required value={goalDraft.criteria} onInput={e=>setGoalDraft(d=>({...d,criteria:fieldValue(e)}))}/>
-        <mdui-text-field label="目标日期" type="date" variant="outlined" value={goalDraft.target} onInput={e=>setGoalDraft(d=>({...d,target:fieldValue(e)}))}/>
-        <mdui-text-field label="背景与约束" variant="outlined" rows={3} value={goalDraft.description} onInput={e=>setGoalDraft(d=>({...d,description:fieldValue(e)}))}/>
-      </div>
-      <mdui-button slot="action" variant="text" onClick={()=>setShowCreate(false)}>取消</mdui-button>
-      <mdui-button slot="action" variant="filled" disabled={!goalDraft.title.trim()||!goalDraft.criteria.trim()||busy==='goal'} loading={busy==='goal'} onClick={createGoal}>创建</mdui-button>
-    </mdui-dialog>}
-		<div className="goal-layout">
-      <mdui-list className="goal-list">
-        {goals.map(goal=><mdui-list-item key={goal.id} active={selected?.id===goal.id} onClick={()=>{setSelected(goal);setView('list');setFocusTask('');load(goal)}}>
-          <span slot="icon" className={`goal-status ${goal.status}`}/>
-          <span className="goal-item-text"><b>{goal.title}</b><small>{goal.success_criteria}</small></span>
-        </mdui-list-item>)}
-        {goals.length===0&&<p className="empty">先建立第一个长期目标。</p>}
-      </mdui-list>
-		<div className="tree-panel">{selected?<>
-      <div className="tree-head"><div><p className="meta">{GOAL_STATUS[selected.status]??selected.status} · 修订 {tree?.revision??0}{selected.target_date?` · 目标日期 ${selected.target_date}`:''}</p><h2>{selected.title}</h2><p>{selected.success_criteria}</p></div><mdui-button variant="tonal" icon="auto_awesome" disabled={busy==='agent'} loading={busy==='agent'} onClick={()=>askAgent(false)}>让 Agent 拆解</mdui-button></div>
-      {tree?.proposals.map(proposal=><ProposalCard key={proposal.id} proposal={proposal} busy={busy==='proposal'} onApply={()=>decide(proposal,true)} onReject={()=>decide(proposal,false)}/>)}
-      <div className="tree-tools">
-        <mdui-segmented-button-group className="view-switch" selects="single" value={view} onChange={e=>setView(fieldValue(e) as 'list'|'map')}>
-          <mdui-segmented-button value="list" icon="list">列表</mdui-segmented-button>
-          <mdui-segmented-button value="map" icon="map">地图</mdui-segmented-button>
-        </mdui-segmented-button-group>
-        <div className="revision-request">
-          <mdui-text-field variant="outlined" label="修订指令" value={revisionInstruction} onInput={e=>setRevisionInstruction(fieldValue(e))} placeholder="例如：把实验任务拆小，并移到当前里程碑下"/>
-          <mdui-button variant="outlined" icon="edit_note" onClick={()=>askAgent(true)} disabled={!revisionInstruction.trim()||busy==='agent'}>生成修订提案</mdui-button>
-        </div>
-      </div>
-      {view==='map'?<GoalMapView goal={selected} onNotice={onNotice} onOpenTask={id=>{setFocusTask(id);setView('list')}}/>:<div className="task-stack">{tasks.filter(t=>t.goal_id===selected.id).map(task=><mdui-card key={task.id} variant="outlined" className={`task-card${task.status==='completed'?' done':''}${focusTask===task.id?' focused':''}`}>
-        <span className={`task-status ${task.status}`} role="img" aria-label={TASK_STATUS[task.status]??task.status}/>
-        <div><h3>{task.title}{task.type==='milestone'&&<span className="task-type">里程碑</span>}</h3><p>{task.success_criteria}</p>{task.status==='blocked'?<small className="blocked">受阻{task.blocked_reason?` · ${task.blocked_reason}`:''}</small>:task.status!=='completed'&&<small>下一步 · {task.minimum_action}</small>}</div>
-        <strong>P{task.priority}</strong>
-      </mdui-card>)}{tasks.every(t=>t.goal_id!==selected.id)&&!tree?.proposals.length&&<p className="empty">这个目标还没有任务。在下面手工添加，或让 Agent 拆解出第一版任务树。</p>}</div>}
-      <div className="task-create">
-        <mdui-text-field variant="outlined" label="任务" value={taskDraft.title} onInput={e=>setTaskDraft(d=>({...d,title:fieldValue(e)}))} placeholder="手工添加一个真实任务"/>
-        <mdui-text-field variant="outlined" label="完成标准" value={taskDraft.criteria} onInput={e=>setTaskDraft(d=>({...d,criteria:fieldValue(e)}))} placeholder="完成标准"/>
-        <mdui-text-field variant="outlined" label="最小行动" value={taskDraft.minimum} onInput={e=>setTaskDraft(d=>({...d,minimum:fieldValue(e)}))} placeholder="5-15 分钟最小行动"/>
-        <mdui-button variant="tonal" icon="add" disabled={!taskDraft.title.trim()||!taskDraft.criteria.trim()||!taskDraft.minimum.trim()||busy==='task'} loading={busy==='task'} onClick={addTask}>添加</mdui-button>
-      </div>
-    </>:<div className="empty">选择一个目标查看任务树。</div>}</div></div>
-  </section>
-}
-
-// The operations a proposal carries, in the user's language. Removal is the only one that can lose
-// work, so it is the only one marked with the error colour.
-const PROPOSAL_OPS: Record<string,string> = { create: '新增', update: '修改', move: '移动', supersede: '废弃' }
-
-function ProposalCard({proposal,busy,onApply,onReject}:{proposal:Proposal;busy:boolean;onApply:()=>void;onReject:()=>void}){
-  let operations:Record<string,unknown>[]=[]
-  try{const parsed:unknown=JSON.parse(proposal.patch_json);if(!Array.isArray(parsed))return null;operations=parsed.filter((op):op is Record<string,unknown>=>typeof op==='object'&&op!==null)}catch{return null}
-  return <mdui-card variant="outlined" className="proposal-card">
-    <p className="eyebrow">Agent 提案 · 基于修订 {proposal.base_revision}</p>
-    <h3>待确认的任务树变更</h3>
-    {operations.map((operation,index)=>{const op=String(operation.op||'create');return <div className="proposal-op" key={index}><b className={`op-${op}`}>{PROPOSAL_OPS[op]??op}</b><span>{String(operation.title||operation.target_id||'未命名变更')}</span>{Boolean(operation.minimum_action||operation.success_criteria)&&<small>{String(operation.minimum_action||operation.success_criteria)}</small>}</div>})}
-    <div className="actions"><mdui-button variant="outlined" disabled={busy} onClick={onReject}>拒绝</mdui-button><mdui-button variant="filled" disabled={busy} loading={busy} onClick={onApply}>确认应用</mdui-button></div>
-  </mdui-card>
-}
 
 type JobFilter = 'active' | 'queued' | 'running' | 'all' | 'failed' | 'succeeded'
 

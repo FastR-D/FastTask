@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,7 +16,7 @@ import (
 // dailyPlanAgentSchema versions the agent's daily-plan input snapshot so the
 // deterministic commitment is reproducible against a known schema (arch.md §9.2:
 // the snapshot "必须包含 Agent 分析结果、schema 版本和内容哈希").
-const dailyPlanAgentSchema = "daily-plan-agent-v1"
+const dailyPlanAgentSchema = "daily-plan-agent-v3"
 
 // PlanCandidate is one task the agent recommends for today's plan, with the
 // concrete 5-15 minute first step and the reason it belongs (agent.md §6). The
@@ -25,6 +26,7 @@ const dailyPlanAgentSchema = "daily-plan-agent-v1"
 type PlanCandidate struct {
 	TaskID        string `json:"task_id"`
 	MinimumAction string `json:"minimum_action"`
+	Commitment    string `json:"commitment,omitempty"`
 	Reason        string `json:"reason,omitempty"`
 }
 
@@ -35,6 +37,14 @@ type dailyPlanPayload struct {
 	Timezone         string          `json:"timezone"`
 	AvailableMinutes int             `json:"available_minutes"`
 	Candidates       []PlanCandidate `json:"candidates"`
+	BasePlan         *dailyPlanBase  `json:"base_plan,omitempty"`
+}
+
+// A non-nil empty baseline records that there was no plan when the user saw the
+// proposal. Nil means an older proposal without concurrency protection.
+type dailyPlanBase struct {
+	PlanID   string `json:"plan_id"`
+	Revision int    `json:"revision"`
 }
 
 // ApplyDailyPlanProposal turns an approved propose_daily_plan proposal into a
@@ -53,15 +63,16 @@ func (a *App) ApplyDailyPlanProposal(ctx context.Context, userID string, proposa
 	if len(payload.Candidates) == 0 {
 		return nil, nil, fmt.Errorf("%w: proposal has no candidates", ErrValidation)
 	}
-	if payload.AvailableMinutes < 0 {
-		payload.AvailableMinutes = 0
-	}
-	if payload.AvailableMinutes > 1440 {
+	if payload.AvailableMinutes != 0 && (payload.AvailableMinutes < 30 || payload.AvailableMinutes > 480) {
 		return nil, nil, fmt.Errorf("%w: available_minutes out of range", ErrValidation)
 	}
 	tzName := strings.TrimSpace(payload.Timezone)
 	if tzName == "" {
-		tzName = "UTC"
+		var user persistence.User
+		if err := a.Store.DB.WithContext(ctx).First(&user, "id = ?", userID).Error; err != nil {
+			return nil, nil, notFound(err)
+		}
+		_, tzName = resolveZone(user.Timezone)
 	}
 	location, err := time.LoadLocation(tzName)
 	if err != nil {
@@ -83,64 +94,98 @@ func (a *App) ApplyDailyPlanProposal(ctx context.Context, userID string, proposa
 		taskIDs = append(taskIDs, candidate.TaskID)
 		agentByTask[candidate.TaskID] = candidate
 	}
-	var tasks []persistence.Task
-	if err := a.Store.DB.WithContext(ctx).
-		Table("tasks").Select("tasks.*").
-		Joins("JOIN goals ON goals.id = tasks.goal_id").
-		Where("tasks.user_id = ? AND tasks.id IN ? AND goals.status = 'active'", userID, taskIDs).
-		Find(&tasks).Error; err != nil {
-		return nil, nil, err
-	}
-	byID := make(map[string]persistence.Task, len(tasks))
-	for _, task := range tasks {
-		byID[task.ID] = task
-	}
-
-	// The input snapshot is the COMPLETE agent input (candidates + reasons +
-	// budget + schema/algorithm versions); its hash makes the commitment
-	// reproducible (arch.md §9.2).
-	input, _ := json.Marshal(map[string]any{
-		"source": "agent_proposal", "schema_version": dailyPlanAgentSchema,
-		"local_date": localDate, "timezone": location.String(),
-		"available_minutes": payload.AvailableMinutes,
-		"candidates":        payload.Candidates, "algorithm": "deterministic-v1",
-	})
-	inputHash := persistence.Hash(string(input))
-
 	now := persistence.Now()
 	var plan persistence.DailyPlan
 	var resultItems []persistence.DailyPlanItem
 	err = a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		// A busy rollback can retry this closure. Only items built by the
+		// successful attempt may escape; prior IDs and protected copies are stale.
+		resultItems = nil
+		// Approval can arrive after a task was blocked, deleted or moved off the
+		// primary goal. Recheck inside the write transaction before replacing any
+		// existing commitments; an obsolete proposal must not clear the day.
+		tasks, settings, err := eligiblePlanningTasksTx(tx, userID, taskIDs)
+		if err != nil {
+			return err
+		}
+		if len(tasks) == 0 {
+			return fmt.Errorf("%w: no executable candidates remain", ErrValidation)
+		}
+		resolvedAvailable, err := resolvePlanningBudget(payload.AvailableMinutes, settings)
+		if err != nil {
+			return err
+		}
+		byID := make(map[string]persistence.Task, len(tasks))
+		for _, task := range tasks {
+			byID[task.ID] = task
+		}
+		inputSnapshot := map[string]any{
+			"source": "agent_proposal", "schema_version": dailyPlanAgentSchema,
+			"local_date": localDate, "timezone": location.String(),
+			"available_minutes": resolvedAvailable,
+			"candidates":        payload.Candidates, "algorithm": "deterministic-v1",
+			"base_plan": payload.BasePlan,
+		}
+		scopeTasks, err := planningTaskIndexTx(tx, userID)
+		if err != nil {
+			return err
+		}
+		selectedScopes := map[string][]string{}
 		var existing persistence.DailyPlan
-		replan := tx.Where("user_id = ? AND local_date = ? AND timezone = ?", userID, localDate, location.String()).First(&existing).Error == nil
+		lookup := tx.Where("user_id = ? AND local_date = ? AND timezone = ?", userID, localDate, location.String()).First(&existing).Error
+		if lookup != nil && !errors.Is(lookup, gorm.ErrRecordNotFound) {
+			return lookup
+		}
+		replan := lookup == nil
+		if replan && existing.Status != "active" {
+			return ErrConflict
+		}
+		if payload.BasePlan == nil {
+			if proposal != nil {
+				return fmt.Errorf("%w: daily plan proposal has no baseline; read the current plan and propose again", ErrRevision)
+			}
+		} else if (!replan && (payload.BasePlan.PlanID != "" || payload.BasePlan.Revision != 0)) ||
+			(replan && (payload.BasePlan.PlanID != existing.ID || payload.BasePlan.Revision != existing.Revision)) {
+			return fmt.Errorf("%w: daily plan changed since this proposal; read the current plan and propose again", ErrRevision)
+		}
 		newRevision := 1
-		satisfiedTaskIDs := map[string]bool{}
-		coreSlots := 3
+		retainedTaskIDs := map[string]bool{}
+		logicalByTask := map[string]string{}
 		if replan {
 			newRevision = existing.CurrentRevision + 1
 			var oldItems []persistence.DailyPlanItem
 			if err := tx.Where("plan_id = ? AND plan_revision = ? AND status != 'superseded'", existing.ID, existing.CurrentRevision).Order("position, id").Find(&oldItems).Error; err != nil {
 				return err
 			}
+			protected, err := protectedPlanItemsTx(tx, userID, existing, oldItems)
+			if err != nil {
+				return err
+			}
 			for _, item := range oldItems {
-				if item.Status == "satisfied" {
+				if item.TaskID != nil {
+					logicalByTask[*item.TaskID] = logicalItemID(item)
+				}
+				if protected[item.ID] {
+					retained, err := retainProtectedItemForReplanTx(tx, userID, existing, item)
+					if err != nil {
+						return err
+					}
+					if !retained {
+						continue // Preserve the corrected row in its original revision.
+					}
 					keep := item
+					keep.LogicalID = logicalItemID(item)
 					keep.ID, keep.PlanRevision, keep.Revision, keep.CreatedAt, keep.UpdatedAt = persistence.NewID("dpi"), newRevision, 1, now, now
 					resultItems = append(resultItems, keep)
-					if keep.Kind == "core" {
-						coreSlots--
-					}
 					if keep.TaskID != nil {
-						satisfiedTaskIDs[*keep.TaskID] = true
+						retainedTaskIDs[*keep.TaskID] = true
 					}
 				} else if err := tx.Model(&persistence.DailyPlanItem{}).Where("id = ? AND revision = ?", item.ID, item.Revision).Updates(map[string]any{"status": "superseded", "revision": item.Revision + 1, "updated_at": now}).Error; err != nil {
 					return err
 				}
 			}
 		}
-		if coreSlots < 0 {
-			coreSlots = 0
-		}
+		_, coreSlots, targetMinutes := remainingPlanBudget(resultItems, resolvedAvailable)
 		// Resolve the target plan id up front so items built below always carry it,
 		// whether we replan the existing row or create a fresh one.
 		planID := existing.ID
@@ -153,7 +198,7 @@ func (a *App) ApplyDailyPlanProposal(ctx context.Context, userID string, proposa
 		// top-3 cap; the agent cannot bypass it.
 		candidates := make([]domain.Candidate, 0, len(tasks))
 		for _, task := range tasks {
-			if satisfiedTaskIDs[task.ID] {
+			if retainedTaskIDs[task.ID] {
 				continue
 			}
 			minAction := task.MinimumAction
@@ -161,12 +206,12 @@ func (a *App) ApplyDailyPlanProposal(ctx context.Context, userID string, proposa
 				minAction = agent.MinimumAction
 			}
 			candidates = append(candidates, domain.Candidate{
-				ID: task.ID, Status: task.Status, Priority: task.Priority,
+				ID: task.ID, Status: task.Status, Priority: task.Priority, Position: task.Position,
 				Estimate: task.EstimateMinutes, MinimumAction: minAction,
 				GoalActive: true, DependencyDone: true,
 			})
 		}
-		selected := domain.SelectDailyCandidates(candidates, payload.AvailableMinutes)
+		selected := domain.SelectDailyCandidates(candidates, resolvedAvailable)
 		if len(selected) > coreSlots {
 			selected = selected[:coreSlots]
 		}
@@ -179,13 +224,33 @@ func (a *App) ApplyDailyPlanProposal(ctx context.Context, userID string, proposa
 		}
 		for _, candidate := range selected {
 			task := byID[candidate.ID]
-			resultItems = append(resultItems, buildAgentPlanItem(userID, planID, newRevision, position, task, agentByTask[task.ID], now))
+			if chain, valid := planningParentChain(task, scopeTasks); valid {
+				selectedScopes[task.ID] = chain
+			}
+			item := buildAgentPlanItem(userID, planID, newRevision, position, task, agentByTask[task.ID], now)
+			item.TargetMinutes = targetMinutes
+			logicalID := logicalByTask[task.ID]
+			if logicalID == "" {
+				var err error
+				logicalID, err = historicalLogicalItemIDTx(tx, userID, planID, task.ID)
+				if err != nil {
+					return err
+				}
+			}
+			if logicalID != "" {
+				item.LogicalID = logicalID
+			}
+			resultItems = append(resultItems, item)
 			position++
 		}
 
+		inputSnapshot["selected_task_parent_chains"] = selectedScopes
+		input, _ := json.Marshal(inputSnapshot)
+		inputHash := persistence.Hash(string(input))
 		if replan {
 			plan = existing
 			plan.CurrentRevision, plan.Revision, plan.Status, plan.UpdatedAt = newRevision, existing.Revision+1, "active", now
+			freezePlanWithCore(&plan, now, hasCoreItem(resultItems))
 			if len(resultItems) > 0 {
 				if err := tx.Create(&resultItems).Error; err != nil {
 					return err
@@ -196,7 +261,7 @@ func (a *App) ApplyDailyPlanProposal(ctx context.Context, userID string, proposa
 			if err := tx.Create(&rev).Error; err != nil {
 				return err
 			}
-			update := tx.Model(&persistence.DailyPlan{}).Where("id = ? AND revision = ?", existing.ID, existing.Revision).Updates(map[string]any{"current_revision": newRevision, "revision": existing.Revision + 1, "status": "active", "updated_at": now})
+			update := tx.Model(&persistence.DailyPlan{}).Where("id = ? AND revision = ?", existing.ID, existing.Revision).Updates(map[string]any{"current_revision": newRevision, "revision": existing.Revision + 1, "status": "active", "updated_at": now, "frozen_at": plan.FrozenAt})
 			if update.Error != nil {
 				return update.Error
 			}
@@ -210,6 +275,9 @@ func (a *App) ApplyDailyPlanProposal(ctx context.Context, userID string, proposa
 		}
 
 		plan = persistence.DailyPlan{ID: planID, UserID: userID, LocalDate: localDate, Timezone: location.String(), Status: "active", AlgorithmVersion: "deterministic-v1", CurrentRevision: 1, Revision: 1, CreatedAt: now, UpdatedAt: now}
+		if localDate <= now.In(location).Format("2006-01-02") && len(resultItems) > 0 {
+			plan.FrozenAt = &now
+		}
 		if err := tx.Create(&plan).Error; err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				return ErrConflict
@@ -257,23 +325,24 @@ func markProposalApplied(tx *gorm.DB, proposal *persistence.Proposal, now time.T
 	return nil
 }
 
-// buildAgentPlanItem renders one selected core item, preferring the agent's
-// concrete minimum action and folding its reason into the commitment line.
+// buildAgentPlanItem renders a daily slice. Older proposals without an explicit
+// commitment conservatively promise only their approved minimum action.
 func buildAgentPlanItem(userID, planID string, planRevision, position int, task persistence.Task, agent PlanCandidate, now time.Time) persistence.DailyPlanItem {
+	itemID := persistence.NewID("dpi")
 	taskID := task.ID
 	minAction := task.MinimumAction
 	if agent.MinimumAction != "" {
 		minAction = agent.MinimumAction
 	}
-	commitment := "推进：" + task.SuccessCriteria
-	if agent.Reason != "" {
-		commitment += "（" + agent.Reason + "）"
+	commitment := strings.TrimSpace(agent.Commitment)
+	if commitment == "" {
+		commitment = minAction
 	}
 	return persistence.DailyPlanItem{
-		ID: persistence.NewID("dpi"), UserID: userID, PlanID: planID, PlanRevision: planRevision,
+		ID: itemID, LogicalID: itemID, UserID: userID, PlanID: planID, PlanRevision: planRevision,
 		TaskID: &taskID, Kind: "core", Title: task.Title, Commitment: commitment,
 		MinimumAction: minAction, AllowedTypes: "result,step,time,minimum_action",
-		TargetMinutes: 50, Status: "planned", Position: position, Revision: 1,
+		TargetMinutes: planningTargetMinutes(defaultDailyBudget), Status: "planned", Position: position, Revision: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
 }

@@ -53,6 +53,11 @@ const MaxPendingJobsPerUser = 10
 // one (immediate) transaction, so concurrent submissions cannot both slip under the bound.
 func (a *JobService) enqueue(ctx context.Context, job *persistence.AgentJob) error {
 	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		if job.Type == "support_generation" {
+			if err := captureSupportJobBaselineTx(tx, job, persistence.Now()); err != nil {
+				return err
+			}
+		}
 		var pending int64
 		if err := tx.Model(&persistence.AgentJob{}).Where("user_id = ? AND status IN ('queued','running')", job.UserID).Count(&pending).Error; err != nil {
 			return err
@@ -74,6 +79,9 @@ func (a *JobService) RetryJob(ctx context.Context, userID, id string, expected i
 	}
 	if old.Status != "failed" {
 		return nil, ErrConflict
+	}
+	if old.Type == "support_generation" && old.BaseRevision <= 0 {
+		return nil, ErrRevision
 	}
 	now := persistence.Now()
 	job := old
@@ -138,6 +146,15 @@ func (a *JobService) AgentCallback(ctx context.Context, userID, id string, attem
 		}
 		encoded, _ := json.Marshal(output)
 		now := persistence.Now()
+		if status == "succeeded" && job.Type == "support_generation" {
+			if _, err := validateSupportJobTx(tx, job, now); err != nil {
+				code, terminal := supportJobFailureCode(err)
+				if !terminal {
+					return err
+				}
+				status, errorCode, errorMessage = "failed", code, err.Error()
+			}
+		}
 		if status == "succeeded" {
 			if err := a.MaterializeJobResult(tx, job, output, now); err != nil {
 				return err

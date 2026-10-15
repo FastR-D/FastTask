@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { fieldValue } from '../mdui-react'
+import { ApiError } from '../api'
 import {
   createThread,
   deleteThread,
@@ -49,6 +50,17 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [loading, setLoading] = useState(false)
+  const [loadingMore,setLoadingMore]=useState(false)
+  const [loadError,setLoadError]=useState('')
+  const scope=useRef<'regular'|'archived'>('regular')
+  const loadSequence=useRef(0)
+  const loadingRef=useRef(false)
+  const readsInFlight=useRef(0)
+  const readFailed=useRef(false)
+  const notifiedError=useRef('')
+  const cursorRef=useRef<string|null>(null)
+  const consumedCursors=useRef(new Set<string>())
+  const retryCursor=useRef<string|undefined>(undefined)
   // On a phone the list is a disclosure above the conversation (agent.css): closed by default and closed
   // again once a conversation is picked, so the thread — not the index — gets the screen.
   const [open, setOpen] = useState(false)
@@ -56,28 +68,57 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
   const activeTitle = threads.find(thread => thread.id === activeId)?.title
 
   const load = useCallback(async (cursor?: string) => {
-    setLoading(true)
+    // A page can append only to its current catalogue, once. Refreshes replace
+    // the snapshot and invalidate any older page before its response arrives.
+    if(cursor&&(loadingRef.current||cursorRef.current!==cursor||consumedCursors.current.has(cursor)))return
+    const selected=scope.current,sequence=++loadSequence.current
+    if(!cursor)consumedCursors.current.clear()
+    loadingRef.current=true;readsInFlight.current++;setLoading(true);setLoadingMore(Boolean(cursor))
     try {
-      const page = await listThreads(cursor, showArchived ? 'archived' : 'regular')
-      setThreads(current => (cursor ? [...current, ...page.threads] : page.threads))
-      setNextCursor(page.nextCursor)
+      const page = await listThreads(cursor, selected)
+      if(sequence!==loadSequence.current||selected!==scope.current)return
+      readFailed.current=false;notifiedError.current='';setLoadError('')
+      setThreads(current => [...new Map([...(cursor?current:[]),...page.threads].map(thread=>[thread.id,thread])).values()])
+      if(cursor)consumedCursors.current.add(cursor)
+      const next=page.nextCursor&&!consumedCursors.current.has(page.nextCursor)?page.nextCursor:null
+      cursorRef.current=next;setNextCursor(next)
     } catch (error) {
-      onNotice(`会话列表读取失败：${error instanceof Error ? error.message : '请稍后重试'}`)
+      if(sequence!==loadSequence.current||selected!==scope.current)return
+      const detail=error instanceof ApiError&&error.status===0?'暂时无法连接FastTask服务':error instanceof Error?error.message:'请稍后重试'
+      const message=`会话列表读取失败：${detail}`
+      readFailed.current=true;retryCursor.current=cursor;setLoadError(message)
+      if(notifiedError.current!==message){notifiedError.current=message;onNotice(message)}
     } finally {
-      setLoading(false)
+      readsInFlight.current--
+      if(sequence===loadSequence.current){loadingRef.current=false;setLoading(false);setLoadingMore(false)}
     }
-  }, [onNotice, showArchived])
+  }, [onNotice])
 
   useEffect(() => {
     void load()
+    return()=>{loadSequence.current++}
   }, [load])
 
-  // A finished run changes titles and recency, so the list is refreshed when the window regains focus —
+  function switchArchived(){
+    const next=scope.current==='regular'?'archived':'regular'
+    scope.current=next;loadSequence.current++;cursorRef.current=null;consumedCursors.current.clear()
+    readFailed.current=false
+    loadingRef.current=true;setThreads([]);setNextCursor(null);setEditing(null);setDraft('');setLoadError('');setLoading(true);setLoadingMore(false);setShowArchived(next==='archived')
+    void load()
+  }
+
+  // Messages change fallback titles and recency, so refresh when the window regains focus —
   // cheap, and it keeps a second tab from showing a stale order.
   useEffect(() => {
     const refresh = () => void load()
+    const reconnect = () => {
+      // Connectivity is only a retry signal. The local service may be reachable
+      // without internet, and only this failed readonly request is retried.
+      if(readFailed.current&&!loadingRef.current&&readsInFlight.current===0)void load(retryCursor.current)
+    }
     window.addEventListener('focus', refresh)
-    return () => window.removeEventListener('focus', refresh)
+    window.addEventListener('online', reconnect)
+    return () => {window.removeEventListener('focus', refresh);window.removeEventListener('online', reconnect)}
   }, [load])
 
   const fail = (action: string) => (error: unknown) => {
@@ -137,7 +178,7 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
   }
 
   return (
-    <nav className={`agent-threads${open ? ' open' : ''}`} aria-label="会话列表" data-testid="thread-list">
+    <nav className={`agent-threads${open ? ' open' : ''}`} aria-label="会话列表" aria-busy={loading} data-testid="thread-list">
       <header className="agent-threads-head">
         <mdui-button variant="filled" icon="add" onClick={() => void startNew()}>新对话</mdui-button>
         <mdui-button
@@ -153,7 +194,7 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
           variant="text"
           className="agent-threads-archived"
           icon={showArchived ? 'unarchive' : 'archive'}
-          onClick={() => setShowArchived(value => !value)}
+          onClick={switchArchived}
         >
           {showArchived ? '进行中' : '已归档'}
         </mdui-button>
@@ -191,12 +232,14 @@ export function ThreadList({ activeId, onOpen, onNotice }: Props) {
             </span>
           </li>
         ))}
-        {!loading && threads.length === 0 && (
+        {loading&&<li className="agent-thread-empty" role="status">{loadingMore?'正在加载更多会话…':threads.length?'正在更新会话…':'正在读取会话…'}</li>}
+        {!loading && !loadError && threads.length === 0 && (
           <li className="agent-thread-empty">{showArchived ? '没有归档的会话' : '还没有会话，点「新对话」开始'}</li>
         )}
       </ul>
+      {loadError&&<div role="alert"><p className="agent-thread-empty">{loadError}</p><mdui-button variant="text" disabled={loading} onClick={()=>void load(retryCursor.current)}>重试读取</mdui-button></div>}
       {nextCursor && (
-        <mdui-button variant="text" onClick={() => void load(nextCursor)}>加载更多</mdui-button>
+        <mdui-button variant="text" disabled={loading||Boolean(loadError)} loading={loading&&loadingMore} onClick={() => void load(nextCursor)}>加载更多</mdui-button>
       )}
     </nav>
   )

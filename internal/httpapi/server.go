@@ -33,6 +33,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humagin"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type Server struct {
@@ -335,10 +336,14 @@ func (s meRoutes) RegisterRoutes(api huma.API) {
 			updates["display_name"] = *input.Body.DisplayName
 		}
 		if input.Body.Timezone != nil {
-			if _, e := time.LoadLocation(*input.Body.Timezone); e != nil {
+			zone := *input.Body.Timezone
+			if strings.TrimSpace(zone) == "" {
+				zone = "Asia/Shanghai"
+			}
+			if _, e := time.LoadLocation(zone); e != nil {
 				return nil, mapError(application.ErrValidation)
 			}
-			updates["timezone"] = *input.Body.Timezone
+			updates["timezone"] = zone
 		}
 		if input.Body.Locale != nil {
 			updates["locale"] = *input.Body.Locale
@@ -353,12 +358,18 @@ func (s meRoutes) RegisterRoutes(api huma.API) {
 
 func (s goalRoutes) RegisterRoutes(api huma.API) {
 	type listInput struct {
-		Status string `query:"status"`
+		Status  string `query:"status"`
+		Deleted bool   `query:"deleted"`
 	}
 	register(api, "list-goals", http.MethodGet, "/goals", "List goals", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.Goal], error) {
 		p := principal(ctx)
 		var goals []persistence.Goal
 		q := s.app.Store.DB.WithContext(ctx).Where("user_id = ?", p.UserID)
+		if input.Deleted {
+			q = q.Where("deleted_at IS NOT NULL")
+		} else {
+			q = q.Where("deleted_at IS NULL")
+		}
 		if input.Status != "" {
 			q = q.Where("status = ?", input.Status)
 		}
@@ -387,29 +398,36 @@ func (s goalRoutes) RegisterRoutes(api huma.API) {
 		return &resourceResponse[persistence.Goal]{ETag: application.StrongETag("goal", goal.ID, goal.Revision), Body: goal}, nil
 	})
 	type getInput struct {
-		ID string `path:"goal_id"`
+		ID      string `path:"goal_id"`
+		Deleted bool   `query:"deleted"`
 	}
 	register(api, "get-goal", http.MethodGet, "/goals/{goal_id}", "Get goal", userSecurity(), func(ctx context.Context, input *getInput) (*resourceResponse[persistence.Goal], error) {
 		p := principal(ctx)
 		var goal persistence.Goal
-		if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.ID, p.UserID).First(&goal).Error; err != nil {
+		query := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.ID, p.UserID)
+		if input.Deleted {
+			query = query.Where("deleted_at IS NOT NULL")
+		} else {
+			query = query.Where("deleted_at IS NULL")
+		}
+		if err := query.First(&goal).Error; err != nil {
 			return nil, mapError(err)
 		}
 		return &resourceResponse[persistence.Goal]{ETag: application.StrongETag("goal", goal.ID, goal.Revision), Body: goal}, nil
 	})
 	type patchInput struct {
 		ID      string `path:"goal_id"`
-		IfMatch string `header:"If-Match" required:"true"`
+		IfMatch string `header:"If-Match"`
 		Body    struct {
-			Title           *string `json:"title,omitempty"`
-			Description     *string `json:"description,omitempty"`
-			SuccessCriteria *string `json:"success_criteria,omitempty"`
-			Status          *string `json:"status,omitempty"`
-			TargetDate      *string `json:"target_date,omitempty"`
+			Title           *string        `json:"title,omitempty"`
+			Description     *string        `json:"description,omitempty"`
+			SuccessCriteria *string        `json:"success_criteria,omitempty"`
+			Status          *string        `json:"status,omitempty" enum:"draft,active,paused,completed,abandoned,archived"`
+			TargetDate      nullableString `json:"target_date,omitempty" required:"false"`
 		}
 	}
 	register(api, "patch-goal", http.MethodPatch, "/goals/{goal_id}", "Update goal", userSecurity(), func(ctx context.Context, input *patchInput) (*resourceResponse[persistence.Goal], error) {
-		expected, err := revisionFromETag(input.IfMatch)
+		expected, err := revisionFromResourceETag(input.IfMatch, "goal", input.ID)
 		if err != nil {
 			return nil, mapError(err)
 		}
@@ -426,8 +444,11 @@ func (s goalRoutes) RegisterRoutes(api huma.API) {
 		if input.Body.Status != nil {
 			changes["status"] = *input.Body.Status
 		}
-		if input.Body.TargetDate != nil {
-			changes["target_date"] = *input.Body.TargetDate
+		if input.Body.TargetDate.Sent {
+			changes["target_date"] = nil
+			if !input.Body.TargetDate.Null {
+				changes["target_date"] = input.Body.TargetDate.Value
+			}
 		}
 		goal, e := s.app.UpdateGoal(ctx, principal(ctx).UserID, input.ID, expected, changes)
 		if e != nil {
@@ -435,6 +456,36 @@ func (s goalRoutes) RegisterRoutes(api huma.API) {
 		}
 		return &resourceResponse[persistence.Goal]{ETag: application.StrongETag("goal", goal.ID, goal.Revision), Body: *goal}, nil
 	})
+	type lifecycleInput struct {
+		ID             string `path:"goal_id"`
+		IfMatch        string `header:"If-Match"`
+		IdempotencyKey string `header:"Idempotency-Key"`
+	}
+	for _, definition := range []struct {
+		id, method, path string
+		restore          bool
+	}{
+		{"delete-goal", http.MethodDelete, "/goals/{goal_id}", false},
+		{"restore-goal", http.MethodPost, "/goals/{goal_id}/restorations", true},
+	} {
+		definition := definition
+		register(api, definition.id, definition.method, definition.path, "Recoverably delete or restore a goal and its task tree", userSecurity(), func(ctx context.Context, input *lifecycleInput) (*resourceResponse[persistence.Goal], error) {
+			revision, err := revisionFromResourceETag(input.IfMatch, "goal", input.ID)
+			if err != nil {
+				return nil, mapError(err)
+			}
+			var goal *persistence.Goal
+			if definition.restore {
+				goal, err = s.app.RestoreGoal(ctx, principal(ctx).UserID, input.ID, revision)
+			} else {
+				goal, err = s.app.DeleteGoal(ctx, principal(ctx).UserID, input.ID, revision)
+			}
+			if err != nil {
+				return nil, mapError(err)
+			}
+			return &resourceResponse[persistence.Goal]{ETag: application.StrongETag("goal", goal.ID, goal.Revision), Body: *goal}, nil
+		})
+	}
 }
 
 func (s taskRoutes) RegisterRoutes(api huma.API) {
@@ -442,11 +493,17 @@ func (s taskRoutes) RegisterRoutes(api huma.API) {
 		GoalID   string `query:"goal_id"`
 		ParentID string `query:"parent_id"`
 		Status   string `query:"status"`
+		Deleted  bool   `query:"deleted"`
 	}
 	register(api, "list-tasks", http.MethodGet, "/tasks", "List tasks", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.Task], error) {
 		p := principal(ctx)
 		var tasks []persistence.Task
 		q := s.app.Store.DB.WithContext(ctx).Where("user_id = ?", p.UserID)
+		if input.Deleted {
+			q = q.Where("deleted_at IS NOT NULL")
+		} else {
+			q = q.Where("deleted_at IS NULL AND EXISTS (SELECT 1 FROM goals WHERE goals.id = tasks.goal_id AND goals.deleted_at IS NULL)")
+		}
 		if input.GoalID != "" {
 			q = q.Where("goal_id = ?", input.GoalID)
 		}
@@ -466,53 +523,64 @@ func (s taskRoutes) RegisterRoutes(api huma.API) {
 	type createInput struct {
 		IdempotencyKey string `header:"Idempotency-Key"`
 		Body           struct {
-			GoalID          string  `json:"goal_id"`
-			ParentID        *string `json:"parent_id,omitempty"`
-			Type            string  `json:"type" enum:"milestone,task,action"`
-			Title           string  `json:"title" minLength:"1"`
-			Description     string  `json:"description,omitempty"`
-			SuccessCriteria string  `json:"success_criteria" minLength:"1"`
-			EstimateMinutes int     `json:"estimate_minutes" minimum:"1" maximum:"1440"`
-			MinimumAction   string  `json:"minimum_action" minLength:"1"`
-			Priority        int     `json:"priority" minimum:"0" maximum:"100"`
-			Position        int     `json:"position"`
+			GoalID          string             `json:"goal_id"`
+			ParentID        *string            `json:"parent_id,omitempty"`
+			DependsOn       optionalStringList `json:"depends_on,omitempty" required:"false"`
+			Type            string             `json:"type" enum:"milestone,task,action"`
+			Title           string             `json:"title" minLength:"1"`
+			Description     string             `json:"description,omitempty"`
+			SuccessCriteria string             `json:"success_criteria" minLength:"1"`
+			EstimateMinutes int                `json:"estimate_minutes" minimum:"1" maximum:"1440"`
+			MinimumAction   string             `json:"minimum_action" minLength:"1"`
+			Priority        int                `json:"priority" minimum:"0" maximum:"100"`
+			Position        int                `json:"position"`
 		}
 	}
 	register(api, "create-task", http.MethodPost, "/tasks", "Create task", userSecurity(), func(ctx context.Context, input *createInput) (*resourceResponse[persistence.Task], error) {
 		b := input.Body
-		task := persistence.Task{GoalID: b.GoalID, ParentID: b.ParentID, Type: b.Type, Title: b.Title, Description: b.Description, SuccessCriteria: b.SuccessCriteria, EstimateMinutes: b.EstimateMinutes, MinimumAction: b.MinimumAction, Priority: b.Priority, Position: b.Position}
-		if err := s.app.CreateTask(ctx, principal(ctx).UserID, &task); err != nil {
+		task := persistence.Task{GoalID: b.GoalID, ParentID: b.ParentID, DependsOn: b.DependsOn.Value, Type: b.Type, Title: b.Title, Description: b.Description, SuccessCriteria: b.SuccessCriteria, EstimateMinutes: b.EstimateMinutes, MinimumAction: b.MinimumAction, Priority: b.Priority, Position: b.Position}
+		if err := s.app.CreateTaskWithExplicitPriority(ctx, principal(ctx).UserID, &task); err != nil {
 			return nil, mapError(err)
 		}
 		return &resourceResponse[persistence.Task]{ETag: application.StrongETag("task", task.ID, task.Revision), Body: task}, nil
 	})
 	type getInput struct {
-		ID string `path:"task_id"`
+		ID      string `path:"task_id"`
+		Deleted bool   `query:"deleted"`
 	}
 	register(api, "get-task", http.MethodGet, "/tasks/{task_id}", "Get task", userSecurity(), func(ctx context.Context, input *getInput) (*resourceResponse[persistence.Task], error) {
 		var task persistence.Task
-		if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID).First(&task).Error; err != nil {
+		query := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.ID, principal(ctx).UserID)
+		if input.Deleted {
+			query = query.Where("deleted_at IS NOT NULL")
+		} else {
+			query = query.Where("deleted_at IS NULL AND EXISTS (SELECT 1 FROM goals WHERE goals.id = tasks.goal_id AND goals.deleted_at IS NULL)")
+		}
+		if err := query.First(&task).Error; err != nil {
 			return nil, mapError(err)
 		}
 		return &resourceResponse[persistence.Task]{ETag: application.StrongETag("task", task.ID, task.Revision), Body: task}, nil
 	})
 	type patchInput struct {
 		ID      string `path:"task_id"`
-		IfMatch string `header:"If-Match" required:"true"`
+		IfMatch string `header:"If-Match"`
 		Body    struct {
-			ParentID        *string `json:"parent_id,omitempty"`
-			Title           *string `json:"title,omitempty"`
-			Description     *string `json:"description,omitempty"`
-			Status          *string `json:"status,omitempty"`
-			Priority        *int    `json:"priority,omitempty"`
-			EstimateMinutes *int    `json:"estimate_minutes,omitempty"`
-			SuccessCriteria *string `json:"success_criteria,omitempty"`
-			MinimumAction   *string `json:"minimum_action,omitempty"`
-			BlockedReason   *string `json:"blocked_reason,omitempty"`
+			ParentID        nullableString     `json:"parent_id,omitempty" required:"false"`
+			DependsOn       optionalStringList `json:"depends_on,omitempty" required:"false"`
+			Type            *string            `json:"type,omitempty" enum:"milestone,task,action"`
+			Title           *string            `json:"title,omitempty"`
+			Description     *string            `json:"description,omitempty"`
+			Status          *string            `json:"status,omitempty" enum:"ready,in_progress,blocked,paused,cancelled,superseded"`
+			Priority        *int               `json:"priority,omitempty" minimum:"0" maximum:"100"`
+			EstimateMinutes *int               `json:"estimate_minutes,omitempty" minimum:"1" maximum:"1440"`
+			Position        *int               `json:"position,omitempty" minimum:"0"`
+			SuccessCriteria *string            `json:"success_criteria,omitempty"`
+			MinimumAction   *string            `json:"minimum_action,omitempty"`
+			BlockedReason   *string            `json:"blocked_reason,omitempty"`
 		}
 	}
 	register(api, "patch-task", http.MethodPatch, "/tasks/{task_id}", "Update task", userSecurity(), func(ctx context.Context, input *patchInput) (*resourceResponse[persistence.Task], error) {
-		expected, e := revisionFromETag(input.IfMatch)
+		expected, e := revisionFromResourceETag(input.IfMatch, "task", input.ID)
 		if e != nil {
 			return nil, mapError(e)
 		}
@@ -520,6 +588,17 @@ func (s taskRoutes) RegisterRoutes(api huma.API) {
 		body, _ := json.Marshal(input.Body)
 		var raw map[string]any
 		_ = json.Unmarshal(body, &raw)
+		delete(raw, "depends_on")
+		if input.Body.DependsOn.Sent {
+			raw["depends_on"] = input.Body.DependsOn.Value
+		}
+		delete(raw, "parent_id")
+		if input.Body.ParentID.Sent {
+			raw["parent_id"] = nil
+			if !input.Body.ParentID.Null {
+				raw["parent_id"] = input.Body.ParentID.Value
+			}
+		}
 		for k, v := range raw {
 			changes[k] = v
 		}
@@ -529,6 +608,36 @@ func (s taskRoutes) RegisterRoutes(api huma.API) {
 		}
 		return &resourceResponse[persistence.Task]{ETag: application.StrongETag("task", task.ID, task.Revision), Body: *task}, nil
 	})
+	type lifecycleInput struct {
+		ID             string `path:"task_id"`
+		IfMatch        string `header:"If-Match"`
+		IdempotencyKey string `header:"Idempotency-Key"`
+	}
+	for _, definition := range []struct {
+		id, method, path string
+		restore          bool
+	}{
+		{"delete-task", http.MethodDelete, "/tasks/{task_id}", false},
+		{"restore-task", http.MethodPost, "/tasks/{task_id}/restorations", true},
+	} {
+		definition := definition
+		register(api, definition.id, definition.method, definition.path, "Recoverably delete or restore a task subtree", userSecurity(), func(ctx context.Context, input *lifecycleInput) (*resourceResponse[persistence.Task], error) {
+			revision, err := revisionFromResourceETag(input.IfMatch, "task", input.ID)
+			if err != nil {
+				return nil, mapError(err)
+			}
+			var task *persistence.Task
+			if definition.restore {
+				task, err = s.app.RestoreTask(ctx, principal(ctx).UserID, input.ID, revision)
+			} else {
+				task, err = s.app.DeleteTask(ctx, principal(ctx).UserID, input.ID, revision)
+			}
+			if err != nil {
+				return nil, mapError(err)
+			}
+			return &resourceResponse[persistence.Task]{ETag: application.StrongETag("task", task.ID, task.Revision), Body: *task}, nil
+		})
+	}
 	type completionInput struct {
 		ID             string `path:"task_id"`
 		IfMatch        string `header:"If-Match" required:"true"`
@@ -539,7 +648,7 @@ func (s taskRoutes) RegisterRoutes(api huma.API) {
 		}
 	}
 	register(api, "complete-task", http.MethodPost, "/tasks/{task_id}/completions", "Complete task", userSecurity(), func(ctx context.Context, input *completionInput) (*resourceResponse[persistence.Task], error) {
-		rev, e := revisionFromETag(input.IfMatch)
+		rev, e := revisionFromResourceETag(input.IfMatch, "task", input.ID)
 		if e != nil {
 			return nil, mapError(e)
 		}
@@ -550,7 +659,7 @@ func (s taskRoutes) RegisterRoutes(api huma.API) {
 		return &resourceResponse[persistence.Task]{ETag: application.StrongETag("task", task.ID, task.Revision), Body: *task}, nil
 	})
 	register(api, "reopen-task", http.MethodPost, "/tasks/{task_id}/reopenings", "Reopen task", userSecurity(), func(ctx context.Context, input *completionInput) (*resourceResponse[persistence.Task], error) {
-		rev, e := revisionFromETag(input.IfMatch)
+		rev, e := revisionFromResourceETag(input.IfMatch, "task", input.ID)
 		if e != nil {
 			return nil, mapError(e)
 		}
@@ -583,18 +692,34 @@ func (s taskTreeRoutes) RegisterRoutes(api huma.API) {
 	}
 	register(api, "get-task-tree", http.MethodGet, "/goals/{goal_id}/task-tree", "Get task tree", userSecurity(), func(ctx context.Context, input *goalInput) (*resourceResponse[treeBody], error) {
 		p := principal(ctx)
-		var goal persistence.Goal
-		if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.GoalID, p.UserID).First(&goal).Error; err != nil {
+		var body treeBody
+		err := s.app.Store.Transaction(ctx, func(tx *gorm.DB) error {
+			// A retry must build one complete projection from its own snapshot.
+			// Never pair earlier task rows with a later tree version or proposal list.
+			body = treeBody{}
+			var goal persistence.Goal
+			if err := tx.Where("id = ? AND user_id = ? AND deleted_at IS NULL", input.GoalID, p.UserID).First(&goal).Error; err != nil {
+				return err
+			}
+			var tasks []persistence.Task
+			if err := tx.Where("goal_id = ? AND user_id = ? AND deleted_at IS NULL", goal.ID, p.UserID).Find(&tasks).Error; err != nil {
+				return err
+			}
+			var revision int
+			if err := tx.Model(&persistence.TaskTreeRevision{}).Where("goal_id = ? AND user_id = ?", goal.ID, p.UserID).Select("COALESCE(MAX(revision),0)").Scan(&revision).Error; err != nil {
+				return err
+			}
+			var proposals []persistence.Proposal
+			if err := tx.Where("goal_id = ? AND user_id = ? AND status = 'pending'", goal.ID, p.UserID).Find(&proposals).Error; err != nil {
+				return err
+			}
+			body = treeBody{goal.ID, revision, application.BuildTree(tasks), proposals}
+			return nil
+		})
+		if err != nil {
 			return nil, mapError(err)
 		}
-		var tasks []persistence.Task
-		s.app.Store.DB.WithContext(ctx).Where("goal_id = ? AND user_id = ?", goal.ID, p.UserID).Find(&tasks)
-		var revision int
-		s.app.Store.DB.Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", goal.ID).Select("COALESCE(MAX(revision),0)").Scan(&revision)
-		var proposals []persistence.Proposal
-		s.app.Store.DB.Where("goal_id = ? AND user_id = ? AND status = 'pending'", goal.ID, p.UserID).Find(&proposals)
-		body := treeBody{goal.ID, revision, application.BuildTree(tasks), proposals}
-		return &resourceResponse[treeBody]{ETag: application.StrongETag("tree", goal.ID, revision), Body: body}, nil
+		return &resourceResponse[treeBody]{ETag: application.StrongETag("tree", body.GoalID, body.Revision), Body: body}, nil
 	})
 	type jobInput struct {
 		GoalID         string `path:"goal_id"`
@@ -609,8 +734,11 @@ func (s taskTreeRoutes) RegisterRoutes(api huma.API) {
 		return func(ctx context.Context, input *jobInput) (*acceptedResponse, error) {
 			userID := principal(ctx).UserID
 			var goal persistence.Goal
-			if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", input.GoalID, userID).First(&goal).Error; err != nil {
+			if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ? AND deleted_at IS NULL", input.GoalID, userID).First(&goal).Error; err != nil {
 				return nil, mapError(err)
+			}
+			if goal.Status != "active" {
+				return nil, mapError(application.ErrConflict)
 			}
 			var base int
 			if err := s.app.Store.DB.WithContext(ctx).Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", goal.ID).Select("COALESCE(MAX(revision),0)").Scan(&base).Error; err != nil {
@@ -690,6 +818,44 @@ func (s taskTreeRoutes) RegisterRoutes(api huma.API) {
 }
 
 func (s planRoutes) RegisterRoutes(api huma.API) {
+	type settingsInput struct{}
+	register(api, "get-planning-settings", http.MethodGet, "/planning-settings", "Get research focus and daily budget", userSecurity(), func(ctx context.Context, input *settingsInput) (*resourceResponse[persistence.PlanningSettings], error) {
+		userID := principal(ctx).UserID
+		settings, err := s.app.GetPlanningSettings(ctx, userID)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &resourceResponse[persistence.PlanningSettings]{ETag: application.StrongETag("settings", userID, settings.Revision), Body: *settings}, nil
+	})
+	type putSettingsInput struct {
+		IfMatch string `header:"If-Match" required:"true"`
+		Body    struct {
+			PrimaryGoalID      *string `json:"primary_goal_id"`
+			DailyBudgetMinutes int     `json:"daily_budget_minutes" minimum:"30" maximum:"480"`
+		}
+	}
+	register(api, "update-planning-settings", http.MethodPut, "/planning-settings", "Set research focus and daily budget; today's plan stays stable", userSecurity(), func(ctx context.Context, input *putSettingsInput) (*resourceResponse[persistence.PlanningSettings], error) {
+		userID := principal(ctx).UserID
+		revision, err := revisionFromResourceETag(input.IfMatch, "settings", userID)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		settings, err := s.app.UpdatePlanningSettings(ctx, userID, revision, input.Body.PrimaryGoalID, input.Body.DailyBudgetMinutes)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &resourceResponse[persistence.PlanningSettings]{ETag: application.StrongETag("settings", userID, settings.Revision), Body: *settings}, nil
+	})
+	type scheduleInput struct{}
+	register(api, "get-schedule", http.MethodGet, "/schedule", "Get the next seven calendar days of research tasks", userSecurity(), func(ctx context.Context, input *scheduleInput) (*listResponse[application.ScheduleDay], error) {
+		days, err := s.app.RefreshSchedule(ctx, principal(ctx).UserID, persistence.Now())
+		if err != nil {
+			return nil, mapError(err)
+		}
+		out := &listResponse[application.ScheduleDay]{}
+		out.Body.Items = days
+		return out, nil
+	})
 	type listInput struct{}
 	register(api, "list-daily-plans", http.MethodGet, "/daily-plans", "List daily plans", userSecurity(), func(ctx context.Context, input *listInput) (*listResponse[persistence.DailyPlan], error) {
 		var plans []persistence.DailyPlan
@@ -722,19 +888,19 @@ func (s planRoutes) RegisterRoutes(api huma.API) {
 	type currentInput struct{}
 	register(api, "current-daily-plan", http.MethodGet, "/daily-plans/current", "Get current daily plan", userSecurity(), func(ctx context.Context, input *currentInput) (*resourceResponse[map[string]any], error) {
 		p := principal(ctx)
-		var user persistence.User
-		if err := s.app.Store.DB.First(&user, "id = ?", p.UserID).Error; err != nil {
+		plan, items, err := s.currentPlan(ctx, p.UserID)
+		if err != nil {
 			return nil, mapError(err)
 		}
-		loc, _ := time.LoadLocation(user.Timezone)
-		date := time.Now().In(loc).Format("2006-01-02")
-		var plan persistence.DailyPlan
-		if err := s.app.Store.DB.Where("user_id = ? AND local_date = ? AND timezone = ?", p.UserID, date, user.Timezone).First(&plan).Error; err != nil {
+		availability, err := s.app.GetPlanningAvailability(ctx, p.UserID, plan.ID)
+		if err != nil {
 			return nil, mapError(err)
 		}
-		var items []persistence.DailyPlanItem
-		s.app.Store.DB.Where("plan_id = ? AND plan_revision = ? AND status != 'superseded'", plan.ID, plan.CurrentRevision).Order("kind, position").Find(&items)
-		return &resourceResponse[map[string]any]{ETag: application.StrongETag("plan", plan.ID, plan.Revision), Body: map[string]any{"plan": plan, "items": items}}, nil
+		views, err := s.app.PlanItemViews(ctx, p.UserID, items)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &resourceResponse[map[string]any]{ETag: application.StrongETag("plan", plan.ID, plan.Revision), Body: map[string]any{"plan": plan, "items": items, "today_items": views, "availability": availability}}, nil
 	})
 	type getInput struct {
 		PlanID string `path:"plan_id"`
@@ -745,8 +911,14 @@ func (s planRoutes) RegisterRoutes(api huma.API) {
 			return nil, mapError(err)
 		}
 		var items []persistence.DailyPlanItem
-		s.app.Store.DB.Where("plan_id = ? AND plan_revision = ?", plan.ID, plan.CurrentRevision).Order("kind, position").Find(&items)
-		return &resourceResponse[map[string]any]{ETag: application.StrongETag("plan", plan.ID, plan.Revision), Body: map[string]any{"plan": plan, "items": items}}, nil
+		if err := s.app.Store.DB.WithContext(ctx).Where("plan_id = ? AND plan_revision = ? AND user_id = ?", plan.ID, plan.CurrentRevision, principal(ctx).UserID).Order("kind, position").Find(&items).Error; err != nil {
+			return nil, mapError(err)
+		}
+		views, err := s.app.PlanItemViews(ctx, principal(ctx).UserID, items)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &resourceResponse[map[string]any]{ETag: application.StrongETag("plan", plan.ID, plan.Revision), Body: map[string]any{"plan": plan, "items": items, "today_items": views}}, nil
 	})
 	register(api, "list-daily-plan-revisions", http.MethodGet, "/daily-plans/{plan_id}/revisions", "List plan revisions", userSecurity(), func(ctx context.Context, input *getInput) (*listResponse[persistence.DailyPlanRevision], error) {
 		var plan persistence.DailyPlan
@@ -767,7 +939,7 @@ func (s planRoutes) RegisterRoutes(api huma.API) {
 		}
 	}
 	register(api, "patch-daily-plan", http.MethodPatch, "/daily-plans/{plan_id}", "Update plan status", userSecurity(), func(ctx context.Context, input *patchPlanInput) (*resourceResponse[persistence.DailyPlan], error) {
-		rev, e := revisionFromETag(input.IfMatch)
+		rev, e := revisionFromResourceETag(input.IfMatch, "plan", input.PlanID)
 		if e != nil {
 			return nil, mapError(e)
 		}
@@ -810,7 +982,7 @@ func (s planRoutes) RegisterRoutes(api huma.API) {
 		}
 	}
 	register(api, "add-daily-plan-item", http.MethodPost, "/daily-plans/{plan_id}/items", "Add daily plan item", userSecurity(), func(ctx context.Context, input *addItemInput) (*resourceResponse[persistence.DailyPlanItem], error) {
-		rev, e := revisionFromETag(input.IfMatch)
+		rev, e := revisionFromResourceETag(input.IfMatch, "plan", input.PlanID)
 		if e != nil {
 			return nil, mapError(e)
 		}
@@ -846,7 +1018,7 @@ func (s planRoutes) RegisterRoutes(api huma.API) {
 		}
 	}
 	register(api, "patch-daily-plan-item", http.MethodPatch, "/daily-plans/{plan_id}/items/{item_id}", "Update plan item", userSecurity(), func(ctx context.Context, input *patchItemInput) (*resourceResponse[persistence.DailyPlanItem], error) {
-		rev, e := revisionFromETag(input.IfMatch)
+		rev, e := revisionFromResourceETag(input.IfMatch, "dpi", input.ItemID)
 		if e != nil {
 			return nil, mapError(e)
 		}
@@ -868,14 +1040,50 @@ func (s planRoutes) RegisterRoutes(api huma.API) {
 			Type           string   `json:"type" enum:"result,step,time,minimum_action"`
 			Summary        string   `json:"summary"`
 			WorkSessionIDs []string `json:"work_session_ids,omitempty"`
+			CompleteTask   bool     `json:"complete_task,omitempty"`
+			TaskIfMatch    string   `json:"task_if_match,omitempty"`
 		}
 	}
 	register(api, "complete-daily-plan-item", http.MethodPost, "/daily-plans/{plan_id}/items/{item_id}/completions", "Complete plan item", userSecurity(), func(ctx context.Context, input *completeInput) (*resourceResponse[persistence.DailyPlanItem], error) {
-		rev, e := revisionFromETag(input.IfMatch)
+		rev, e := revisionFromResourceETag(input.IfMatch, "dpi", input.ItemID)
 		if e != nil {
 			return nil, mapError(e)
 		}
-		item, err := s.app.CompletePlanItem(ctx, principal(ctx).UserID, input.ItemID, rev, input.Body.Type, input.Body.Summary, input.Body.WorkSessionIDs)
+		command := application.PlanItemCompletionCommand{PlanID: input.PlanID, ItemID: input.ItemID, Expected: rev, Type: input.Body.Type, Summary: input.Body.Summary, WorkSessionIDs: input.Body.WorkSessionIDs, CompleteTask: input.Body.CompleteTask}
+		if command.CompleteTask {
+			var item persistence.DailyPlanItem
+			if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND plan_id = ? AND user_id = ?", input.ItemID, input.PlanID, principal(ctx).UserID).First(&item).Error; err != nil {
+				return nil, mapError(err)
+			}
+			if item.TaskID == nil {
+				return nil, mapError(application.ErrValidation)
+			}
+			command.ExpectedTask, e = revisionFromResourceETag(input.Body.TaskIfMatch, "task", *item.TaskID)
+			if e != nil {
+				return nil, mapError(e)
+			}
+		}
+		item, err := s.app.CompletePlanItemWithTask(ctx, principal(ctx).UserID, command)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &resourceResponse[persistence.DailyPlanItem]{ETag: application.StrongETag("dpi", item.ID, item.Revision), Body: *item}, nil
+	})
+	type reopenInput struct {
+		PlanID         string `path:"plan_id"`
+		ItemID         string `path:"item_id"`
+		IfMatch        string `header:"If-Match" required:"true"`
+		IdempotencyKey string `header:"Idempotency-Key"`
+		Body           struct {
+			Summary string `json:"summary" minLength:"1"`
+		}
+	}
+	register(api, "reopen-daily-plan-item", http.MethodPost, "/daily-plans/{plan_id}/items/{item_id}/reopenings", "Reopen daily commitment without discarding work evidence", userSecurity(), func(ctx context.Context, input *reopenInput) (*resourceResponse[persistence.DailyPlanItem], error) {
+		rev, err := revisionFromResourceETag(input.IfMatch, "dpi", input.ItemID)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		item, err := s.app.ReopenPlanItem(ctx, principal(ctx).UserID, input.PlanID, input.ItemID, rev, input.Body.Summary)
 		if err != nil {
 			return nil, mapError(err)
 		}
@@ -887,23 +1095,14 @@ func (s planRoutes) RegisterRoutes(api huma.API) {
 		IdempotencyKey string `header:"Idempotency-Key"`
 	}
 	register(api, "generate-support-items", http.MethodPost, "/daily-plans/{plan_id}/support-generation-jobs", "Generate support items", userSecurity(), func(ctx context.Context, input *supportInput) (*acceptedResponse, error) {
-		var plan persistence.DailyPlan
-		if err := s.app.Store.DB.Where("id = ? AND user_id = ?", input.PlanID, principal(ctx).UserID).First(&plan).Error; err != nil {
-			return nil, mapError(err)
-		}
-		rev, err := revisionFromETag(input.IfMatch)
+		rev, err := revisionFromResourceETag(input.IfMatch, "plan", input.PlanID)
 		if err != nil {
 			return nil, mapError(err)
 		}
-		if rev != plan.Revision {
+		if rev <= 0 {
 			return nil, mapError(application.ErrRevision)
 		}
-		var count int64
-		s.app.Store.DB.Model(&persistence.DailyPlanItem{}).Where("plan_id = ? AND kind = 'core' AND status != 'satisfied' AND status != 'superseded'", input.PlanID).Count(&count)
-		if count > 0 {
-			return nil, mapError(domain.ErrSupportBeforeCoreDone)
-		}
-		job, err := s.app.CreateJob(ctx, principal(ctx).UserID, "support_generation", "daily_plan", input.PlanID, 0, map[string]any{})
+		job, err := s.app.CreateJob(ctx, principal(ctx).UserID, "support_generation", "daily_plan", input.PlanID, rev, map[string]any{})
 		if err != nil {
 			return nil, mapError(err)
 		}
@@ -917,6 +1116,27 @@ func (s sessionRoutes) RegisterRoutes(api huma.API) {
 		var items []persistence.WorkSession
 		if err := s.app.Store.DB.Where("user_id = ?", principal(ctx).UserID).Order("created_at DESC").Find(&items).Error; err != nil {
 			return nil, mapError(err)
+		}
+		itemIDs := make([]string, 0, len(items))
+		for _, session := range items {
+			if session.DailyPlanItemID != nil {
+				itemIDs = append(itemIDs, *session.DailyPlanItemID)
+			}
+		}
+		var planItems []persistence.DailyPlanItem
+		if len(itemIDs) > 0 {
+			if err := s.app.Store.DB.Where("user_id = ? AND id IN ?", principal(ctx).UserID, itemIDs).Find(&planItems).Error; err != nil {
+				return nil, mapError(err)
+			}
+		}
+		logicalIDs := map[string]string{}
+		for _, item := range planItems {
+			logicalIDs[item.ID] = item.LogicalID
+		}
+		for i := range items {
+			if items[i].DailyPlanItemID != nil {
+				items[i].DailyPlanItemLogicalID = logicalIDs[*items[i].DailyPlanItemID]
+			}
 		}
 		out := &listResponse[persistence.WorkSession]{}
 		out.Body.Items = items
@@ -1331,12 +1551,16 @@ func (s deviceRoutes) RegisterRoutes(api huma.API) {
 	}
 	type pollBody struct {
 		DeviceID             string                      `json:"device_id"`
+		DailyPlanID          string                      `json:"daily_plan_id"`
 		LocalDate            string                      `json:"local_date"`
 		Timezone             string                      `json:"timezone"`
 		PlanStatus           string                      `json:"plan_status"`
 		PlanRevision         int                         `json:"plan_revision"`
+		PlanETag             string                      `json:"plan_etag"`
 		UpdatedAt            time.Time                   `json:"updated_at"`
 		CoreItems            []persistence.DailyPlanItem `json:"core_items"`
+		TodayItems           []application.PlanItemView  `json:"today_items"`
+		ReadOnly             bool                        `json:"read_only"`
 		NextPollAfterSeconds int                         `json:"next_poll_after_seconds"`
 	}
 	type pollResponse struct {
@@ -1350,17 +1574,26 @@ func (s deviceRoutes) RegisterRoutes(api huma.API) {
 		if err != nil {
 			return nil, huma.Error401Unauthorized("invalid device token")
 		}
-		loc, _ := time.LoadLocation(device.Timezone)
-		date := time.Now().In(loc).Format("2006-01-02")
-		var plan persistence.DailyPlan
-		body := pollBody{DeviceID: device.ID, LocalDate: date, Timezone: device.Timezone, CoreItems: []persistence.DailyPlanItem{}, NextPollAfterSeconds: 300, UpdatedAt: persistence.Now()}
-		if err := s.app.Store.DB.Where("user_id = ? AND local_date = ? AND timezone = ?", device.UserID, date, device.Timezone).First(&plan).Error; err == nil {
-			body.PlanStatus, body.PlanRevision, body.UpdatedAt = plan.Status, plan.CurrentRevision, plan.UpdatedAt
-			s.app.Store.DB.Where("plan_id = ? AND plan_revision = ? AND kind = 'core' AND status != 'superseded'", plan.ID, plan.CurrentRevision).Order("position").Limit(3).Find(&body.CoreItems)
+		var user persistence.User
+		if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND status = 'active'", device.UserID).First(&user).Error; err != nil {
+			return nil, huma.Error401Unauthorized("invalid device owner")
 		}
-		payload, _ := json.Marshal(body)
-		etag := "\"device-view_" + device.ID + "_" + persistence.Hash(string(payload))[:16] + "\""
-		if input.IfNoneMatch == etag {
+		plan, items, err := s.currentPlan(ctx, device.UserID)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		views, err := s.app.PlanItemViews(ctx, device.UserID, items)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		body := pollBody{DeviceID: device.ID, DailyPlanID: plan.ID, LocalDate: plan.LocalDate, Timezone: plan.Timezone, CoreItems: []persistence.DailyPlanItem{}, TodayItems: views, ReadOnly: true, NextPollAfterSeconds: 300, UpdatedAt: plan.UpdatedAt, PlanStatus: plan.Status, PlanRevision: plan.CurrentRevision, PlanETag: application.StrongETag("plan", plan.ID, plan.Revision)}
+		for _, item := range items {
+			if item.Kind == "core" && item.Status != "skipped" && len(body.CoreItems) < 3 {
+				body.CoreItems = append(body.CoreItems, item)
+			}
+		}
+		etag := viewETag("device-view", device.ID, body)
+		if matchesReadETag(input.IfNoneMatch, etag) {
 			return &pollResponse{Status: http.StatusNotModified, ETag: etag, CacheControl: "private, no-cache", Body: nil}, nil
 		}
 		return &pollResponse{Status: 200, ETag: etag, CacheControl: "private, no-cache", Body: &body}, nil
@@ -1368,6 +1601,7 @@ func (s deviceRoutes) RegisterRoutes(api huma.API) {
 }
 
 func (s panelRoutes) RegisterRoutes(api huma.API) {
+	s.registerTaskList(api)
 	type input struct {
 		Authorization string `header:"Authorization"`
 	}
@@ -1385,51 +1619,46 @@ func (s panelRoutes) RegisterRoutes(api huma.API) {
 		UpdatedAt     time.Time `json:"updated_at"`
 	}
 	register(api, "panel-summary", http.MethodGet, "/panel/summary", "FastResearch panel summary", publicSecurity(), func(ctx context.Context, input *input) (*itemResponse[body], error) {
-		var userID string
-		if input.Authorization != "" {
-			p, err := s.auth.Authenticate(input.Authorization)
-			if err == nil {
-				userID = p.UserID
-			} else {
-				service, serviceErr := s.auth.AuthenticatePanel(input.Authorization)
-				if serviceErr != nil {
-					return nil, huma.Error401Unauthorized("authentication required")
-				}
-				userID = service.UserID
-			}
-		} else {
-			return nil, huma.Error401Unauthorized("authentication required")
+		userID, err := s.panelUser(ctx, input.Authorization, "panel:summary:read")
+		if err != nil {
+			return nil, err
 		}
-		var user persistence.User
-		if err := s.app.Store.DB.First(&user, "id = ?", userID).Error; err != nil {
+		plan, items, err := s.currentPlan(ctx, userID)
+		if err != nil {
 			return nil, mapError(err)
 		}
-		loc, _ := time.LoadLocation(user.Timezone)
-		date := time.Now().In(loc).Format("2006-01-02")
-		result := body{LocalDate: date, Timezone: user.Timezone, EntryURL: "/today", UpdatedAt: persistence.Now()}
-		var plan persistence.DailyPlan
-		if err := s.app.Store.DB.Where("user_id = ? AND local_date = ? AND timezone = ?", user.ID, date, user.Timezone).First(&plan).Error; err == nil {
-			result.DailyPlanID, result.PlanStatus, result.UpdatedAt = plan.ID, plan.Status, plan.UpdatedAt
-			var items []persistence.DailyPlanItem
-			s.app.Store.DB.Where("plan_id = ? AND plan_revision = ? AND kind = 'core' AND status != 'superseded'", plan.ID, plan.CurrentRevision).Order("position").Find(&items)
-			result.CoreTotal = len(items)
-			for _, item := range items {
+		result := body{LocalDate: plan.LocalDate, Timezone: plan.Timezone, EntryURL: "/today", UpdatedAt: plan.UpdatedAt, DailyPlanID: plan.ID, PlanStatus: plan.Status}
+		for _, item := range items {
+			if item.Kind == "core" && item.Status != "skipped" {
+				result.CoreTotal++
 				if item.Status == "satisfied" {
 					result.CoreSatisfied++
-				} else if result.CurrentItem == nil {
-					result.CurrentItem = &current{item.ID, item.Title, item.MinimumAction}
+				} else if result.CurrentItem == nil && plan.Status == "active" && (item.Status == "planned" || item.Status == "in_progress") {
+					eligible := true
+					if item.TaskID != nil {
+						var checkErr error
+						eligible, checkErr = s.app.IsTaskExecutable(ctx, userID, *item.TaskID)
+						if checkErr != nil && !errors.Is(checkErr, application.ErrNotFound) && !errors.Is(checkErr, application.ErrConflict) {
+							return nil, mapError(checkErr)
+						}
+					}
+					if eligible {
+						result.CurrentItem = &current{item.ID, item.Title, item.MinimumAction}
+					}
 				}
 			}
 		}
 		var blockers int64
-		s.app.Store.DB.Model(&persistence.Task{}).Where("user_id = ? AND status = 'blocked'", user.ID).Count(&blockers)
+		if err := s.app.Store.DB.WithContext(ctx).Table("tasks t").Joins("JOIN goals g ON g.id = t.goal_id AND g.user_id = t.user_id").Where("t.user_id = ? AND t.status = 'blocked' AND t.deleted_at IS NULL AND g.deleted_at IS NULL", userID).Count(&blockers).Error; err != nil {
+			return nil, mapError(err)
+		}
 		result.HasBlockers = blockers > 0
 		return &itemResponse[body]{Body: result}, nil
 	})
 }
 
 type externalImportSourceBody struct {
-	System      string `json:"system" enum:"fastinsight,fastnews,fastread,fastwrite"`
+	System      string `json:"system" enum:"fastinsight,fastnews,fastread,fastwrite,fastppt,fastlab"`
 	ExternalID  string `json:"external_id" minLength:"1" maxLength:"500"`
 	URL         string `json:"url,omitempty" maxLength:"4000"`
 	ContentHash string `json:"content_hash,omitempty" maxLength:"500"`
@@ -1502,7 +1731,7 @@ func (s importRoutes) RegisterRoutes(api huma.API) {
 
 	type listInput struct {
 		Status           string `query:"status" enum:"candidate,converted,rejected"`
-		SourceSystem     string `query:"source_system" enum:"fastinsight,fastnews,fastread,fastwrite"`
+		SourceSystem     string `query:"source_system" enum:"fastinsight,fastnews,fastread,fastwrite,fastppt,fastlab"`
 		Kind             string `query:"kind" enum:"candidate_task,research_material,progress_evidence,review_issue,generated_report"`
 		SourceExternalID string `query:"source_external_id"`
 		Limit            int    `query:"limit" minimum:"1" maximum:"100" default:"20"`
@@ -1885,7 +2114,14 @@ func idempotencyMiddleware(store *persistence.Store, authService *platformauth.S
 			}
 		}
 		encoded, _ := json.Marshal(envelope)
-		_ = store.DB.Model(&persistence.IdempotencyRecord{}).Where("id = ?", record.ID).Updates(map[string]any{"status_code": c.Writer.Status(), "response_json": string(encoded), "expires_at": persistence.Now().Add(24 * time.Hour)}).Error
+		// The business operation has already run. Retry only saving its receipt,
+		// keeping the in-progress reservation until that response is durable.
+		// A disconnected client must not cancel persistence of a committed result.
+		if err := store.Transaction(context.WithoutCancel(c.Request.Context()), func(tx *gorm.DB) error {
+			return tx.Model(&persistence.IdempotencyRecord{}).Where("id = ?", record.ID).Updates(map[string]any{"status_code": c.Writer.Status(), "response_json": string(encoded), "expires_at": persistence.Now().Add(24 * time.Hour)}).Error
+		}); err != nil {
+			slog.Error("idempotency response receipt was not saved", "record_id", record.ID, "err", err)
+		}
 	}
 }
 
@@ -1932,7 +2168,10 @@ func revisionFromETag(value string) (int, error) {
 }
 func revisionFromResourceETag(value, kind, id string) (int, error) {
 	revision, err := revisionFromETag(value)
-	if err != nil || value != application.StrongETag(kind, id, revision) {
+	if err != nil {
+		return 0, err
+	}
+	if value != application.StrongETag(kind, id, revision) {
 		return 0, application.ErrRevision
 	}
 	return revision, nil

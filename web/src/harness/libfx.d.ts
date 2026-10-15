@@ -20,9 +20,9 @@ declare module 'libfx/node' {
 }
 
 declare module 'libfx' {
-  /** What libfx hands a host tool besides its input. It carries an abort signal and NOTHING else —
-   *  in particular no tool call id, which is why the server correlates a result by
-   *  (run, tool name, newest part without one); see doc/harness.md §4.4.1. */
+  /** What libfx hands a host tool besides its input. It carries an abort signal and NOTHING else.
+   *  FastTask's shim privately envelopes the actual model call identity into input, and its host
+   *  tool verifies and removes that envelope before sending the original input to the server. */
   export type HostToolContext = { signal: AbortSignal }
 
   /** A tool the host exposes to the model. libfx rejects more than 64 of them, a name outside

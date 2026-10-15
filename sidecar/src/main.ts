@@ -123,12 +123,20 @@ export function createSidecarServer(options: SidecarServerOptions) {
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       })
-      const text = await response.text()
-      const parsed = text ? (JSON.parse(text) as Json) : {}
       if (!response.ok) {
-        throw new Error(String(parsed.detail ?? parsed.title ?? `${method} ${path} failed with ${response.status}`))
+        // The HTTP status is already known. A broken/malformed error body must not become the
+        // TypeError reserved for network-only retries of an uncertain successful execution.
+        let parsed: Json = {}
+        try {
+          const text = await response.text()
+          parsed = text ? (JSON.parse(text) as Json) : {}
+        } catch { /* retain the known HTTP status when its body cannot be read */ }
+        const error = new Error(String(parsed.detail ?? parsed.title ?? `${method} ${path} failed with ${response.status}`))
+        error.name = 'HTTPError'
+        throw error
       }
-      return parsed
+      const text = await response.text()
+      return text ? (JSON.parse(text) as Json) : {}
     })
 
   return createServer((request, response) => {

@@ -254,8 +254,8 @@
 .agent-composer-btn:hover { background: rgba(var(--mdui-color-on-surface-variant), var(--mdui-state-layer-hover)); }
 .agent-composer-btn:focus-visible { outline: 2px solid rgb(var(--mdui-color-primary)); outline-offset: -2px; }
 .agent-composer-btn:disabled { cursor: default; }
-.agent-send { background: rgb(var(--mdui-color-primary)); color: rgb(var(--mdui-color-on-primary)); }
-.agent-send:hover { background: rgb(var(--mdui-color-primary)); }
+.agent-send { background: rgb(var(--ft-color-action-fill)); color: rgb(var(--ft-color-on-action)); }
+.agent-send:hover { background: rgb(var(--ft-color-action-hover)); }
 .agent-send:disabled { opacity: .4; }
 /* assistant-ui renders Cancel at all times and disables it when nothing is running; a
    full-contrast control that cannot be used is noise, so it only appears mid-run. */
@@ -399,6 +399,12 @@
   align-items: center;
 }
 
+/* MDUI's internal label must shrink before ellipsis can keep the title's start. */
+.agent-threads-toggle::part(button) { justify-content: flex-start; }
+.agent-threads-toggle::part(label) { flex: 1; min-inline-size: 0; overflow: hidden; }
+.agent-threads-toggle::part(end-icon) { flex-shrink: 0; }
+.agent-threads-toggle-label { flex: 1; min-inline-size: 0; text-align: start; }
+
 .agent-threads-items {
   list-style: none;
   margin: 0;
@@ -512,7 +518,8 @@
   font-size: var(--mdui-typescale-body-small-size);
 }
 
-.agent-main {
+.agent-main,
+.agent-conversation-slot {
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -549,4 +556,47 @@
 }
 @media (min-width: 720.02px) {
   .agent-threads-toggle { display: none; }
+}
+
+/* The workspace gives the conversation its own pane. History opens above it
+   instead of adding a third permanent column to the application. */
+.agent-layout-compact{flex-direction:column;gap:var(--ft-space-3)}
+.agent-layout-compact .agent-threads{inline-size:auto;border-inline-end:0;border-block-end:1px solid rgb(var(--mdui-color-outline-variant));padding-inline-end:0;padding-block-end:var(--ft-space-2);max-block-size:38vh;flex-shrink:0}
+.agent-layout-compact .agent-threads:not(.open) .agent-threads-items,
+.agent-layout-compact .agent-threads:not(.open)>mdui-button,
+.agent-layout-compact .agent-threads:not(.open) .agent-threads-archived{display:none}
+.agent-layout-compact .agent-threads-toggle{display:inline-flex;min-inline-size:0;flex:1 1 auto;justify-content:flex-start}
+.agent-layout-compact .agent-threads-toggle-label{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-inline-size:100%}
+.agent-layout-compact .agent-bubble{max-width:100%}
+.agent-layout-compact .agent-msg-user .agent-bubble{max-width:90%}
+.agent-layout-compact .agent-harness-bar{gap:var(--ft-space-2);flex-wrap:wrap}
+.agent-proposal-diff{list-style:none;margin:var(--ft-space-3) 0;padding:0;border-top:1px solid rgb(var(--mdui-color-outline-variant))}
+.agent-proposal-node{padding:var(--ft-space-3) 0;border-bottom:1px solid rgb(var(--mdui-color-outline-variant));font-size:var(--mdui-typescale-body-medium-size);line-height:1.6}
+.agent-proposal-node b{font-weight:500}
+.agent-proposal-node small{display:block;color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-small-size)}
+.agent-proposal-node p{margin-top:var(--ft-space-1);font-size:var(--mdui-typescale-body-small-size);overflow-wrap:anywhere}
+.agent-proposal-node p>span{color:rgb(var(--mdui-color-on-surface-variant))}
+dl.agent-proposal-diff>div{display:grid;grid-template-columns:5rem minmax(0,1fr);gap:var(--ft-space-3);padding:var(--ft-space-2) 0;border-bottom:1px solid rgb(var(--mdui-color-outline-variant));font-size:var(--mdui-typescale-body-small-size)}
+dl.agent-proposal-diff dt{color:rgb(var(--mdui-color-on-surface-variant))}
+dl.agent-proposal-diff dd{margin:0;overflow-wrap:anywhere}
+.agent-proposal-error{color:rgb(var(--mdui-color-error));font-size:var(--mdui-typescale-body-small-size);line-height:1.6}
+.agent-model-status{color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-small-size);line-height:1.7;padding:var(--ft-space-2) 0;border-bottom:1px solid rgb(var(--mdui-color-outline-variant))}
+.agent-restore-error{padding:var(--ft-space-4);font-size:var(--mdui-typescale-body-medium-size);line-height:1.7;color:rgb(var(--mdui-color-on-surface-variant))}
+.agent-restore-error p{margin:0 0 var(--ft-space-2)}
+.agent-advanced{margin-left:auto;font-size:var(--mdui-typescale-body-small-size);color:rgb(var(--mdui-color-on-surface-variant))}
+.agent-advanced>summary{cursor:pointer;padding:.35rem 0;list-style-position:inside;text-align:right}
+.agent-advanced[open] mdui-select{display:block;margin-top:.5rem;max-width:100%}
+.agent-proposal-review>summary{cursor:pointer;color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-small-size);padding:.5rem 0;line-height:1.7}
+.agent-workspace-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  color: rgb(var(--mdui-color-primary));
+  font-weight: 600;
+  text-underline-offset: 0.2em;
+}
+.agent-workspace-action:focus-visible {
+  outline: 2px solid rgb(var(--ft-color-focus));
+  outline-offset: 3px;
 }

@@ -79,36 +79,41 @@ type ModelProvider struct {
 }
 
 type Goal struct {
-	ID              string    `json:"id"`
-	UserID          string    `json:"-"`
-	Title           string    `json:"title"`
-	Description     string    `json:"description"`
-	SuccessCriteria string    `json:"success_criteria"`
-	Status          string    `json:"status"`
-	TargetDate      *string   `json:"target_date,omitempty"`
-	Revision        int       `json:"revision"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID              string     `json:"id"`
+	UserID          string     `json:"-"`
+	Title           string     `json:"title"`
+	Description     string     `json:"description"`
+	SuccessCriteria string     `json:"success_criteria"`
+	Status          string     `json:"status"`
+	TargetDate      *string    `json:"target_date,omitempty"`
+	Revision        int        `json:"revision"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	DeletedAt       *time.Time `json:"deleted_at,omitempty"`
+	DeletionID      string     `json:"deletion_id,omitempty"`
 }
 
 type Task struct {
-	ID              string    `json:"id"`
-	UserID          string    `json:"-"`
-	GoalID          string    `json:"goal_id"`
-	ParentID        *string   `json:"parent_id,omitempty"`
-	Type            string    `json:"type"`
-	Title           string    `json:"title"`
-	Description     string    `json:"description"`
-	Status          string    `json:"status"`
-	SuccessCriteria string    `json:"success_criteria"`
-	MinimumAction   string    `json:"minimum_action"`
-	BlockedReason   string    `json:"blocked_reason,omitempty"`
-	Priority        int       `json:"priority"`
-	Position        int       `json:"position"`
-	EstimateMinutes int       `json:"estimate_minutes"`
-	Revision        int       `json:"revision"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID              string     `json:"id"`
+	UserID          string     `json:"-"`
+	GoalID          string     `json:"goal_id"`
+	ParentID        *string    `json:"parent_id,omitempty"`
+	DependsOn       []string   `json:"depends_on,omitempty" gorm:"serializer:json;type:text;not null;default:'[]'"`
+	Type            string     `json:"type"`
+	Title           string     `json:"title"`
+	Description     string     `json:"description"`
+	Status          string     `json:"status"`
+	SuccessCriteria string     `json:"success_criteria"`
+	MinimumAction   string     `json:"minimum_action"`
+	BlockedReason   string     `json:"blocked_reason,omitempty"`
+	Priority        int        `json:"priority"`
+	Position        int        `json:"position"`
+	EstimateMinutes int        `json:"estimate_minutes"`
+	Revision        int        `json:"revision"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	DeletedAt       *time.Time `json:"deleted_at,omitempty"`
+	DeletionID      string     `json:"deletion_id,omitempty"`
 }
 
 type TaskCoord struct {
@@ -139,6 +144,7 @@ type TaskTreeRevision struct {
 
 type Proposal struct {
 	ID           string    `json:"id"`
+	Kind         string    `json:"kind" gorm:"default:task_tree_patch"`
 	UserID       string    `json:"-"`
 	GoalID       string    `json:"goal_id"`
 	JobID        string    `json:"job_id,omitempty"`
@@ -152,16 +158,17 @@ type Proposal struct {
 }
 
 type DailyPlan struct {
-	ID               string    `json:"id"`
-	UserID           string    `json:"-"`
-	LocalDate        string    `json:"local_date"`
-	Timezone         string    `json:"timezone"`
-	Status           string    `json:"status"`
-	AlgorithmVersion string    `json:"algorithm_version"`
-	CurrentRevision  int       `json:"current_revision"`
-	Revision         int       `json:"revision"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID               string     `json:"id"`
+	UserID           string     `json:"-"`
+	LocalDate        string     `json:"local_date"`
+	Timezone         string     `json:"timezone"`
+	Status           string     `json:"status"`
+	AlgorithmVersion string     `json:"algorithm_version"`
+	CurrentRevision  int        `json:"current_revision"`
+	Revision         int        `json:"revision"`
+	FrozenAt         *time.Time `json:"frozen_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 type DailyPlanRevision struct {
@@ -177,6 +184,7 @@ type DailyPlanRevision struct {
 
 type DailyPlanItem struct {
 	ID                string    `json:"id"`
+	LogicalID         string    `json:"logical_id"`
 	UserID            string    `json:"-"`
 	PlanID            string    `json:"daily_plan_id"`
 	TaskID            *string   `json:"task_id,omitempty"`
@@ -196,24 +204,42 @@ type DailyPlanItem struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
+// PlanningSettings holds the user's research focus and daily time budget. The
+// selected goal is nullable: an unset or inactive goal falls back to the oldest
+// active goal. Daily plans remain the sole source of scheduled work.
+type PlanningSettings struct {
+	UserID                  string    `json:"-" gorm:"primaryKey"`
+	PrimaryGoalID           *string   `json:"primary_goal_id"`
+	ConfiguredPrimaryGoalID *string   `json:"configured_primary_goal_id" gorm:"-" doc:"Saved goal selection; null keeps automatic selection. primary_goal_id is the currently effective goal."`
+	PrimaryGoalMode         string    `json:"primary_goal_mode" gorm:"-" enum:"automatic,fixed" doc:"Whether the saved goal selection is automatic or fixed."`
+	DailyBudgetMinutes      int       `json:"daily_budget_minutes"`
+	Revision                int       `json:"revision"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
+}
+
+func (PlanningSettings) TableName() string { return "user_planning_settings" }
+
 type WorkSession struct {
-	ID                 string     `json:"id"`
-	UserID             string     `json:"-"`
-	TaskID             string     `json:"task_id"`
-	DailyPlanItemID    *string    `json:"daily_plan_item_id,omitempty"`
-	SessionType        string     `json:"session_type"`
-	Status             string     `json:"status"`
-	Outcome            string     `json:"outcome,omitempty"`
-	Note               string     `json:"note,omitempty"`
-	TargetMinutes      int        `json:"target_minutes"`
-	AccumulatedSeconds int        `json:"-"`
-	DurationSeconds    int        `json:"duration_seconds"`
-	Revision           int        `json:"revision"`
-	StartedAt          time.Time  `json:"started_at"`
-	PausedAt           *time.Time `json:"paused_at,omitempty"`
-	EndedAt            *time.Time `json:"ended_at,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	ID                     string     `json:"id"`
+	UserID                 string     `json:"-"`
+	TaskID                 string     `json:"task_id"`
+	DailyPlanItemID        *string    `json:"daily_plan_item_id,omitempty"`
+	DailyPlanItemLogicalID string     `json:"daily_plan_item_logical_id,omitempty" gorm:"-"`
+	SessionType            string     `json:"session_type"`
+	Status                 string     `json:"status"`
+	Outcome                string     `json:"outcome,omitempty"`
+	Note                   string     `json:"note,omitempty"`
+	TargetMinutes          int        `json:"target_minutes"`
+	AccumulatedSeconds     int        `json:"paused_seconds" doc:"Total seconds in finished pause intervals. An ongoing pause starts at paused_at."`
+	DurationSeconds        int        `json:"duration_seconds"`
+	Revision               int        `json:"revision"`
+	StartedAt              time.Time  `json:"started_at"`
+	LastTransitionAt       *time.Time `json:"-"`
+	PausedAt               *time.Time `json:"paused_at,omitempty"`
+	EndedAt                *time.Time `json:"ended_at,omitempty"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
 type ProgressEvent struct {
@@ -331,6 +357,23 @@ type OutboxEvent struct {
 	ProcessedAt                                *time.Time
 }
 
+// IntegrationConnection is private to one FastTask user. Credentials never leave
+// the application service and are sealed with a key distinct from model keys.
+type IntegrationConnection struct {
+	ID                   string    `json:"-"`
+	UserID               string    `json:"-"`
+	System               string    `json:"system"`
+	APIURL               string    `json:"api_url"`
+	WebURL               string    `json:"web_url"`
+	Profile              string    `json:"profile"`
+	AuthKind             string    `json:"auth_kind"`
+	CredentialCiphertext string    `json:"-"`
+	PersonalInstance     bool      `json:"personal_instance"`
+	Revision             int       `json:"revision"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
 // AgentRun is one execution of the agent loop for a thread (doc/agent-impl.md
 // §3, §4). ThreadID is the reused conversations.id. JobID links the AgentJob
 // that currently carries the run; a run outlives individual jobs because an
@@ -402,22 +445,27 @@ type AgentMessage struct {
 // (§2.7). ToolCallID is the unique locator for add-tool-result receipts (§7).
 // ApprovalStatus and ProposalID carry the proposal-approval state (§7).
 type AgentMessagePart struct {
-	ID             string    `json:"id"`
-	UserID         string    `json:"-"`
-	MessageID      string    `json:"message_id"`
-	Idx            int       `json:"idx"`
-	Type           string    `json:"type"`
-	Text           string    `json:"text,omitempty"`
-	ToolCallID     *string   `json:"tool_call_id,omitempty"`
-	ToolName       string    `json:"tool_name,omitempty"`
-	ArgsJSON       string    `json:"args_json,omitempty"`
-	ResultJSON     string    `json:"result_json,omitempty"`
-	IsError        bool      `json:"is_error,omitempty"`
-	ArtifactJSON   string    `json:"artifact_json,omitempty"`
-	ApprovalStatus string    `json:"approval_status,omitempty"`
-	ProposalID     *string   `json:"proposal_id,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID             string  `json:"id"`
+	UserID         string  `json:"-"`
+	MessageID      string  `json:"message_id"`
+	Idx            int     `json:"idx"`
+	Type           string  `json:"type"`
+	Text           string  `json:"text,omitempty"`
+	ToolCallID     *string `json:"tool_call_id,omitempty"`
+	ToolName       string  `json:"tool_name,omitempty"`
+	ArgsJSON       string  `json:"args_json,omitempty"`
+	ResultJSON     string  `json:"result_json,omitempty"`
+	IsError        bool    `json:"is_error,omitempty"`
+	ArtifactJSON   string  `json:"artifact_json,omitempty"`
+	ApprovalStatus string  `json:"approval_status,omitempty"`
+	ProposalID     *string `json:"proposal_id,omitempty"`
+	// Execution identity is internal bookkeeping. Legacy history stays unclaimed
+	// and is never treated as a newly executable model call.
+	ToolModelTurn        int       `json:"-"`
+	ToolArgsReady        bool      `json:"-"`
+	ToolExecutionClaimed bool      `json:"-"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // AgentThread is one persisted agent conversation (doc/chat-features.md §2.3).
