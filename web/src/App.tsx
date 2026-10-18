@@ -1,5 +1,5 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, completeFastCAS, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, onSessionEnded, readOfflineUser, rememberUser, request, token } from './api'
+import { ApiError, completeFastCAS, completeFastResearch, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, onSessionEnded, readOfflineUser, rememberUser, request, token } from './api'
 import { FastCASAccount } from './FastCASAccount'
 import type { Device, Goal, Job, User } from './types'
 import type { GoalChatRequest } from './agent'
@@ -29,7 +29,8 @@ const DEVICE_STATUS: Record<string,string> = { active: '在用', disabled: '已�
 
 export function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(token.get()))
-  const [callbackPending] = useState(() => new URLSearchParams(window.location.search).get('fastcas') === 'callback')
+  const [callbackPending] = useState(() => ['fastcas', 'fastresearch'].some(key => new URLSearchParams(window.location.search).get(key) === 'callback'))
+  const [fastResearchCallback] = useState(() => new URLSearchParams(window.location.search).get('fastresearch') === 'callback')
   const [authError, setAuthError] = useState('')
   // Cold start of an installed PWA has an empty in-memory access token but a
   // persisted refresh token (pwa.md §4). Restore the session silently rather
@@ -39,14 +40,14 @@ export function App() {
   useEffect(() => {
     if (!restoring) return
     let alive = true
-    const restore = callbackPending ? completeFastCAS().then(() => token.get()) : ensureFreshAccessToken()
+    const restore = callbackPending ? (fastResearchCallback ? completeFastResearch() : completeFastCAS()).then(() => token.get()) : ensureFreshAccessToken()
     restore.then(restored => {
       if (!alive) return
       setAuthenticated(Boolean(restored) || offlineSessionAvailable())
       setRestoring(false)
     }).catch(error => {
       if (alive) {
-        setAuthError(error instanceof Error ? error.message : 'FastCAS 登录失败')
+        setAuthError(error instanceof Error ? error.message : '外部账号登录失败')
         setAuthenticated(Boolean(token.get()))
         setRestoring(false)
       }
@@ -86,7 +87,11 @@ function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialErr
   const [password, setPassword] = useState('')
   const [error, setError] = useState(initialError)
   const [fastcas, setFastcas] = useState(false)
-  useEffect(() => { void request<{enabled:boolean}>('/auth/fastcas/available').then(r => setFastcas(r.data.enabled)).catch(() => {}) }, [])
+  const [fastResearch, setFastResearch] = useState(false)
+  useEffect(() => {
+    void request<{enabled:boolean}>('/auth/fastcas/available').then(r => setFastcas(r.data.enabled)).catch(() => {})
+    void request<{enabled:boolean}>('/auth/fastresearch/available').then(r => setFastResearch(r.data.enabled)).catch(() => {})
+  }, [])
   const [busy, setBusy] = useState(false)
   async function submit() {
     if (busy || !identifier.trim() || !password) return
@@ -111,8 +116,9 @@ function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialErr
         <mdui-text-field label="密码" type="password" toggle-password variant="outlined" required autocomplete="current-password" value={password} onInput={e => setPassword(fieldValue(e))}/>
         {error && <p className="login-error" role="alert"><mdui-icon name="error_outline"/>{error}</p>}
         <mdui-button variant="filled" full-width disabled={busy} loading={busy} onClick={submit}>{busy ? '正在验证…' : '开始今天'}</mdui-button>
-        {fastcas && <mdui-button variant="outlined" full-width onClick={() => window.location.assign('/api/v1/auth/fastcas/login')}>使用 FastCAS 登录</mdui-button>}
-        <small>生产环境请使用管理员下发账号，登录状态会安全地保留在此设备上，退出登录时一并清除。</small>
+        {fastResearch && <mdui-button type="button" variant="filled" full-width onClick={() => window.location.assign('/api/v1/auth/fastresearch/login')}>使用 FastResearch Key 登录</mdui-button>}
+        {fastcas && !fastResearch && <mdui-button type="button" variant="outlined" full-width onClick={() => window.location.assign('/api/v1/auth/fastcas/login')}>使用 FastCAS 登录</mdui-button>}
+        <small>{fastResearch ? '普通用户使用个人 FastResearch Key。管理员仍使用上方 FastTask 账号和密码。' : '生产环境请使用管理员下发账号，登录状态会安全地保留在此设备上，退出登录时一并清除。'}</small>
       </form>
     </div>
   </main>

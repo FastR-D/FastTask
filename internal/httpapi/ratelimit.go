@@ -26,6 +26,10 @@ var publicLimits = []publicLimit{
 	{http.MethodGet, "/api/v1/auth/fastcas/callback", 30},
 	{http.MethodPost, "/api/v1/auth/fastcas/complete", 30},
 	{http.MethodPost, "/api/v1/auth/fastcas/backchannel-logout", 120},
+	{http.MethodGet, "/api/v1/auth/fastresearch/login", 30},
+	{http.MethodGet, "/api/v1/auth/fastresearch/callback", 30},
+	{http.MethodPost, "/api/v1/auth/fastresearch/complete", 30},
+	{http.MethodPost, "/api/v1/integrations/fastresearch/today", 120},
 }
 
 type bucket struct {

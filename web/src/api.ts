@@ -321,3 +321,21 @@ export function completeFastCAS(): Promise<{linked: boolean}> {
   })()
   return fastcasCompletion
 }
+
+let fastResearchCompletion: Promise<void> | null = null
+export function completeFastResearch(): Promise<void> {
+  if (!fastResearchCompletion) fastResearchCompletion = (async () => {
+    const response = await fetch(`${API}/auth/fastresearch/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+    if (!response.ok) {
+      const problem = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new ApiError(response.status, problem.detail || 'FastResearch 登录失败')
+    }
+    const data = await response.json() as { access_token: string; refresh_token: string; user: User }
+    await clearSession()
+    storeAccess(data.access_token)
+    writeRefresh(data.refresh_token)
+    rememberUser(data.user)
+    lastRefreshResult = null
+  })().finally(() => { fastResearchCompletion = null })
+  return fastResearchCompletion
+}

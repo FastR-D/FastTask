@@ -96,6 +96,12 @@ CGO_ENABLED=1 go build -trimpath -o bin/fasttask ./cmd/fasttask
 | `OPENAI_API_BASE_URL` / `OPENAI_MODEL` / `OPENAI_API_KEY` | OpenAI-compatible 模型地址、名称与密钥；地址通常以 `/v1` 结尾 |
 | `OPENAI_TRANSCRIPTION_MODEL` | 真实音频转写模型；未配置时明确使用演示转写 |
 | `FASTTASK_LOG_FORMAT` / `FASTTASK_LOG_LEVEL` | `text` / `info`；可设 `json` 及 `debug/info/warn/error` |
+| `FASTTASK_FASTRESEARCH_LOGIN_ENABLED` | 启用 FastResearch 个人 Key 登录；默认关闭 |
+| `FASTTASK_FASTRESEARCH_URL` | FastTask 服务端访问 FastResearch 的地址（容器内通常为 `http://host.docker.internal:8787`） |
+| `FASTTASK_FASTRESEARCH_PUBLIC_URL` | 浏览器访问 FastResearch 的公开地址；生产环境必须为 HTTPS |
+| `FASTTASK_FASTRESEARCH_SSO_SECRET` | 与 FastResearch `FASTRESEARCH_FASTTASK_SSO_SECRET` 相同的共享密钥，至少 32 字符 |
+| `FASTTASK_FASTRESEARCH_INGEST_KEY` | FastResearch 服务端读取当日任务的共享密钥；需与 FastResearch 的 `FASTTASK_API_KEY` 一致 |
+| `FASTTASK_FASTRESEARCH_LOOPBACK_HTTP` | 生产环境允许回环地址使用明文 HTTP；仅本机开发 |
 | `FASTTASK_NOTIFICATION_ENABLED` | 默认 `true`；通道和接收端由后台配置 |
 
 管理员也可在“后台 → 模型管理”配置默认 OpenAI-compatible Provider。服务端保存加密凭据，浏览器和 sidecar 通过 FastTask 代理调用模型，不接收模型 API Key。
@@ -114,6 +120,8 @@ FASTTASK_ADMIN_PASSWORD=REPLACE_WITH_A_STRONG_INITIAL_PASSWORD
 限制配置和数据目录的访问权限，以专用普通用户运行服务。公网部署使用 HTTPS，并仅信任实际反向代理；SSE 对话连接应关闭代理缓冲并设置足够的读取超时。浏览器录音和 PWA 安装需要安全上下文，通常为 HTTPS 或 localhost。
 
 启用 FastCAS 登录时，必须同时配置 `FASTTASK_FASTCAS_ISSUER`、`FASTTASK_FASTCAS_CLIENT_ID`、`FASTTASK_FASTCAS_CLIENT_SECRET`、`FASTTASK_FASTCAS_REDIRECT_URI`；全部留空则保留本地账号登录。
+
+启用 FastResearch Key 登录时，必须同时配置 `FASTTASK_FASTRESEARCH_URL`、`FASTTASK_FASTRESEARCH_PUBLIC_URL` 和至少 32 字符的 `FASTTASK_FASTRESEARCH_SSO_SECRET`，并把 `FASTTASK_FASTRESEARCH_LOGIN_ENABLED` 设为 `true`。FastResearch 侧需配置相同的 `FASTRESEARCH_FASTTASK_SSO_SECRET`。普通成员只通过 FastResearch Key 登录；本地账号和密码仅保留给管理员。FastResearch 工作台读取今日任务还需要 `FASTTASK_FASTRESEARCH_INGEST_KEY`，其值与 FastResearch 的 `FASTTASK_API_KEY` 一致。本机以 `FASTTASK_ENV=production` 运行时，如果 FastResearch 公开地址是 `http://127.0.0.1`、`http://localhost` 或 `http://[::1]`，需要同时设置 `FASTTASK_FASTRESEARCH_LOOPBACK_HTTP=true`。
 
 ## Docker 部署
 

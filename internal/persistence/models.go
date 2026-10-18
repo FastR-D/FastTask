@@ -24,6 +24,17 @@ type Session struct {
 	CasLinkVersion                                            int64
 }
 
+type FastResearchAccount struct {
+	AccountID string `json:"account_id" gorm:"primaryKey"`
+	UserID string `json:"user_id" gorm:"uniqueIndex"`
+	KeyID string `json:"key_id"`
+	Person string `json:"person"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (FastResearchAccount) TableName() string { return "fastresearch_accounts" }
+
 type FastCASTransaction struct {
 	State     string `gorm:"primaryKey"`
 	Payload   string

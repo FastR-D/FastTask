@@ -104,6 +104,12 @@ func (s *Service) Login(ctx context.Context, identifier, password string) (persi
 	if err != nil && !persistence.IsNotFound(err) {
 		return persistence.User{}, "", "", err
 	}
+	if s.config.FastResearchLoginEnabled && (err != nil || user.Role != "admin") {
+		// Members authenticate with their FastResearch Key. Keep the response identical to
+		// a bad password so this policy does not disclose which identifiers exist.
+		VerifyPassword(password, dummyPasswordHash())
+		return persistence.User{}, "", "", ErrInvalidCredentials
+	}
 	// An unknown identifier costs the same Argon2id work as a wrong password, so response time does not
 	// reveal which accounts exist.
 	encoded := user.PasswordHash

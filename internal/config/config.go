@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -66,6 +67,14 @@ type Config struct {
 
 	FastCASIssuer, FastCASClientID, FastCASClientSecret, FastCASRedirectURI string
 	FastCASLoopbackHTTP                                                     bool
+	FastResearchURL, FastResearchPublicURL, FastResearchSSOSecret           string
+	FastResearchLoginEnabled                                                bool
+	// FastResearchLoopbackHTTP relaxes the production HTTPS requirement for a
+	// FastResearch origin bound to this machine only, matching FastCASLoopbackHTTP.
+	FastResearchLoopbackHTTP bool
+	// FastResearchIngestKey authenticates FastResearch's server-to-server reads
+	// (today's plan). Empty disables the integration endpoint.
+	FastResearchIngestKey string
 
 	// Notification delivery (doc/notification.md §8). The channels and their credentials
 	// live in the database and are managed from the admin UI; these are the process-level
@@ -136,17 +145,23 @@ func Load() (Config, error) {
 		AgentReasoning:        env("FASTTASK_AGENT_REASONING", "provider-default"),
 		AgentReasoningPersist: envBool("FASTTASK_AGENT_REASONING_PERSIST", true),
 
-		SidecarEnabled:      envBool("FASTTASK_SIDECAR_ENABLED", false),
-		SidecarNodePath:     env("FASTTASK_SIDECAR_NODE_PATH", "node"),
-		SidecarSocket:       env("FASTTASK_SIDECAR_SOCKET", ""),
-		SidecarStartTimeout: envDuration("FASTTASK_SIDECAR_START_TIMEOUT", 15*time.Second),
-		SidecarSpawn:        envBool("FASTTASK_SIDECAR_SPAWN", true),
-		SidecarSecret:       env("FASTTASK_SIDECAR_SECRET", ""),
-		FastCASIssuer:       env("FASTTASK_FASTCAS_ISSUER", ""),
-		FastCASClientID:     env("FASTTASK_FASTCAS_CLIENT_ID", ""),
-		FastCASClientSecret: env("FASTTASK_FASTCAS_CLIENT_SECRET", ""),
-		FastCASRedirectURI:  env("FASTTASK_FASTCAS_REDIRECT_URI", ""),
-		FastCASLoopbackHTTP: envBool("FASTTASK_FASTCAS_LOOPBACK_HTTP", false),
+		SidecarEnabled:           envBool("FASTTASK_SIDECAR_ENABLED", false),
+		SidecarNodePath:          env("FASTTASK_SIDECAR_NODE_PATH", "node"),
+		SidecarSocket:            env("FASTTASK_SIDECAR_SOCKET", ""),
+		SidecarStartTimeout:      envDuration("FASTTASK_SIDECAR_START_TIMEOUT", 15*time.Second),
+		SidecarSpawn:             envBool("FASTTASK_SIDECAR_SPAWN", true),
+		SidecarSecret:            env("FASTTASK_SIDECAR_SECRET", ""),
+		FastCASIssuer:            env("FASTTASK_FASTCAS_ISSUER", ""),
+		FastCASClientID:          env("FASTTASK_FASTCAS_CLIENT_ID", ""),
+		FastCASClientSecret:      env("FASTTASK_FASTCAS_CLIENT_SECRET", ""),
+		FastCASRedirectURI:       env("FASTTASK_FASTCAS_REDIRECT_URI", ""),
+		FastCASLoopbackHTTP:      envBool("FASTTASK_FASTCAS_LOOPBACK_HTTP", false),
+		FastResearchURL:          strings.TrimRight(env("FASTTASK_FASTRESEARCH_URL", ""), "/"),
+		FastResearchPublicURL:    strings.TrimRight(env("FASTTASK_FASTRESEARCH_PUBLIC_URL", ""), "/"),
+		FastResearchSSOSecret:    env("FASTTASK_FASTRESEARCH_SSO_SECRET", ""),
+		FastResearchLoginEnabled: envBool("FASTTASK_FASTRESEARCH_LOGIN_ENABLED", false),
+		FastResearchLoopbackHTTP: envBool("FASTTASK_FASTRESEARCH_LOOPBACK_HTTP", false),
+		FastResearchIngestKey:    env("FASTTASK_FASTRESEARCH_INGEST_KEY", ""),
 
 		NotificationsDisabled: !envBool("FASTTASK_NOTIFICATION_ENABLED", true),
 		NotificationTimeout:   time.Duration(notificationTimeoutMS) * time.Millisecond,
@@ -161,6 +176,21 @@ func Load() (Config, error) {
 	}
 	if fastcasFields != 0 && fastcasFields != 4 {
 		return Config{}, errors.New("configure all four FASTTASK_FASTCAS connection variables or leave all unset")
+	}
+	if c.FastResearchLoginEnabled {
+		if c.FastResearchURL == "" || c.FastResearchPublicURL == "" || len(c.FastResearchSSOSecret) < 32 {
+			return Config{}, errors.New("FASTTASK_FASTRESEARCH_LOGIN_ENABLED requires FASTTASK_FASTRESEARCH_URL, FASTTASK_FASTRESEARCH_PUBLIC_URL, and a FASTTASK_FASTRESEARCH_SSO_SECRET of at least 32 characters")
+		}
+		for name, value := range map[string]string{"FASTTASK_FASTRESEARCH_URL": c.FastResearchURL, "FASTTASK_FASTRESEARCH_PUBLIC_URL": c.FastResearchPublicURL} {
+			parsed, parseErr := url.Parse(value)
+			if parseErr != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
+				return Config{}, fmt.Errorf("%s must be an absolute http or https URL without credentials", name)
+			}
+		}
+		publicURL, _ := url.Parse(c.FastResearchPublicURL)
+		if c.Environment == "production" && publicURL.Scheme != "https" && !(c.FastResearchLoopbackHTTP && isLoopbackHost(publicURL.Hostname())) {
+			return Config{}, errors.New("FASTTASK_FASTRESEARCH_PUBLIC_URL must use https in production")
+		}
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return Config{}, errors.New("FASTTASK_PORT must be between 1 and 65535")
@@ -272,6 +302,17 @@ func envList(key, fallback string) []string {
 		}
 	}
 	return result
+}
+
+// isLoopbackHost mirrors the FastCAS SDK's loopback allowance: plain HTTP is
+// accepted in production only when the host cannot be reached from another machine.
+func isLoopbackHost(hostname string) bool {
+	switch strings.ToLower(hostname) {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func loadDotEnv(path string) error {

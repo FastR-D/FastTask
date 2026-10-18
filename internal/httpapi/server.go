@@ -138,6 +138,8 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	server.registerAgent()
 	server.registerAgentHarness()
 	server.registerFastCAS()
+	server.registerFastResearch()
+	server.registerFastResearchIntegration()
 	server.static()
 	return server
 }
