@@ -123,6 +123,8 @@ FASTTASK_ADMIN_PASSWORD=REPLACE_WITH_A_STRONG_INITIAL_PASSWORD
 
 启用 FastResearch Key 登录时，必须同时配置 `FASTTASK_FASTRESEARCH_URL`、`FASTTASK_FASTRESEARCH_PUBLIC_URL` 和至少 32 字符的 `FASTTASK_FASTRESEARCH_SSO_SECRET`，并把 `FASTTASK_FASTRESEARCH_LOGIN_ENABLED` 设为 `true`。FastResearch 侧需配置相同的 `FASTRESEARCH_FASTTASK_SSO_SECRET`。普通成员只通过 FastResearch Key 登录；本地账号和密码仅保留给管理员。FastResearch 工作台读取今日任务还需要 `FASTTASK_FASTRESEARCH_INGEST_KEY`，其值与 FastResearch 的 `FASTTASK_API_KEY` 一致。本机以 `FASTTASK_ENV=production` 运行时，如果 FastResearch 公开地址是 `http://127.0.0.1`、`http://localhost` 或 `http://[::1]`，需要同时设置 `FASTTASK_FASTRESEARCH_LOOPBACK_HTTP=true`。
 
+两端当前的部署拓扑、SSO 时序、今日任务接口、密钥对应关系、安全边界和排障方法见 [docs/fastresearch-integration.md](docs/fastresearch-integration.md)。
+
 ## Docker 部署
 
 Dockerfile 构建网页与 Go 服务，并下载上述固定版本的 FastCAS SDK。构建需要访问 npm、Go 模块与 SDK 下载源；可通过 `GOPROXY`、`APK_MIRROR`、`FASTCAS_REF` 构建参数调整。使用 BuildKit 的 `fastcas-sdk` 命名构建上下文也可提供本地 SDK，其根目录须包含 `FastCAS/sdk/go`。
