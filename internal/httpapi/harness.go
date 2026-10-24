@@ -105,7 +105,7 @@ func (s harnessRoutes) RegisterRoutes(api huma.API) {
 		}
 	}
 	register(api, "create-agent-run-grant", http.MethodPost, "/agent/runs", "Issue a harness run capability", userSecurity(), func(ctx context.Context, input *grantInput) (*itemResponse[application.RunGrant], error) {
-		grant, err := s.agent.IssueRunGrant(ctx, principal(ctx).UserID, strings.TrimSpace(input.Body.RunID), input.Body.ToolsETag)
+		grant, err := s.agent.IssueBrowserRunGrant(ctx, principal(ctx).UserID, strings.TrimSpace(input.Body.RunID), input.Body.ToolsETag)
 		if err != nil {
 			return nil, mapHarnessError(err)
 		}

@@ -152,6 +152,10 @@ export function useProposalDecision() {
 // (§5.1), and assistant-ui — not this module — owns the request, so the text is captured on the way out
 // and read on the way back.
 let lastUserText = ''
+// lastRequestedHarnessMode records who was asked to drive the current command. The response header is
+// the fast path for learning the run id, but a transport/proxy can leave it unreadable; in that case the
+// streamed fasttask.runId is the authoritative fallback.
+let lastRequestedHarnessMode: 'wasm' | 'sidecar' | '' = ''
 
 /** extractUserText concatenates the text parts of the add-message commands in a request body. */
 export function extractUserText(commands: unknown): string {
@@ -184,6 +188,7 @@ export async function prepareAgentCommand(body: { state?: unknown; commands?: un
   // A user who picked a host in settings beats the probe (§3.2); 'auto' means probe.
   const selection = await selectMode(forcedModeOf(readModePreference()))
   const mode = selection.mode === 'unavailable' ? undefined : selection.mode
+  lastRequestedHarnessMode = mode ?? ''
   return {
     ...body,
     threadId: state?.fasttask?.threadId ?? null,
@@ -217,6 +222,9 @@ export function useAgentRuntime(
 ): AssistantRuntime {
   const owner=useRef(options.getUserId?.())
   const sentAuth=useRef<{ownerId?:string;access:string}|null>(null)
+  const drivenRuns=useRef(new Set<string>())
+  const noticeRef=useRef(onNotice)
+  noticeRef.current=onNotice
   const runtime = useAssistantTransportRuntime<ServerAgentState>({
     // MUST be explicit: the default protocol is "data-stream", and omitting this
     // silently speaks the wrong protocol — the stream looks fine but messages never
@@ -254,9 +262,10 @@ export function useAgentRuntime(
     // while the host works, so the UI needs no change (§13 phase D).
     onResponse: response => {
       const runId = harnessRunOf(response)
-      if (!runId) return
+      if (!runId || drivenRuns.current.has(runId)) return
+      drivenRuns.current.add(runId)
       void driveRun({ runId, text: lastUserText, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
-        onNotice(`对话驱动失败：${agentErrorText(error)}`)
+        noticeRef.current(`对话驱动失败：${agentErrorText(error)}`)
       })
     },
     // assistant-ui also invokes onCancel({error}) after a transport failure.
@@ -294,6 +303,24 @@ export function useAgentRuntime(
   })
   const businessRef = useRef(options.onBusinessChanged)
   businessRef.current = options.onBusinessChanged
+  // If X-Harness-Run is not readable by the browser, the stream still carries the
+  // same run id in fasttask.runId. Drive only runs the server actually accepted as
+  // WASM; a wasm request may have fallen back to the sidecar.
+  useEffect(() => {
+    const maybeDrive = () => {
+      if (lastRequestedHarnessMode !== 'wasm') return
+      const state = runtime.thread.getState().state as ServerAgentState | undefined
+      if (state?.fasttask?.harnessMode !== 'wasm') return
+      const runId = state?.fasttask?.runId
+      if (!state?.isRunning || !runId || drivenRuns.current.has(runId) || activeRunId() === runId) return
+      drivenRuns.current.add(runId)
+      void driveRun({ runId, text: lastUserText, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
+        noticeRef.current(`对话驱动失败：${agentErrorText(error)}`)
+      })
+    }
+    maybeDrive()
+    return runtime.thread.subscribe(maybeDrive)
+  }, [runtime])
   const seen = useRef(new Set<string>())
   useEffect(() => {
     const inspect = () => {

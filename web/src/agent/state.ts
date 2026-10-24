@@ -61,6 +61,7 @@ export type FasttaskState = {
   threadId?: string
   activeGoalId?: string
   runId?: string
+  harnessMode?: 'wasm' | 'sidecar'
   pendingProposals?: PendingProposal[]
 }
 

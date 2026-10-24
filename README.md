@@ -149,7 +149,7 @@ Compose 使用 `OPENAI_API_BASE_URL_CONTAINER` 覆盖容器中的模型地址，
 npm --prefix web run build:sidecar
 ```
 
-产物为 `sidecar/dist/host.mjs`。在原生部署中设置 `FASTTASK_SIDECAR_ENABLED=true`，必要时设置 `FASTTASK_SIDECAR_NODE_PATH`、`FASTTASK_SIDECAR_ENTRY`、`FASTTASK_SIDECAR_SOCKET`。默认由 Go 服务启动并管理 sidecar。运行环境须保留 `web/node_modules` 中的 `libfx` 及适合当前系统和架构的依赖，不能只复制 `host.mjs`。
+产物为 `sidecar/dist/host.mjs`。在原生部署中设置 `FASTTASK_SIDECAR_ENABLED=true`，必要时设置 `FASTTASK_SIDECAR_NODE_PATH`、`FASTTASK_SIDECAR_ENTRY`、`FASTTASK_SIDECAR_SOCKET`。默认由 Go 服务启动并管理 sidecar。设置 `FASTTASK_SIDECAR_PREFERRED=true` 后，服务端会把浏览器请求的 `wasm` 运行改由健康的 sidecar 执行，避免旧版或缓存页面没有启动浏览器宿主而超时；sidecar 不可用时仍保留浏览器 WASM 路径。运行环境须保留 `web/node_modules` 中的 `libfx` 及适合当前系统和架构的依赖，不能只复制 `host.mjs`。
 
 若 sidecar 由外部进程管理器启动，Go 端设置 `FASTTASK_SIDECAR_SPAWN=false`；两端使用同一 `FASTTASK_SIDECAR_SECRET`。Node 端的 `FASTTASK_SIDECAR_ENDPOINT=unix://<socket路径>` 对应 Go 端的 socket，`FASTTASK_SERVER_ORIGIN` 指向可达的 FastTask 服务，`FASTTASK_WEB_ROOT` 指向含依赖的 web 目录。现有 Alpine Docker 镜像没有 Node，不包含 sidecar；需要该回退宿主时使用原生 Node 部署。sidecar 只负责对话运行，不直接访问 SQLite。
 

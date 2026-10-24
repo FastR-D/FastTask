@@ -52,7 +52,10 @@ type Config struct {
 
 	// Sidecar configures the optional Node host (doc/harness.md §8.4). It is off by
 	// default: the sidecar is a fallback for browsers without JSPI, not a dependency.
-	SidecarEnabled      bool
+	SidecarEnabled bool
+	// SidecarPreferred redirects client-requested WASM runs to a healthy sidecar. This keeps
+	// older or cached browsers from queueing a run no browser host ever picks up.
+	SidecarPreferred    bool
 	SidecarNodePath     string
 	SidecarSocket       string
 	SidecarStartTimeout time.Duration
@@ -146,6 +149,7 @@ func Load() (Config, error) {
 		AgentReasoningPersist: envBool("FASTTASK_AGENT_REASONING_PERSIST", true),
 
 		SidecarEnabled:           envBool("FASTTASK_SIDECAR_ENABLED", false),
+		SidecarPreferred:         envBool("FASTTASK_SIDECAR_PREFERRED", false),
 		SidecarNodePath:          env("FASTTASK_SIDECAR_NODE_PATH", "node"),
 		SidecarSocket:            env("FASTTASK_SIDECAR_SOCKET", ""),
 		SidecarStartTimeout:      envDuration("FASTTASK_SIDECAR_START_TIMEOUT", 15*time.Second),

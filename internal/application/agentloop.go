@@ -89,6 +89,12 @@ func (s *AgentService) beginRun(ctx context.Context, job persistence.AgentJob, r
 	if err := sess.emitSet(protocol.FastTaskThreadIDPath(), run.ThreadID); err != nil {
 		return nil, err
 	}
+	if run.HarnessMode != "" {
+		sess.state.FastTask.HarnessMode = run.HarnessMode
+		if err := sess.emitSet(protocol.FastTaskHarnessModePath(), run.HarnessMode); err != nil {
+			return nil, err
+		}
+	}
 
 	existing, err := s.repo.ListThreadMessages(ctx, run.UserID, run.ThreadID)
 	if err != nil {

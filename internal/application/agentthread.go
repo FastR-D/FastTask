@@ -104,6 +104,10 @@ func (s *threadStateService) LatestThreadState(ctx context.Context, userID strin
 	// threadId always comes from the row, not from the snapshot: it is what lets
 	// the client's next command continue this thread instead of opening one (§2.2).
 	state.FastTask.ThreadID = run.ThreadID
+	state.FastTask.HarnessMode = run.HarnessMode
+	if run.HarnessMode != HarnessModeWASM {
+		state.FastTask.RunID = ""
+	}
 	state.IsRunning = run.Status == persistence.RunQueued || run.Status == persistence.RunRunning
 	return state, true, nil
 }
@@ -132,7 +136,10 @@ func (s *threadStateService) ThreadState(ctx context.Context, userID, threadID s
 		return protocol.State{}, runErr
 	}
 	if runErr == nil {
-		state.FastTask.RunID = run.ID
+		state.FastTask.HarnessMode = run.HarnessMode
+		if run.HarnessMode == HarnessModeWASM {
+			state.FastTask.RunID = run.ID
+		}
 		state.IsRunning = run.Status == persistence.RunQueued || run.Status == persistence.RunRunning ||
 			run.Status == persistence.RunCancelling
 		if strings.TrimSpace(run.StateJSON) != "" && run.StateJSON != "{}" {

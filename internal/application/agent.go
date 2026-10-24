@@ -29,7 +29,10 @@ type AgentService struct {
 	tools *ToolRegistry
 	// sidecar drives the runs whose host is the Node process instead of the browser
 	// (doc/harness.md §8). Nil in the common case: the sidecar is a fallback.
-	sidecar               SidecarDriver
+	sidecar SidecarDriver
+	// sidecarPreferred redirects WASM requests to a healthy sidecar. It protects deployments
+	// from stale clients that request WASM but never start a browser host.
+	sidecarPreferred      bool
 	limits                LoopLimits
 	toolTimeoutConfigured bool
 	systemPrompt          string
@@ -136,6 +139,12 @@ type AgentOption func(*AgentService)
 // rather than queued behind a host that does not exist (§1.2).
 func WithSidecarDriver(driver SidecarDriver) AgentOption {
 	return func(s *AgentService) { s.sidecar = driver }
+}
+
+// WithSidecarPreferred makes the server choose the sidecar for client-requested WASM runs
+// when that host is healthy. The browser host remains available when the sidecar is not.
+func WithSidecarPreferred(preferred bool) AgentOption {
+	return func(s *AgentService) { s.sidecarPreferred = preferred }
 }
 
 // WithToolRegistry overrides the default read-only tool set (phase D adds
@@ -577,6 +586,9 @@ func (s *AgentService) resolveHarnessMode(ctx context.Context, requested string)
 	}
 	if creds == nil || creds.BaseURL == "" || creds.APIKey == "" || creds.Model == "" {
 		return "", nil
+	}
+	if mode == HarnessModeWASM && s.sidecarPreferred && s.sidecar != nil && s.sidecar.Healthy(ctx) {
+		mode = HarnessModeSidecar
 	}
 	if mode == HarnessModeSidecar && (s.sidecar == nil || !s.sidecar.Healthy(ctx)) {
 		return "", ErrHarnessUnavailable

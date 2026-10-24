@@ -301,6 +301,9 @@ const (
 type FastTaskState struct {
 	ThreadID     string `json:"threadId,omitempty"`
 	ActiveGoalID string `json:"activeGoalId,omitempty"`
+	// HarnessMode is the mode the server accepted for RunID, which can differ from the
+	// client's request. A browser must only drive a run whose accepted mode is "wasm".
+	HarnessMode string `json:"harnessMode,omitempty"`
 	// RunID names the run this state belongs to. A harness host needs it to ask
 	// for a run capability token (doc/harness.md §10.2): assistant-ui owns the
 	// fetch that creates the run, so the browser learns the id from the stream
@@ -357,3 +360,7 @@ func FastTaskThreadIDPath() []string { return []string{"fasttask", "threadId"} }
 // FastTaskRunIDPath addresses the runId a harness host needs in order to request
 // its capability token (doc/harness.md §10.2).
 func FastTaskRunIDPath() []string { return []string{"fasttask", "runId"} }
+
+// FastTaskHarnessModePath addresses the accepted harness mode. It is emitted before
+// runId so a browser never mistakes a sidecar run for one it should drive.
+func FastTaskHarnessModePath() []string { return []string{"fasttask", "harnessMode"} }

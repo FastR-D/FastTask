@@ -160,18 +160,18 @@ func (s *Server) handleAgentResumeState(c *gin.Context) {
 	var body struct {
 		ThreadID string `json:"threadId"`
 	}
-	if err := decodeAgentBody(c, &body); err != nil || strings.TrimSpace(body.ThreadID) == "" {
-		agentAbort(c, http.StatusBadRequest, "threadId is required")
+	if err := decodeAgentBody(c, &body); err != nil {
+		agentAbort(c, http.StatusBadRequest, "invalid resume-state payload")
 		return
 	}
 	threadID := strings.TrimSpace(body.ThreadID)
 	var result application.ResumeStateResult
 	var found bool
 	var err error
-	if strings.HasPrefix(threadID, agentLocalThreadPrefix) {
-		// A remounted chat only has assistant-ui's temporary id, and the library
-		// posts it here without a prepare hook to rewrite it. Resolve the resume
-		// against the authenticated user's own in-flight run instead (§2.8).
+	if threadID == "" || strings.HasPrefix(threadID, agentLocalThreadPrefix) {
+		// A new or remounted chat can have no server thread id yet (the library posts
+		// an empty id or its temporary __LOCALID_ value). Resolve the resume against
+		// the authenticated user's own in-flight run instead (§2.8).
 		result, found, err = s.agent.ResumeCurrentState(c.Request.Context(), principal.UserID)
 	} else {
 		result, found, err = s.agent.ResumeState(c.Request.Context(), principal.UserID, threadID)

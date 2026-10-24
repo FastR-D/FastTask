@@ -67,7 +67,7 @@ func NewAgentService(app *application.App, cfg config.Config, sidecar *SidecarSu
 	// A sidecar that is not configured leaves the driver nil, and SubmitCommands then refuses sidecar mode
 	// with HARNESS_UNAVAILABLE instead of queueing a job nobody will run (§1.2).
 	if driver := sidecar.Driver(); driver != nil {
-		options = append(options, application.WithSidecarDriver(driver))
+		options = append(options, application.WithSidecarDriver(driver), application.WithSidecarPreferred(cfg.SidecarPreferred))
 	}
 	return application.NewAgentService(app, options...)
 }

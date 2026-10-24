@@ -260,16 +260,30 @@ func (s *harnessManifest) ToolManifestWarning() string {
 	return fmt.Sprintf("agent tool manifest holds %d tools; libfx accepts at most 64", count)
 }
 
-// IssueRunGrant mints the capability that lets a host drive one run. It fails closed:
-// a run that is terminal, a run the in-process loop owns, a missing model and a stale
-// tool manifest each refuse the grant rather than issuing something unusable.
+// IssueBrowserRunGrant is the HTTP entry point for a browser host. Only a WASM run may
+// be claimed this way: sidecar runs are already driven by the Worker, and allowing a
+// stale browser page to reissue their token would let it take the run over.
+func (s *harnessTokens) IssueBrowserRunGrant(ctx context.Context, userID, runID, toolsETag string) (RunGrant, error) {
+	return s.issueRunGrant(ctx, userID, runID, toolsETag, true)
+}
+
+// IssueRunGrant mints the capability the Worker hands to a sidecar. It fails closed: a run
+// that is terminal, a run the in-process loop owns, a missing model and a stale tool
+// manifest each refuse the grant rather than issuing something unusable.
 func (s *harnessTokens) IssueRunGrant(ctx context.Context, userID, runID, toolsETag string) (RunGrant, error) {
+	return s.issueRunGrant(ctx, userID, runID, toolsETag, false)
+}
+
+func (s *harnessTokens) issueRunGrant(ctx context.Context, userID, runID, toolsETag string, browserOnly bool) (RunGrant, error) {
 	run, err := s.repo().GetRun(ctx, userID, runID)
 	if err != nil {
 		return RunGrant{}, err
 	}
 	if IsTerminalRunStatus(run.Status) {
 		return RunGrant{}, ErrRunNotActive
+	}
+	if browserOnly && run.HarnessMode != HarnessModeWASM {
+		return RunGrant{}, ErrHarnessUnavailable
 	}
 	if run.HarnessMode != HarnessModeWASM && run.HarnessMode != HarnessModeSidecar {
 		// Nothing to drive: this run belongs to the Worker's in-process path.
