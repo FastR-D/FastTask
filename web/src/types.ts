@@ -8,7 +8,6 @@ export interface PlanningSettings { primary_goal_id: string | null; configured_p
 export interface PlanAvailability { status: 'ready' | 'no_tasks' | 'waiting_dependencies' | 'no_ready_tasks' | 'withdrawn' | 'frozen' | 'closed'; reason: string; ready_count: number; waiting_count: number; can_replan: boolean }
 export interface ScheduledDay { plan: Plan; items: PlanItem[]; today_items?: PlanItem[]; availability?: PlanAvailability }
 export interface Job { id: string; type: string; status: string; retry_of_job_id?: string; subject_type?: string; subject_id?: string; output_json?: string; error_code?: string; error_message?: string; base_revision: number; attempt_count: number; max_attempts: number; cancel_requested: boolean; run_after: string; created_at: string; updated_at: string; started_at?: string; finished_at?: string; revision: number }
-export interface Device { id: string; name: string; kind: string; status: string; timezone: string; revision: number }
 export interface WorkSession { id: string; task_id: string; daily_plan_item_id?: string; daily_plan_item_logical_id?: string; status: string; target_minutes: number; duration_seconds: number; started_at: string; revision: number; paused_at?: string; paused_seconds?: number; ended_at?: string; note?: string }
 export interface Conversation { id: string; title: string; status: string; revision: number }
 export interface Message { id: string; role: string; content: string; created_at: string }

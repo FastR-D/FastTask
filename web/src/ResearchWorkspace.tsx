@@ -11,12 +11,11 @@ type Props = {
   goalChatRequest?: GoalChatRequest
   onNotice: (message: string) => void
   onBusinessChanged: () => void
-  onOpenTools?: (taskID: string) => void
 }
 
 // The conversation has one permanent home, including while another application
 // page is open. Responsive layout hides panes; it never remounts the runtime.
-export function ResearchWorkspace({ active, timezone, userId, refreshVersion, chatRequest = 0, goalChatRequest, onNotice, onBusinessChanged, onOpenTools }: Props) {
+export function ResearchWorkspace({ active, timezone, userId, refreshVersion, chatRequest = 0, goalChatRequest, onNotice, onBusinessChanged }: Props) {
   const [pane, setPane] = useState<'today' | 'chat'>('today')
   const openChat = useCallback(() => setPane('chat'), [])
   useEffect(() => { if (chatRequest) setPane('chat') }, [chatRequest])
@@ -27,7 +26,7 @@ export function ResearchWorkspace({ active, timezone, userId, refreshVersion, ch
       <button type="button" aria-pressed={pane==='chat'} onClick={openChat}>对话</button>
     </nav>
     <div className="research-today" aria-label="今日任务区域">
-      <Today userId={userId} timezone={timezone} onNotice={onNotice} refreshVersion={refreshVersion} onBusinessChanged={onBusinessChanged} onOpenChat={openChat} onOpenTools={onOpenTools}/>
+      <Today userId={userId} timezone={timezone} onNotice={onNotice} refreshVersion={refreshVersion} onBusinessChanged={onBusinessChanged} onOpenChat={openChat}/>
     </div>
     <aside className="research-chat" aria-label="科研对话区域">
       <header className="research-chat-head"><div><h2>研究助手</h2><p>说说你的目标，或现在遇到的阻碍。</p></div><mdui-icon name="forum"/></header>

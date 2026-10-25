@@ -1,31 +1,24 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, completeFastCAS, completeFastResearch, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, onSessionEnded, readOfflineUser, rememberUser, request, token } from './api'
-import { FastCASAccount } from './FastCASAccount'
-import type { Device, Goal, Job, User } from './types'
+import type { Goal, Job, User } from './types'
 import type { GoalChatRequest } from './agent'
 import { fieldValue, useMduiEvent } from './mdui-react'
-import { Admin } from './Admin'
 import { Review } from './Lens'
 import { PwaUpdate } from './PwaUpdate'
 import { ResearchWorkspace } from './ResearchWorkspace'
 import { GoalManager } from './GoalManager'
-import { Integrations } from './Integrations'
+import { FastPanel } from './FastPanel'
 import { timezoneOrDefault } from './date'
 import { assertAccessOwner } from './session-owner'
 export { Today, focusEvidence } from './Today'
 
-type Tab = 'today' | 'goals' | 'jobs' | 'review' | 'devices' | 'admin' | 'account' | 'integrations'
+type Tab = 'today' | 'goals' | 'panel' | 'jobs' | 'review'
 
 const NAV_ICONS: Record<Tab, string> = {
   today: 'today', goals: 'account_tree', jobs: 'pending',
-  review: 'fact_check', devices: 'devices', admin: 'admin_panel_settings', account: 'verified_user',
-  integrations: 'hub',
+  panel: 'bluetooth', review: 'fact_check',
 }
-const BAR_TABS: Tab[] = ['today', 'goals', 'review', 'jobs']
-
-// The API speaks English enums; the interface speaks Chinese. One map each, so a status is
-// never shown raw (`ACTIVE · TREE REV 10`) and never translated in three different places.
-const DEVICE_STATUS: Record<string,string> = { active: '在用', disabled: '已停用', revoked: '已撤销' }
+const BAR_TABS: Tab[] = ['today', 'goals', 'panel', 'review', 'jobs']
 
 export function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(token.get()))
@@ -136,14 +129,12 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
   const [chatRequest, setChatRequest] = useState(0)
   const chatSequence=useRef(0)
   const [goalChatRequest,setGoalChatRequest]=useState<GoalChatRequest>()
-  const [toolTaskID, setToolTaskID] = useState('')
   const businessChanged = useCallback(() => setBusinessRevision(value => value + 1), [])
   const openChat = useCallback((goal?:Goal) => {
     const request=++chatSequence.current
     setGoalChatRequest(goal?{goalId:goal.id,title:goal.title,ownerId:user?.id,request}:undefined)
     setTab('today');setChatRequest(request)
   }, [user?.id])
-  const openTools = useCallback((taskID: string) => { setToolTaskID(taskID); setTab('integrations') }, [])
   const drawerRef = useRef<HTMLElement>(null)
   const snackbarRef = useRef<HTMLElement>(null)
   useEffect(() => {
@@ -164,7 +155,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
   },[onLogout,profileAttempt])
   useMduiEvent(drawerRef, 'close', () => setDrawerOpen(false))
   useMduiEvent(snackbarRef, 'close', () => setNotice(''))
-  const items = navItems(user)
+  const items = navItems()
   const currentLabel = items.find(([id]) => id === tab)?.[1] ?? ''
   if(!user)return <main className="page"><h1>正在打开工作台</h1>
     <p role={profileError?'alert':'status'}>{profileError?`暂时无法确认当前账号：${profileError}`:'正在确认当前账号…'}</p>
@@ -201,15 +192,12 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
       <mdui-button-icon icon="logout" aria-label="退出登录" onClick={onLogout}/>
     </mdui-top-app-bar>
     <mdui-layout-main className="app-main">
-      <ResearchWorkspace active={tab==='today'} timezone={timezone} userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} chatRequest={chatRequest} goalChatRequest={goalChatRequest} onOpenTools={openTools}/>
-      <div className="page" hidden={tab==='today'}>
+      <ResearchWorkspace active={tab==='today'} timezone={timezone} userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} chatRequest={chatRequest} goalChatRequest={goalChatRequest}/>
+      <FastPanel active={tab==='panel'} userId={user.id} timezone={timezone} refreshVersion={businessRevision} onNotice={setNotice}/>
+      <div className="page" hidden={tab==='today'||tab==='panel'}>
         {tab==='goals' && <GoalManager userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} onOpenChat={openChat}/>}
         {tab==='jobs' && <JobQueue onNotice={setNotice}/>}
         {tab==='review' && <Review onNotice={setNotice}/>}
-        {tab==='devices' && <Devices onNotice={setNotice} timezone={timezone}/>}
-        {tab==='integrations' && <Integrations user={user} onNotice={setNotice} onBusinessChanged={businessChanged} initialTaskID={toolTaskID}/>}
-        {tab==='account' && <FastCASAccount/>}
-        {tab==='admin' && user?.role==='admin' && <Admin user={user} onNotice={setNotice}/>}
       </div>
     </mdui-layout-main>
     <mdui-navigation-bar className="app-nav" value={tab} label-visibility="labeled">
@@ -219,10 +207,8 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
   </mdui-layout>
 }
 
-function navItems(user: User | null): [Tab,string][] {
-  const items: [Tab,string][] = [['today','工作台'],['goals','目标任务'],['integrations','工具内容'],['review','复盘'],['jobs','后台作业'],['devices','设备'],['account','账号认证']]
-  if (user?.role === 'admin') items.push(['admin','后台'])
-  return items
+function navItems(): [Tab,string][] {
+  return [['today','工作台'],['goals','目标任务'],['panel','pannel'],['review','复盘'],['jobs','后台作业']]
 }
 
 
@@ -262,29 +248,6 @@ function shortID(id?:string){return id?id.length>18?id.slice(0,10)+'…'+id.slic
 // tell a fresh job from yesterday's, and it matches the zh-CN used everywhere else.
 function stamp(value:string){return new Date(value).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})}
 function formatDuration(seconds:number){const minutes=Math.floor(seconds/60);const rest=seconds%60;return minutes?`${minutes}分${rest.toString().padStart(2,'0')}秒`:`${rest}秒`}
-
-function Devices({ onNotice, timezone }: { onNotice:(s:string)=>void; timezone?: string }) {
-  const [devices,setDevices]=useState<Device[]>([]);const [shownToken,setShownToken]=useState('');const [deviceName,setDeviceName]=useState('')
-  async function load(){const {data}=await request<{items:Device[]}>('/devices');setDevices(data.items)}useEffect(()=>{load().catch(e=>onNotice(errorText(e)))},[])
-  async function create(){if(!deviceName.trim())return;if(!timezone){onNotice('正在加载用户时区，请稍后重试');return}try{const {data}=await request<{device:Device;device_token:string}>('/devices',{method:'POST',headers:{'Idempotency-Key':idem()},body:JSON.stringify({name:deviceName,kind:'eink_panel',timezone,capabilities:{width:800,height:480,color_mode:'monochrome'}})});setShownToken(data.device_token);setDeviceName('');load()}catch(e){onNotice(errorText(e))}}
-  return <section className="devices-page"><header className="page-head"><div className="title-block"><p className="eyebrow">{devices.length?`${devices.length} 台设备已登记`:'尚未登记设备'}</p><h1>设备</h1></div></header>
-    {shownToken&&<div className="token-box"><div><b>设备 Token 仅显示一次</b><code>{shownToken}</code></div><mdui-button variant="tonal" icon="content_copy" onClick={()=>navigator.clipboard.writeText(shownToken)}>复制</mdui-button></div>}
-    <div className="device-grid">
-      <mdui-card variant="outlined" className="device-add">
-        <h2>连接墨水屏</h2>
-        <p>创建一个只读、可撤销的设备身份。</p>
-        <mdui-text-field variant="outlined" label="设备名称" value={deviceName} onInput={e=>setDeviceName(fieldValue(e))} placeholder="例如：办公室墨水屏" required/>
-        <mdui-button variant="filled" disabled={!deviceName.trim()} onClick={create}>生成设备 Token</mdui-button>
-      </mdui-card>
-      {devices.map(device=><mdui-card variant="outlined" className="device-card" key={device.id}>
-        <h3>{device.name}</h3>
-        <p><span className={`status ${device.status}`}/>{DEVICE_STATUS[device.status]??device.status} · {device.timezone}</p>
-        <p className="meta">{device.kind==='eink_panel'?'墨水屏面板 · 只读':device.kind}</p>
-        <code>{device.id}</code>
-      </mdui-card>)}
-    </div>
-  </section>
-}
 
 function etag(kind:string,id:string,revision:number){return `"${kind}_${id}_rev_${revision}"`}
 function errorText(error:unknown){return error instanceof Error?error.message:'操作失败'}

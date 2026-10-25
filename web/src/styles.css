@@ -457,30 +457,6 @@ button,input,textarea{font:inherit}
   .job-controls{justify-content:flex-end}
 }
 
-/* ===== 设备 ===== */
-.token-box{
-  display:flex;justify-content:space-between;align-items:center;gap:var(--ft-space-4);flex-wrap:wrap;
-  padding:var(--ft-space-3) var(--ft-space-4);margin-bottom:var(--ft-space-4);
-  border-radius:var(--mdui-shape-corner-medium);
-  background:rgb(var(--mdui-color-tertiary-container));
-  color:rgb(var(--mdui-color-on-tertiary-container));
-}
-.token-box b{display:block;margin-bottom:var(--ft-space-1)}
-.token-box code{word-break:break-all;font-size:var(--mdui-typescale-body-medium-size)}
-.device-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(18rem,1fr));gap:var(--ft-space-4);align-items:start}
-.device-add{padding:var(--ft-space-4);display:grid;gap:var(--ft-space-3);justify-items:start;align-content:start;border-style:dashed}
-.device-add h2{font-size:var(--mdui-typescale-title-small-size);line-height:var(--mdui-typescale-title-small-line-height);font-weight:500}
-.device-add p{color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-medium-size)}
-.device-add mdui-text-field{width:100%}
-.device-card{padding:var(--ft-space-4);display:grid;gap:var(--ft-space-2);align-content:start}
-.device-card h3{font-size:var(--mdui-typescale-title-small-size);line-height:var(--mdui-typescale-title-small-line-height);font-weight:500}
-.device-card>p{display:flex;align-items:center;gap:var(--ft-space-2);color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-medium-size)}
-.device-card>p.meta{font-size:var(--mdui-typescale-body-small-size)}
-.device-card code{font-size:var(--mdui-typescale-label-small-size);color:rgb(var(--mdui-color-on-surface-variant));word-break:break-all}
-.status{width:.5rem;height:.5rem;border-radius:var(--mdui-shape-corner-full);background:rgb(var(--mdui-color-outline));display:inline-block;flex:none}
-.status.active,.status.bound,.status.enabled,.status.online{background:rgb(var(--mdui-color-primary))}
-.status.disabled,.status.revoked,.status.offline{background:rgb(var(--mdui-color-error))}
-
 /* ===== 通用表单排布 ===== */
 .form-stack{display:grid;gap:var(--ft-space-4)}
 .form-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--ft-space-4)}
@@ -500,12 +476,6 @@ button,input,textarea{font:inherit}
 .pwa-update>mdui-button,.pwa-update>mdui-button-icon{flex-shrink:0}
 .pwa-update mdui-button-icon{color:rgb(var(--mdui-color-inverse-on-surface))}
 @media(max-width:839.98px){.pwa-update{bottom:calc(5.5rem + env(safe-area-inset-bottom))}}
-
-/* ===== 账号认证 ===== */
-.account-body{display:grid;gap:var(--ft-space-3);max-width:36rem}
-.account-body .meta{color:rgb(var(--mdui-color-on-surface-variant));font-size:var(--mdui-typescale-body-small-size)}
-.account-state{font-size:var(--mdui-typescale-title-small-size);font-weight:var(--mdui-typescale-title-small-weight)}
-.account-state .meta{font-weight:400}
 
 /* The research workspace has one quiet task surface and one conversation.
    Both remain mounted; visibility at narrow widths is purely presentational. */

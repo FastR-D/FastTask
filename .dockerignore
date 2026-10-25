@@ -9,6 +9,8 @@ web/dist/
 web/dist.new/
 sidecar/node_modules/
 sidecar/dist/
+# The Bluetooth helper and its private pairing state run on the user's Windows PC.
+windows-panel/
 *.db
 *.db-shm
 *.db-wal

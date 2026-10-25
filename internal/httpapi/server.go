@@ -73,7 +73,7 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 		// allowed: the refresh token lives in localStorage, and every origin this policy admits is one
 		// more place a script or stylesheet could be served from. form-action closes the one sink
 		// default-src does not cover.
-		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:19743 http://localhost:19743; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		switch {
 		case strings.HasPrefix(c.Request.URL.Path, "/assets/"):
 			c.Header("Cache-Control", "public, max-age=31536000, immutable")
@@ -1604,6 +1604,10 @@ func (s deviceRoutes) RegisterRoutes(api huma.API) {
 
 func (s panelRoutes) RegisterRoutes(api huma.API) {
 	s.registerTaskList(api)
+	s.registerPanelProfile(api)
+	s.registerPanelPairings(api)
+	s.registerPanelSnapshot(api)
+	s.registerPanelWeather(api)
 	type input struct {
 		Authorization string `header:"Authorization"`
 	}
@@ -2020,7 +2024,7 @@ func credentialResponse(method, path string) bool {
 	if method != http.MethodPost {
 		return false
 	}
-	return path == "/api/v1/devices" || (strings.HasPrefix(path, "/api/v1/devices/") && strings.HasSuffix(path, "/token-rotations"))
+	return path == "/api/v1/panel/pairings" || path == "/api/v1/devices" || (strings.HasPrefix(path, "/api/v1/devices/") && strings.HasSuffix(path, "/token-rotations"))
 }
 
 type replayEnvelope struct {

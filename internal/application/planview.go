@@ -24,6 +24,7 @@ type PlanItemView struct {
 	persistence.DailyPlanItem
 	ItemETag            string             `json:"item_etag"`
 	TaskETag            string             `json:"task_etag,omitempty"`
+	TaskStatus          string             `json:"task_status,omitempty"`
 	TaskSuccessCriteria string             `json:"task_success_criteria,omitempty"`
 	CanCompleteTask     bool               `json:"can_complete_task"`
 	Workspace           *PlanItemWorkspace `json:"workspace,omitempty"`
@@ -149,6 +150,7 @@ func (a *App) PlanItemViews(ctx context.Context, userID string, items []persiste
 			}
 			if err == nil {
 				view.TaskETag = StrongETag("task", task.ID, task.Revision)
+				view.TaskStatus = task.Status
 				view.TaskSuccessCriteria = task.SuccessCriteria
 				if plan.Status == "active" && plan.LocalDate <= today && plan.CurrentRevision == item.PlanRevision && (item.Status == "planned" || item.Status == "in_progress") && domain.ValidateCompletionType("result", item.AllowedTypes) {
 					view.CanCompleteTask, err = completeTaskFromDailyEligibleTx(a.Store.DB.WithContext(ctx), userID, *task)

@@ -19,7 +19,7 @@ function workspaceLink(result: unknown): { label: string; url: string } | null {
 export function WorkspaceLink({ result, isError = false }: { result?: unknown; isError?: boolean }) {
   if (result === undefined && !isError) return <p className="agent-approval-note" role="status">正在准备模块入口…</p>
   const link = !isError && workspaceLink(result)
-  if (!link) return <p className="agent-approval-note" role="alert">暂时无法打开模块网页，请检查工具内容中的网页地址。</p>
+  if (!link) return <p className="agent-approval-note" role="alert">暂时无法打开模块网页，请稍后重试或联系管理员检查模块地址。</p>
   return <div className="agent-workspace-link">
     <a className="agent-workspace-action" href={link.url} target="_blank" rel="noopener noreferrer">打开 {link.label}<mdui-icon name="open_in_new" /></a>
     <p className="agent-approval-note">在对应网页继续操作，登录由该模块处理。</p>

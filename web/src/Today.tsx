@@ -52,9 +52,9 @@ export function activeFocusSeconds(session: WorkSession, now=Date.now()) {
   return Math.max(0,Math.floor((end-started)/1000)-Math.max(0,session.paused_seconds??0))
 }
 
-type TodayProps = { userId?:string; onNotice: (message: string) => void; timezone?: string; refreshVersion?: number; onBusinessChanged?: () => void; onOpenChat?: () => void; onOpenTools?: (taskID: string) => void }
+type TodayProps = { userId?:string; onNotice: (message: string) => void; timezone?: string; refreshVersion?: number; onBusinessChanged?: () => void; onOpenChat?: () => void }
 
-export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersion = 0, onBusinessChanged, onOpenChat, onOpenTools }: TodayProps) {
+export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersion = 0, onBusinessChanged, onOpenChat }: TodayProps) {
   const timezone=profileTimezone===undefined?undefined:timezoneOrDefault(profileTimezone)
   const owner=useRef(userId)
   owner.current??=userId
@@ -379,7 +379,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
       const draft=draftOf(item),evidence=focusEvidence(item,sessions),enoughTime=evidence.seconds>=item.target_minutes*60,focusMinutes=Number(draft.focusMinutes),open=expanded===itemKey(item),methods=allowedCompletionTypes(item)
       const canProgress=planEditable&&(!optional||supportUnlocked)
       const workspace=item.workspace,url=workspaceURL(workspace?.url)
-      const workspaceAction=workspace&&(url?<mdui-button variant="text" icon="open_in_new" href={url} target="_blank" rel="noreferrer">打开 {workspace.label}</mdui-button>:<><span className="meta">{workspace.label} 网页地址待配置</span>{item.task_id&&onOpenTools&&<mdui-button variant="text" icon="settings" onClick={()=>onOpenTools(item.task_id!)}>设置工具地址</mdui-button>}</>)
+      const workspaceAction=workspace&&(url?<mdui-button variant="text" icon="open_in_new" href={url} target="_blank" rel="noreferrer">打开 {workspace.label}</mdui-button>:<span className="meta">{workspace.label} 网页暂不可用</span>)
       return <article key={itemKey(item)} className={`today-item${item.status==='satisfied'?' done':''}`} aria-label={item.title}>
         <div className="today-item-head">
           <span className="today-item-number" aria-hidden="true">{item.status==='satisfied'?<mdui-icon name="check"/>:optional?<mdui-icon name="menu_book"/>:String(index+1).padStart(2,'0')}</span>
@@ -397,7 +397,6 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
           <div id={`completion-${itemKey(item)}`} className="today-completion" hidden={!open}>
             <p className="meta">今日的小步推进单独记录，不代表整个任务已经最终完成。</p>
             {drafts[itemKey(item)]?.completeTask&&drafts[itemKey(item)].taskETag!==item.task_etag&&<p role="status" className="meta">任务内容已更新，推进摘要已保留；整项完成需要重新确认。</p>}
-            {item.task_id&&onOpenTools&&<mdui-button variant="text" icon="library_books" onClick={()=>onOpenTools(item.task_id!)}>查找工具材料</mdui-button>}
             {methods.length?<mdui-select label="推进方式" aria-label={`${item.title}的推进方式`} variant="outlined" value={draft.type} onChange={event=>{const type=fieldValue(event) as CompletionType;updateDraft(item,{type,...(type!=='result'?{completeTask:false}:{})})}}>{methods.map(type=><mdui-menu-item key={type} value={type}>{COMPLETION_LABELS[type]}</mdui-menu-item>)}</mdui-select>:<p className="meta">这项学习仅允许计时完成，但未关联可计时的任务。</p>}
             {item.can_complete_task&&item.task_etag&&methods.includes('result')&&<mdui-select label="完成范围" aria-label={`${item.title}的完成范围`} variant="outlined" value={draft.completeTask?'task':'today'} onChange={event=>updateDraft(item,{completeTask:fieldValue(event)==='task',...(fieldValue(event)==='task'?{type:'result'}:{})})}>
               <mdui-menu-item value="today">只记录今天的小步骤</mdui-menu-item><mdui-menu-item value="task">这项任务的全部产出也已完成</mdui-menu-item>
