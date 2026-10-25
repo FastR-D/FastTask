@@ -274,6 +274,10 @@ func planningAvailabilityTx(tx *gorm.DB, userID string, plan persistence.DailyPl
 	if structuralChange > 0 {
 		availability.Reason = "任务结构已调整，原未开始的父任务、里程碑或重复子步骤安排已移入修订历史。" + availability.Reason
 	}
+	if plan.Status == "active" && plan.ManualItemsRemoved {
+		availability.Status = "withdrawn"
+		availability.Reason = fmt.Sprintf("已删除所选今日安排，今天保留 %d 项；需要补充时可明确重新安排今天。", core)
+	}
 	return availability, nil
 }
 

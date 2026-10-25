@@ -30,6 +30,6 @@ if ($DependencyPath) { $PanelLink.Arguments += ' -DependencyPath "' + $Dependenc
 if ($StateDirectory) { $PanelLink.Arguments += ' -StateDirectory "' + $StateDirectory + '"' }
 $PanelLink.WorkingDirectory = $PSScriptRoot
 $PanelLink.WindowStyle = 7
-$PanelLink.Description = "FastTask Windows 墨水屏助手：读取真实今日任务并在已开启的三个时点刷新"
+$PanelLink.Description = "FastTask Windows 工牌助手：检测今日任务变化并自动更新墨水屏"
 $PanelLink.Save()
-Write-Host "已安装当前用户登录自启。请使用相同 Origin 运行 start.ps1，再在 FastTask 页面配对并开启自动刷新。"
+Write-Host "已安装当前用户登录自启。请使用相同 Origin 运行 start.ps1，再在 FastTask 页面连接设备，自动同步任务变化。"

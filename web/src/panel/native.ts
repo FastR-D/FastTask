@@ -1,7 +1,7 @@
 export const NATIVE_PANEL_URL = 'http://127.0.0.1:19743'
 export type NativeDevice = { name: string; address: string; rssi?: number }
 export type NativeConfig = { enabled: boolean; device_name: string; address?: string; page: number; has_token: boolean; fasttask_url?: string; pairing_id?: string }
-export type NativeHealth = { ok: boolean; version: string; ble_supported: boolean; busy?: boolean; config: NativeConfig; last_status?: { status?: string; operation?: string; message?: string; started_at?: string; finished_at?: string } | null; next_run?: string | null }
+export type NativeHealth = { ok: boolean; version: string; ble_supported: boolean; busy?: boolean; config: NativeConfig; capabilities?: { guarded_refresh?: boolean }; sync_mode?: 'on_change'; monitor?: { interval_seconds: number; pending: boolean; last_checked_at?: string; last_synced_at?: string; message?: string }; last_status?: { status?: string; operation?: string; phase?: 'scanning' | 'connecting' | 'sending'; attempt?: number; max_attempts?: number; message?: string; started_at?: string; finished_at?: string } | null }
 
 export type LocalNetworkPermission = PermissionState | 'unknown'
 type LoopbackRequestInit = RequestInit & { targetAddressSpace: 'loopback' }
@@ -44,7 +44,7 @@ export async function nativePanel<T>(path: string, body?: object, method?: strin
     method: method || (body ? 'POST' : 'GET'),
     headers: body ? { 'Content-Type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(path === '/send' || path === '/refresh' ? 320_000 : path === '/scan' ? 45_000 : path === '/config' ? 30_000 : 20_000),
+    signal: AbortSignal.timeout(path === '/send' || path === '/refresh' ? 320_000 : path === '/scan' ? 80_000 : path === '/config' ? 30_000 : 20_000),
     cache: 'no-store',
     credentials: 'omit',
     redirect: 'error',

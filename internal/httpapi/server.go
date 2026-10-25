@@ -820,6 +820,7 @@ func (s taskTreeRoutes) RegisterRoutes(api huma.API) {
 }
 
 func (s planRoutes) RegisterRoutes(api huma.API) {
+	s.registerPlanItemDeletions(api)
 	type settingsInput struct{}
 	register(api, "get-planning-settings", http.MethodGet, "/planning-settings", "Get research focus and daily budget", userSecurity(), func(ctx context.Context, input *settingsInput) (*resourceResponse[persistence.PlanningSettings], error) {
 		userID := principal(ctx).UserID

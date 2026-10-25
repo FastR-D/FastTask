@@ -5,6 +5,7 @@ import { SESSION_OWNER_CHANGED } from './session-owner'
 import { fieldValue } from './mdui-react'
 import { localDateInTimezone, timezoneOrDefault } from './date'
 import { waitJob } from './jobs'
+import { workspaceURL } from './workspace-navigation'
 import type { CompletionType, Goal, Job, Plan, PlanAvailability, PlanItem, PlanningSettings, ScheduledDay, Task, WorkSession } from './types'
 
 const COMPLETION_LABELS: Record<CompletionType, string> = { minimum_action: '最小行动', step: '完成关键步骤', result: '取得结果', time: '累计专注时长' }
@@ -26,11 +27,6 @@ function defaultCompletionType(item:PlanItem):CompletionType {
 }
 function configuredGoal(settings:PlanningSettings){
   return Object.prototype.hasOwnProperty.call(settings,'configured_primary_goal_id')?settings.configured_primary_goal_id??'':settings.primary_goal_id??''
-}
-
-function workspaceURL(value?:string){
-  if(!value||/[\x00-\x1f\x7f\\]/.test(value))return undefined
-  try{const url=new URL(value);return ['http:','https:'].includes(url.protocol)&&url.hostname&&!url.username&&!url.password&&!url.search&&!url.hash?url.href:undefined}catch{return undefined}
 }
 
 // Match the server's time-evidence rule: only ended, valid sessions bound to this
@@ -91,6 +87,11 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
   const generationJob=useRef<Job|null>(null)
   const [learningConflict,setLearningConflict]=useState<CreationResponse<PlanItem>|null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [deletionOpen,setDeletionOpen]=useState(false)
+  const [deletionSelection,setDeletionSelection]=useState<Record<string,string>>({})
+  const [deletionError,setDeletionError]=useState('')
+  const deletionAttempt=useRef(createCreationAttempt<{plan:Plan;items:PlanItem[];deleted_ids:string[]}>())
+  const deletionPlanID=useRef('')
   const loadSequence = useRef(0)
   const settingsSequence=useRef(0)
   const settingsDirty=useRef(false)
@@ -195,6 +196,34 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
     return()=>{alive=false}
   },[session?.task_id,refreshVersion,userId])
   async function refreshBusiness() { if (onBusinessChanged) onBusinessChanged(); else await load() }
+  useEffect(()=>{
+    if(!deletionAttempt.current.pending())setDeletionSelection({})
+  },[plan?.id,plan?.revision,userId])
+  async function deleteSelectedItems(){
+    if(ownerChanged||!plan||busyRef.current||!deletionAttempt.current.pending()&&(!canDeleteItems||!Object.keys(deletionSelection).length||Boolean(loadError)))return
+    await guarded('delete-items',async()=>{
+      setDeletionError('')
+      try{
+        if(!deletionAttempt.current.pending()){
+          deletionAttempt.current=createCreationAttempt(owner.current,()=>currentUserId.current)
+          deletionPlanID.current=plan.id
+        }
+        const response=await deletionAttempt.current.recover(`/daily-plans/${deletionPlanID.current}/item-deletions`,{items:Object.entries(deletionSelection).map(([id,if_match])=>({id,if_match}))},{'If-Match':etag('plan',plan.id,plan.revision)})
+        if(owner.current&&currentUserId.current!==owner.current)return
+        setPlan(response.data.plan)
+        setItems(current=>current.filter(item=>!response.data.deleted_ids.includes(item.id)))
+        setDeletionSelection({});setDeletionOpen(false);deletionAttempt.current.reset();deletionPlanID.current=''
+        onNotice(`已删除 ${response.data.deleted_ids.length} 项今日安排`)
+        await refreshBusiness()
+      }catch(error){
+        if(owner.current&&currentUserId.current!==owner.current)return
+        const definite=error instanceof ApiError&&error.status>=400&&error.status<500&&![408,425,429].includes(error.status)&&!(error.status===409&&/in progress/i.test(error.message))
+        if(definite){deletionAttempt.current.reset();deletionPlanID.current='';setDeletionSelection({});await load()}
+        const message=error instanceof ApiError&&error.status===412?'安排或任务状态已更新，请重新选择后删除。':errorText(error)
+        setDeletionError(message);onNotice(message)
+      }
+    })
+  }
   // One action at a time, named by what it is acting on, so the button that was pressed shows progress
   // and a second press cannot send a duplicate (a fresh idempotency key each time) or a stale If-Match.
   // The ref is the guard (clicks dispatched before React re-renders all see the same state); the state
@@ -356,8 +385,11 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
     })
   }
   const coreItems = items.filter(i=>i.kind==='core'&&!['skipped','superseded','not_completed'].includes(i.status))
+  const deletableItems=items.filter(item=>item.kind==='core'&&item.status!=='superseded')
   const supportItems=items.filter(item=>['input','support'].includes(item.kind)&&!['skipped','superseded','not_completed'].includes(item.status))
   const planEditable=Boolean(plan&&timezone&&!ownerChanged&&plan.status==='active'&&plan.local_date<=localDateInTimezone(new Date(),timezone))
+  const canDeleteItems=Boolean(planEditable&&timezone&&plan?.local_date===localDateInTimezone(new Date(),timezone))
+  const pendingDeletion=deletionAttempt.current.pending()
   const supportUnlocked=planEditable
   const pendingGeneration=Boolean(generationJob.current||generationAttempt.current.pending())
   const retainedLearning=ownerChanged&&Boolean(learningDraft.title||learningDraft.commitment||learningDraft.minimum_action||learningAttempt.current.pending()||learningSaved.current)
@@ -378,7 +410,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
     return list.map((item,index)=>{
       const draft=draftOf(item),evidence=focusEvidence(item,sessions),enoughTime=evidence.seconds>=item.target_minutes*60,focusMinutes=Number(draft.focusMinutes),open=expanded===itemKey(item),methods=allowedCompletionTypes(item)
       const canProgress=planEditable&&(!optional||supportUnlocked)
-      const workspace=item.workspace,url=workspaceURL(workspace?.url)
+      const workspace=item.workspace,url=workspaceURL(workspace?.url,workspace?.system)
       const workspaceAction=workspace&&(url?<mdui-button variant="text" icon="open_in_new" href={url} target="_blank" rel="noreferrer">打开 {workspace.label}</mdui-button>:<span className="meta">{workspace.label} 网页暂不可用</span>)
       return <article key={itemKey(item)} className={`today-item${item.status==='satisfied'?' done':''}`} aria-label={item.title}>
         <div className="today-item-head">
@@ -420,6 +452,15 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
     </header>
     {ownerChanged&&<p role="status" className="meta">{SESSION_OWNER_CHANGED} 原账号的草稿仍保留。</p>}
     <p className="today-intro">通常每天三项具体小步骤，超出的顺延。暂时不足时，会说明还缺什么。</p>
+    {canDeleteItems&&deletableItems.length>0&&!deletionOpen&&<div className="today-manage-actions"><mdui-button variant="text" icon="delete_outline" disabled={Boolean(busy)||Boolean(loadError)} onClick={()=>{setDeletionOpen(true);setDeletionError('')}}>删除今日任务</mdui-button></div>}
+    {(deletionOpen||pendingDeletion)&&<section className="today-delete-panel" aria-label="删除今日任务">
+      <div className="today-delete-heading"><h2>选择要删除的今日任务</h2><mdui-button variant="text" disabled={Boolean(busy)||pendingDeletion} onClick={()=>{setDeletionOpen(false);setDeletionSelection({});setDeletionError('')}}>取消</mdui-button></div>
+      <p className="meta">从今天的安排中移除，目标任务和历史记录保留。</p>
+      <div className="today-delete-list">{deletableItems.map(item=><label key={item.id}><input type="checkbox" aria-label={`删除今日任务：${item.title}`} checked={Boolean(deletionSelection[item.id])} disabled={Boolean(busy)||pendingDeletion||!canDeleteItems||Boolean(loadError)} onChange={event=>setDeletionSelection(current=>{const next={...current};if(event.target.checked)next[item.id]=item.item_etag??etag('dpi',item.id,item.revision);else delete next[item.id];return next})}/><span>{item.title}</span><small>{item.status==='satisfied'?'已完成':item.status==='skipped'?'已跳过':item.status==='in_progress'?'进行中':'待完成'}</small></label>)}</div>
+      {deletionError&&<p role="alert" className="form-error">{deletionError}</p>}
+      {pendingDeletion&&<p role="status" className="meta">上次删除的结果尚未确认，继续核对会沿用原请求。</p>}
+      <div className="actions"><mdui-button variant="filled" icon="delete_outline" loading={busy==='delete-items'} disabled={Boolean(busy)||ownerChanged||!pendingDeletion&&(!canDeleteItems||Boolean(loadError)||!Object.keys(deletionSelection).length)} onClick={()=>void deleteSelectedItems()}>{pendingDeletion?'核对删除结果':`删除所选${Object.keys(deletionSelection).length?`（${Object.keys(deletionSelection).length}）`:''}`}</mdui-button></div>
+    </section>}
     {pendingGeneration&&<div className="empty-state"><p role="status">{generationJob.current?.status==='succeeded'?'安排作业已完成，当前任务还需读取确认。':'上次安排的结果尚未确认，将沿用原请求或作业继续核对。'}</p><mdui-button variant="outlined" disabled={Boolean(busy)||ownerChanged} loading={busy==='plan'} onClick={()=>generate()}>核对上次安排</mdui-button></div>}
     {loadError&&<div role="alert" className="form-error"><p>今日任务暂时无法更新：{loadError}</p>{plan&&<p className="meta">下方保留上次成功读取的安排，请重新加载后再操作。</p>}{!pendingGeneration&&<mdui-button variant="text" disabled={loading||Boolean(busy)} onClick={()=>void load()}>重新加载今日任务</mdui-button>}</div>}
     {!sessionsAvailable&&plan&&!loading&&<p className="meta">专注记录暂时无法加载，重新加载今日任务后可继续计时。</p>}

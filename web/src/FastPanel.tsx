@@ -2,12 +2,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { ApiError, idem, request, token } from './api'
 import { localDateInTimezone, timezoneOrDefault } from './date'
 import { assertAccessOwner } from './session-owner'
+import { fieldValue } from './mdui-react'
 import type { PlanItem, ScheduledDay } from './types'
-import { getBluetoothCapability, WolinkPanelClient, type TransferProgress } from './panel/bluetooth'
+import { getBluetoothCapability, WolinkPanelClient, type SearchProgress, type TransferProgress } from './panel/bluetooth'
 import { DISPLAY_HEIGHT, DISPLAY_WIDTH } from './panel/protocol'
 import { drawBadge, EMPTY_PROFILE, paginateBadge, prepareAvatar, type PanelProfile, type PanelWeather } from './panel/badge'
 import { isLoopbackPanelPage, localNetworkPermission, nativeConfigMatchesOrigin, NativePanelError, nativePanel, nativeStartCommand, type NativeDevice, type NativeHealth } from './panel/native'
 import { matchingPanelPairing, type PanelPairing } from './panel/pairing'
+import { loadPanelDeviceHistory, panelDeviceKey, rememberPanelDevice, type RememberedPanelDevice } from './panel/history'
 import './panel.css'
 
 type Props = { active: boolean; userId: string; timezone?: string; refreshVersion: number; onNotice: (message: string) => void }
@@ -42,21 +44,26 @@ export function FastPanel({ active, userId, timezone, refreshVersion, onNotice }
   const [connecting, setConnecting] = useState(false), [device, setDevice] = useState<{ id: string; name: string } | null>(null), [connectionError, setConnectionError] = useState('')
   const [sending, setSending] = useState(false), [progress, setProgress] = useState<TransferProgress | null>(null), [writeError, setWriteError] = useState(''), [written, setWritten] = useState<WrittenScreen | null>(null), [renderError, setRenderError] = useState('')
   const [pairings, setPairings] = useState<PanelPairing[]>([])
+  const [deviceHistory, setDeviceHistory] = useState<RememberedPanelDevice[]>([]), [rememberedBrowserId, setRememberedBrowserId] = useState(''), [searchProgress, setSearchProgress] = useState<SearchProgress | null>(null)
   const client = useRef<WolinkPanelClient | null>(null), owner = useRef(userId), loadSequence = useRef(0), operation = useRef(0), loadAbort = useRef<AbortController | null>(null), transferAbort = useRef<AbortController | null>(null)
   const canvas = useRef<HTMLCanvasElement>(null), busy = useRef(false), notice = useRef(onNotice), currentDate = useRef(date)
-  const nativeApproved = useRef(false), nativeChecking = useRef(false)
+  const nativeApproved = useRef(false), nativeChecking = useRef(false), pairingsOwner = useRef('')
+  const connectionAbort = useRef<AbortController | null>(null)
   owner.current = userId; notice.current = onNotice
   const capability = getBluetoothCapability()
   const pageOrigin = window.location.origin, cloudPage = !isLoopbackPanelPage(pageOrigin), startCommand = nativeStartCommand(pageOrigin)
   const nativeOriginMatches = Boolean(nativeHealth && nativeConfigMatchesOrigin(nativeHealth.config, pageOrigin))
-  const ownPairing = matchingPanelPairing(nativeHealth?.config, pairings, pageOrigin)
+  const ownPairing = pairingsOwner.current === userId ? matchingPanelPairing(nativeHealth?.config, pairings, pageOrigin) : undefined
 
   useLayoutEffect(() => {
     const account = userId, panel = new WolinkPanelClient({ onDisconnected: () => { if (client.current === panel && owner.current === account) { setDevice(null); setConnectionError('蓝牙已断开，请重新连接') } } })
     client.current = panel; currentDate.current = localDateInTimezone(new Date(), zone); operation.current++
+    pairingsOwner.current = ''
     setDate(currentDate.current); setLoadedDate(''); setItems([]); setPageIndex(0); setProfile({ ...EMPTY_PROFILE }); setSavedProfile(null); setProfileETag(''); setProfileError(''); setAvatar(null)
-    setDisplayId(''); setDevice(null); setNativeHealth(null); setNativeDevice(null); setNativeDevices([]); setConnectionError(''); setWriteError(''); setProgress(null); setWritten(null); setConnecting(false); setSending(false); setLoadError(''); setLoadedAt(''); setPairings([]); setChoosingDevice(false); busy.current = false
-    return () => { operation.current++; loadSequence.current++; loadAbort.current?.abort(); transferAbort.current?.abort(); if (client.current === panel) client.current = null; panel.disconnect() }
+    const history = loadPanelDeviceHistory(pageOrigin, account), recent = history[0]
+    setDeviceHistory(history); setDisplayId(recent?.name || ''); setTransport(recent?.transport || 'native'); setRememberedBrowserId(recent?.transport === 'browser' ? recent.id || '' : '')
+    setDevice(null); setNativeHealth(null); setNativeDevice(recent?.transport === 'native' ? { name: recent.name, address: recent.address! } : null); setNativeDevices([]); setConnectionError(''); setWriteError(''); setProgress(null); setWritten(null); setConnecting(false); setSending(false); setSearchProgress(null); setLoadError(''); setLoadedAt(''); setPairings([]); setChoosingDevice(false); busy.current = false
+    return () => { operation.current++; loadSequence.current++; loadAbort.current?.abort(); connectionAbort.current?.abort(); transferAbort.current?.abort(); if (client.current === panel) client.current = null; panel.disconnect() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId])
   useEffect(() => {
@@ -116,6 +123,7 @@ export function FastPanel({ active, userId, timezone, refreshVersion, onNotice }
       const response = await nativePanel<NativeHealth>('/health')
       if (owner.current !== account) return
       if (!response.config || typeof response.ble_supported !== 'boolean') throw new NativePanelError('请重新启动本项目的 Windows 助手。', 'invalid_health')
+      if (response.sync_mode !== 'on_change' || !response.capabilities?.guarded_refresh) throw new NativePanelError('请先更新本机 Windows 助手代码并重新启动，以启用任务变化同步。', 'upgrade_required')
       setNativeHealth(response); nativeApproved.current = true
       if (!nativeConfigMatchesOrigin(response.config, pageOrigin)) { setNativeConnection('origin-mismatch'); setNativeError('助手地址与当前页面不匹配，请按连接帮助重新启动。'); setNativeDevice(null); return }
       setNativeConnection('connected'); setNativeError(''); return response
@@ -131,13 +139,13 @@ export function FastPanel({ active, userId, timezone, refreshVersion, onNotice }
   const loadPairings = useCallback(async () => {
     if (!userId) return
     const account = userId
-    try { const { data } = await request<{ items: PanelPairing[] }>('/panel/pairings', {}, account); if (owner.current === account) setPairings(data.items || []) }
-    catch { if (owner.current === account) setPairings([]) }
+    try { const { data } = await request<{ items: PanelPairing[] }>('/panel/pairings', {}, account); if (owner.current === account) { pairingsOwner.current = account; setPairings(data.items || []) } }
+    catch { if (owner.current === account) { pairingsOwner.current = ''; setPairings([]) } }
   }, [userId])
   useEffect(() => { if (active && userId) { void load(); void loadWeather(); void loadNative(); void loadPairings() } }, [active, userId, load, loadWeather, loadNative, loadPairings, refreshVersion])
   useEffect(() => {
     if (!active || !userId) return
-    // The page only reads state. The Windows process owns all timed BLE writes.
+    // The page only reads state. The Windows process monitors changes and writes.
     const healthTimer = window.setInterval(() => { void loadNative() }, 30_000)
     const stateTimer = window.setInterval(() => { void load(); void loadWeather(); void loadPairings() }, 60_000)
     return () => { window.clearInterval(healthTimer); window.clearInterval(stateTimer) }
@@ -153,9 +161,10 @@ export function FastPanel({ active, userId, timezone, refreshVersion, onNotice }
   }, [active, load, loadNative, loadPairings, loadWeather, zone])
   useEffect(() => {
     // Only a current account's verified pairing can restore a saved device.
-    if (choosingDevice || !ownPairing || !nativeHealth?.config.address) return
+    if (transport !== 'native' || choosingDevice || !ownPairing || !nativeHealth?.config.address) return
     setNativeDevice({ name: nativeHealth.config.device_name, address: nativeHealth.config.address }); setDisplayId(nativeHealth.config.device_name)
-  }, [ownPairing?.id, nativeHealth?.config.address, nativeHealth?.config.device_name, choosingDevice])
+    setDeviceHistory(rememberPanelDevice(pageOrigin, userId, { transport: 'native', name: nativeHealth.config.device_name, address: nativeHealth.config.address }))
+  }, [ownPairing?.id, nativeHealth?.config.address, nativeHealth?.config.device_name, choosingDevice, transport])
 
   // Legacy text corrections remain readable; selection/order no longer hide or
   // rearrange today's automatically synchronized tasks.
@@ -194,9 +203,10 @@ export function FastPanel({ active, userId, timezone, refreshVersion, onNotice }
     // Recheck account ownership at connection time, never just has_token.
     const [health, response] = await Promise.all([nativePanel<NativeHealth>('/health'), request<{ items: PanelPairing[] }>('/panel/pairings', {}, account)])
     if (owner.current !== account || operation.current !== currentOperation) return
+    if (health.sync_mode !== 'on_change' || !health.capabilities?.guarded_refresh) throw new NativePanelError('请先更新本机 Windows 助手代码并重新启动，以启用任务变化同步。', 'upgrade_required')
     if (!nativeConfigMatchesOrigin(health.config, pageOrigin)) throw new Error('助手地址与当前页面不匹配，请按连接帮助重新启动。')
     const currentPairings = response.data.items || [], pairing = matchingPanelPairing(health.config, currentPairings, pageOrigin)
-    const reusable = pairing && health.config.device_name === target.name && health.config.address === target.address
+    const reusable = pairing && health.config.device_name === target.name && health.config.address?.toUpperCase() === target.address.toUpperCase()
     let issued: PanelPairing | undefined, installed = false
     try {
       if (!reusable) {
@@ -210,28 +220,45 @@ export function FastPanel({ active, userId, timezone, refreshVersion, onNotice }
         installed = true
       }
       if (owner.current !== account || operation.current !== currentOperation) return
-      setPairings(issued ? [...currentPairings, issued] : currentPairings); await loadNative()
+      pairingsOwner.current = account
+      setPairings(issued ? [...currentPairings, { id: issued.id, device_name: issued.device_name, expires_at: issued.expires_at }] : currentPairings); await loadNative()
     } finally {
       if (issued && (!installed || owner.current !== account || operation.current !== currentOperation)) {
         try { await request(`/panel/pairings/${issued.id}`, { method: 'DELETE' }, account) } catch { /* Never persist the token in UI storage. */ }
       }
     }
   }
-  async function connect() {
+  async function connect(chooseNew = false) {
     const panel = client.current, account = userId
-    if (!account || !panel || busy.current || !displayId.trim() || nativeHealth?.busy) return
+    if (!account || !panel || busy.current || transport === 'native' && !displayId.trim() || nativeHealth?.busy) return
     const currentOperation = ++operation.current
-    busy.current = true; setConnecting(true); setConnectionError(''); setWriteError('')
+    const controller = new AbortController(); connectionAbort.current = controller
+    let progressTimer: number | undefined
+    busy.current = true; setConnecting(true); setSearchProgress(null); setConnectionError(''); setWriteError('')
     try {
       assertAccessOwner(token.get(), account)
       if (transport === 'native') {
         const health = nativeOriginMatches ? nativeHealth : await loadNative(true)
         if (owner.current !== account || operation.current !== currentOperation) return
+        controller.signal.throwIfAborted()
         if (!health?.ble_supported || !nativeConfigMatchesOrigin(health.config, pageOrigin)) return
         let target = nativeDevice
         if (!target) {
+          setSearchProgress({ phase: 'scanning', attempt: 1, maxAttempts: 4 })
+          let polling = false
+          progressTimer = window.setInterval(() => {
+            if (polling || owner.current !== account || operation.current !== currentOperation) return
+            polling = true
+            void nativePanel<NativeHealth>('/health').then(state => {
+              if (owner.current !== account || operation.current !== currentOperation) return
+              setNativeHealth(state)
+              const status = state.last_status
+              if (status?.phase && status.phase !== 'sending' && status.attempt && status.max_attempts) setSearchProgress({ phase: status.phase, attempt: status.attempt, maxAttempts: status.max_attempts })
+            }).catch(() => {}).finally(() => { polling = false })
+          }, 1_000)
           const response = await nativePanel<{ devices: NativeDevice[] }>('/scan', { device_name: displayId.trim() })
           if (owner.current !== account || operation.current !== currentOperation) return
+          controller.signal.throwIfAborted()
           setNativeDevices(response.devices || [])
           const exact = response.devices.filter(value => value.name.toUpperCase() === displayId.trim().toUpperCase())
           if (exact.length === 1) target = exact[0]
@@ -239,33 +266,53 @@ export function FastPanel({ active, userId, timezone, refreshVersion, onNotice }
           if (!target) return
           setNativeDevice(target)
         }
+        setSearchProgress({ phase: 'connecting', attempt: 1, maxAttempts: 1 })
+        controller.signal.throwIfAborted()
         await pairDevice(target, account, currentOperation)
         if (owner.current !== account || operation.current !== currentOperation) return
+        controller.signal.throwIfAborted()
+        setDeviceHistory(rememberPanelDevice(pageOrigin, account, { transport: 'native', name: target.name, address: target.address }))
         setChoosingDevice(false); notice.current(`已连接 ${target.name}`)
       } else {
-        const connected = await panel.connect(displayId.trim())
+        const options = { signal: controller.signal, onSearchProgress: (value: SearchProgress) => { if (owner.current === account && operation.current === currentOperation) setSearchProgress(value) } }
+        // The first chooser is still invoked directly in the click stack.
+        const connected = rememberedBrowserId && !chooseNew ? await panel.connectRemembered(rememberedBrowserId, displayId.trim(), options) : await panel.connect(chooseNew ? '' : displayId.trim(), options)
         if (owner.current !== account || client.current !== panel || operation.current !== currentOperation) { panel.disconnect(); return }
-        setDevice(connected); notice.current(`已连接 ${connected.name}`)
+        setDevice(connected); setDisplayId(connected.name); setRememberedBrowserId(connected.id)
+        setDeviceHistory(rememberPanelDevice(pageOrigin, account, { transport: 'browser', name: connected.name, id: connected.id })); notice.current(`已连接 ${connected.name}`)
       }
-    } catch (error) { if (owner.current === account && operation.current === currentOperation) setConnectionError(bluetoothError(error)) }
-    finally { if (owner.current === account && operation.current === currentOperation) { setConnecting(false); busy.current = false; if (transport === 'native') void loadNative() } }
+    } catch (error) { if (owner.current === account && operation.current === currentOperation) setConnectionError(controller.signal.aborted ? '已取消查找设备' : bluetoothError(error)) }
+    finally { if (progressTimer) window.clearInterval(progressTimer); if (connectionAbort.current === controller) connectionAbort.current = null; if (owner.current === account && operation.current === currentOperation) { setConnecting(false); setSearchProgress(null); busy.current = false; if (transport === 'native') void loadNative() } }
   }
-  function disconnect() { operation.current++; transferAbort.current?.abort(); client.current?.disconnect(); setDevice(null); setNativeDevice(null); setNativeDevices([]); setChoosingDevice(true); setConnectionError('') }
+  function disconnect() { operation.current++; connectionAbort.current?.abort(); transferAbort.current?.abort(); client.current?.disconnect(); setDevice(null); setNativeDevice(null); setNativeDevices([]); setChoosingDevice(true); setConnectionError('') }
+  function chooseHistory(value: string) {
+    const remembered = deviceHistory.find(entry => panelDeviceKey(entry) === value)
+    if (!remembered) return
+    disconnect(); setTransport(remembered.transport); setDisplayId(remembered.name)
+    setRememberedBrowserId(remembered.transport === 'browser' ? remembered.id || '' : '')
+    setNativeDevice(remembered.transport === 'native' ? { name: remembered.name, address: remembered.address! } : null)
+  }
+  async function cancelConnection() {
+    connectionAbort.current?.abort()
+    if (transport === 'native' && connecting) { try { await nativePanel('/cancel', {}) } catch (error) { setConnectionError(errorMessage(error)) } }
+  }
   async function send() {
     const panel = client.current, preview = canvas.current, account = userId
-    if (!account || !panel || !preview || busy.current || nativeHealth?.busy || loadError || renderError || loadedDate !== today() || transport === 'browser' && !panel.connected || transport === 'native' && (!nativeDevice || !nativeOriginMatches || !ownPairing)) return
+    if (!account || !panel || !preview || busy.current || nativeHealth?.busy || loadError || renderError || loadedDate !== today() || transport === 'browser' && !panel.connected || transport === 'native' && (profileDirty || !nativeDevice || !nativeOriginMatches || !ownPairing)) return
     const sentDate = date, sentPage = previewPage, sentPages = pages.length, sentSignature = signature, currentOperation = ++operation.current
     busy.current = true; setSending(true); setWriteError(''); setProgress(null)
     const controller = new AbortController(); transferAbort.current = controller
     try {
       assertAccessOwner(token.get(), account)
-      const image = drawBadge(preview, pages[sentPage], profile, weatherText, sentDate, sentPage, sentPages, avatar)
       let name = ''
       if (transport === 'native') {
-        const result = await nativePanel<{ ok: boolean; notification: string }>('/send', { device_name: nativeDevice!.name, address: nativeDevice!.address, image_base64: preview.toDataURL('image/png') })
+        const live = await nativePanel<NativeHealth>('/health')
+        if (owner.current !== account || operation.current !== currentOperation) return
+        if (live.sync_mode !== 'on_change' || !live.capabilities?.guarded_refresh) throw new NativePanelError('请先更新本机 Windows 助手代码并重新启动，以启用任务变化同步。', 'upgrade_required')
+        const result = await nativePanel<{ ok: boolean; notification: string }>('/refresh', { page: sentPage, expected_pairing_id: ownPairing!.id, expected_device_name: nativeDevice!.name, expected_address: nativeDevice!.address })
         if (!result.ok || result.notification?.toLowerCase() !== 'ff00000000000000') throw new Error('未收到设备完成通知，请查看屏幕后重试')
         name = nativeDevice!.name
-      } else { const result = await panel.sendImage(image, { signal: controller.signal, onProgress: value => { if (owner.current === account && client.current === panel) setProgress(value) } }); name = result.deviceName }
+      } else { const image = drawBadge(preview, pages[sentPage], profile, weatherText, sentDate, sentPage, sentPages, avatar); const result = await panel.sendImage(image, { signal: controller.signal, onProgress: value => { if (owner.current === account && client.current === panel) setProgress(value) } }); name = result.deviceName }
       if (owner.current !== account || operation.current !== currentOperation || sentDate !== today()) return
       setWritten({ signature: sentSignature, device: name, page: sentPage + 1, pages: sentPages, time: new Date().toLocaleTimeString('zh-CN', { timeZone: zone, hour: '2-digit', minute: '2-digit' }) }); notice.current('墨水屏已确认更新')
     } catch (error) { if (owner.current === account && operation.current === currentOperation) setWriteError(controller.signal.aborted ? '发送已取消，请重新写入完整画面' : bluetoothError(error)) }
@@ -274,52 +321,58 @@ export function FastPanel({ active, userId, timezone, refreshVersion, onNotice }
   async function copyStartCommand() { try { await navigator.clipboard.writeText(startCommand); setCommandCopied('已复制') } catch { setCommandCopied('请选择命令手动复制') } }
 
   const frozen = sending || connecting || profileSaving, helperBusy = Boolean(nativeHealth?.busy)
-  const nativeReady = Boolean(nativeDevice && ownPairing && nativeHealth?.config.enabled && nativeHealth.config.device_name === nativeDevice.name && nativeHealth.config.address === nativeDevice.address)
+  const nativeReady = Boolean(nativeDevice && ownPairing && nativeHealth?.config.enabled && nativeHealth.config.device_name === nativeDevice.name && nativeHealth.config.address?.toUpperCase() === nativeDevice.address.toUpperCase())
   const selectedDeviceName = transport === 'native' ? nativeReady ? nativeDevice?.name : undefined : device?.name
-  const canSend = Boolean(selectedDeviceName && !frozen && !helperBusy && (transport === 'browser' || nativeOriginMatches && nativeHealth?.ble_supported) && !loading && !loadError && !renderError && (!profile.avatar_data_url || avatar) && loadedDate === date && date === today())
+  const canSend = Boolean(selectedDeviceName && !frozen && !helperBusy && (transport === 'browser' || !profileDirty && nativeOriginMatches && nativeHealth?.ble_supported) && !loading && !loadError && !renderError && (!profile.avatar_data_url || avatar) && loadedDate === date && date === today())
   const nativeLabel = nativeConnection === 'checking' ? '正在连接…' : nativeConnection === 'denied' ? '本地访问被拒绝' : nativeConnection === 'needs-permission' || nativeConnection === 'idle' && cloudPage ? '等待连接助手' : nativeConnection === 'origin-mismatch' ? '地址不匹配' : nativeConnection === 'insecure' ? '需要 HTTPS' : nativeHealth ? helperBusy ? '正在更新墨水屏' : nativeHealth.ble_supported ? '助手在线' : '蓝牙不可用' : '助手未连接'
   const completed = tasks.filter(task => task.source.status === 'satisfied').length
+  const historySelection = transport === 'native' && nativeDevice ? panelDeviceKey({ transport, address: nativeDevice.address }) : transport === 'browser' && rememberedBrowserId ? panelDeviceKey({ transport, id: rememberedBrowserId }) : ''
+  const syncFailure = nativeReady && nativeHealth?.last_status?.status === 'failed' ? nativeHealth.last_status.message : ''
 
   if (!userId) return null
-  return <section className="page panel-page" hidden={!active} aria-label="pannel">
-    <header className="page-head panel-page-head"><div className="title-block"><h1>pannel</h1><p className="panel-head-caption">{date} · 今日墨水屏</p></div><mdui-button variant="text" icon="refresh" loading={loading} disabled={loading || frozen} onClick={() => { void load(); void loadWeather() }}>刷新预览</mdui-button></header>
+  return <section className="page panel-page" hidden={!active} aria-label="工牌更新">
+    <header className="page-head"><div className="title-block"><h1>工牌更新</h1><p className="meta">{date} · 今日任务</p></div><mdui-button variant="text" icon="refresh" loading={loading} disabled={loading || frozen} onClick={() => { void load(); void loadWeather() }}>刷新预览</mdui-button></header>
     <div className="panel-layout">
       <div className="panel-primary">
-        <section className="panel-section panel-preview-section" aria-labelledby="panel-preview-heading">
+        <mdui-card variant="outlined" className="panel-section panel-preview-section" aria-labelledby="panel-preview-heading">
           <div className="panel-section-head"><h2 id="panel-preview-heading">屏幕预览</h2><span className="panel-subtle">800 × 480</span></div>
           <div className="panel-preview-stage"><div className="panel-screen"><canvas ref={canvas} width={DISPLAY_WIDTH} height={DISPLAY_HEIGHT} role="img" aria-label={`${date} 工牌及今日任务，预览第 ${previewPage + 1} 页，共 ${pages.length} 页`}/></div></div>
-          <div className="panel-preview-footer"><span className="panel-subtle">{profileDirty ? '资料修改尚未保存' : `${tasks.length} 项任务 · 已完成 ${completed} 项`}</span>{pages.length > 1 && <div className="panel-pagination"><button type="button" aria-label="上一页预览" disabled={frozen || previewPage === 0} onClick={() => setPageIndex(previewPage - 1)}><mdui-icon name="chevron_left"/></button><span>{previewPage + 1} / {pages.length}</span><button type="button" aria-label="下一页预览" disabled={frozen || previewPage + 1 >= pages.length} onClick={() => setPageIndex(previewPage + 1)}><mdui-icon name="chevron_right"/></button></div>}</div>
+          <div className="panel-preview-footer"><span className="meta">{profileDirty ? '资料修改尚未保存' : `${tasks.length} 项任务 · 已完成 ${completed} 项`}</span>{pages.length > 1 && <div className="panel-pagination"><mdui-button-icon icon="chevron_left" aria-label="上一页预览" disabled={frozen || previewPage === 0} onClick={() => setPageIndex(previewPage - 1)}/><span>{previewPage + 1} / {pages.length}</span><mdui-button-icon icon="chevron_right" aria-label="下一页预览" disabled={frozen || previewPage + 1 >= pages.length} onClick={() => setPageIndex(previewPage + 1)}/></div>}</div>
           {renderError && <p className="panel-error" role="alert">{renderError}</p>}
-        </section>
-        <section className="panel-section panel-tasks-section" aria-labelledby="panel-tasks-heading">
-          <div className="panel-section-head"><h2 id="panel-tasks-heading">今日任务</h2><span className="panel-subtle">{loadedAt ? `${loadedAt} 读取` : '从 FastTask 读取'}</span></div>
+        </mdui-card>
+        <section className="panel-tasks-section" aria-labelledby="panel-tasks-heading">
+          <div className="panel-section-head"><h2 id="panel-tasks-heading">今日任务</h2><span className="meta">{loadedAt ? `${loadedAt} 更新` : ''}</span></div>
           {loadError ? <p className="panel-error" role="alert">读取失败：{loadError}</p> : loading && !loadedDate ? <p className="panel-empty">正在读取…</p> : !tasks.length ? <p className="panel-empty">今天暂无任务</p> : <ol className="panel-task-list">{tasks.map((task, index) => <li key={task.key}><span className="panel-task-number">{String(index + 1).padStart(2, '0')}</span><div className="panel-task-text"><span>{task.title.trim() || task.source.title}</span>{task.detail && <small>{task.detail}</small>}</div><span className={`panel-task-status${task.source.status === 'satisfied' ? ' is-complete' : ''}`}>{taskState(task.source)}</span></li>)}</ol>}
         </section>
       </div>
       <aside className="panel-sidebar">
-        <section className="panel-section" aria-labelledby="panel-profile-heading">
+        <mdui-card variant="outlined" className="panel-section" aria-labelledby="panel-profile-heading">
           <div className="panel-section-head"><h2 id="panel-profile-heading">显示资料</h2></div>
-          <div className="panel-profile-layout"><label className={`panel-avatar-upload${frozen ? ' is-disabled' : ''}`} title="选择头像或证件照">{profile.avatar_data_url ? <img src={profile.avatar_data_url} alt="工牌头像"/> : <mdui-icon name="person_outline"/>}<span>更换照片</span><input aria-label="上传头像或证件照" type="file" accept="image/png,image/jpeg,image/webp" disabled={frozen} onChange={event => { void uploadAvatar(event.target.files?.[0]); event.target.value = '' }}/></label><div className="panel-profile-fields"><label><span>姓名</span><input value={profile.display_name} maxLength={40} disabled={frozen} onChange={event => setProfile(previous => ({ ...previous, display_name: event.target.value }))}/></label><label><span>顶栏标题</span><input value={profile.title} maxLength={40} disabled={frozen} onChange={event => setProfile(previous => ({ ...previous, title: event.target.value }))}/></label></div></div>
+          <div className="panel-profile-layout"><label className={`panel-avatar-upload${frozen ? ' is-disabled' : ''}`} title="选择头像或证件照">{profile.avatar_data_url ? <img src={profile.avatar_data_url} alt="工牌头像"/> : <mdui-icon name="person_outline"/>}<span>更换照片</span><input aria-label="上传头像或证件照" type="file" accept="image/png,image/jpeg,image/webp" disabled={frozen} onChange={event => { void uploadAvatar(event.target.files?.[0]); event.target.value = '' }}/></label><div className="panel-profile-fields"><mdui-text-field label="姓名" aria-label="工牌姓名" variant="outlined" value={profile.display_name} maxlength={40} disabled={frozen} onInput={event => setProfile(previous => ({ ...previous, display_name: fieldValue(event) }))}/><mdui-text-field label="顶栏标题" variant="outlined" value={profile.title} maxlength={40} disabled={frozen} onInput={event => setProfile(previous => ({ ...previous, title: fieldValue(event) }))}/></div></div>
           <div className="panel-weather-line"><div><span className="panel-subtle">武汉 · 东西湖</span><strong>{profile.weather_override.trim() ? `${profile.weather_override.trim()}（手动）` : weather?.local_date === date && weather.status !== 'unavailable' ? `${weather.summary}${weather.status === 'stale' || weatherError ? '（缓存）' : ''}` : '天气暂不可用'}</strong></div></div>
           {weatherError && <p className="panel-error" role="status">{weatherError}</p>}
-          <details className="panel-details"><summary>更多资料设置</summary><div className="panel-details-content"><label className="panel-field"><span>修正天气（留空自动获取）</span><input value={profile.weather_override} maxLength={80} disabled={frozen} placeholder="例如 小雨 22°C" onChange={event => setProfile(previous => ({ ...previous, weather_override: event.target.value }))}/></label>{profile.avatar_data_url && <button type="button" className="panel-text-button" disabled={frozen} onClick={() => setProfile(previous => ({ ...previous, avatar_data_url: '' }))}>移除照片</button>}</div></details>
+          <details className="panel-details"><summary>更多资料设置</summary><div className="panel-details-content"><mdui-text-field label="修正天气（留空自动获取）" variant="outlined" value={profile.weather_override} maxlength={80} disabled={frozen} placeholder="例如 小雨 22°C" onInput={event => setProfile(previous => ({ ...previous, weather_override: fieldValue(event) }))}/>{profile.avatar_data_url && <mdui-button variant="text" disabled={frozen} onClick={() => setProfile(previous => ({ ...previous, avatar_data_url: '' }))}>移除照片</mdui-button>}</div></details>
           <div className="panel-form-actions"><mdui-button variant="filled" disabled={frozen || !profileDirty || !savedProfile} loading={profileSaving} onClick={() => void saveProfile()}>保存资料</mdui-button>{profileDirty && <mdui-button variant="text" disabled={frozen || !savedProfile} onClick={() => { if (savedProfile) setProfile({ ...savedProfile }); setProfileError('') }}>还原</mdui-button>}</div>
           {profileError && <p className="panel-error" role="alert">{profileError}</p>}
-        </section>
-        <section className="panel-section panel-connection" aria-labelledby="panel-connection-heading">
+        </mdui-card>
+        <mdui-card variant="outlined" className="panel-section panel-connection" aria-labelledby="panel-connection-heading">
           <div className="panel-section-head"><h2 id="panel-connection-heading">设备</h2><span className={`panel-connection-state${selectedDeviceName ? ' is-connected' : ''}`}><i/>{selectedDeviceName ? '已连接' : '未连接'}</span></div>
-          {selectedDeviceName ? <div className="panel-connected-device"><mdui-icon name="bluetooth_connected"/><div><strong>{selectedDeviceName}</strong><span>{transport === 'native' ? nativeDevice?.address : '浏览器蓝牙'}</span></div><button type="button" className="panel-text-button" disabled={frozen || helperBusy} onClick={disconnect}>更换</button></div> : <>
-            <label className="panel-field"><span>蓝牙名称 / ID</span><input autoComplete="off" spellCheck={false} placeholder="输入墨水屏的蓝牙名称 / ID" value={displayId} disabled={frozen} onChange={event => { setDisplayId(event.target.value.toUpperCase()); setNativeDevice(null); setNativeDevices([]); setConnectionError('') }}/></label>
-            {transport === 'native' && !!nativeDevices.length && <label className="panel-field"><span>附近设备</span><select value={nativeDevice?.address || ''} disabled={frozen} onChange={event => setNativeDevice(nativeDevices.find(value => value.address === event.target.value) || null)}><option value="">选择墨水屏</option>{nativeDevices.map(value => <option key={value.address} value={value.address}>{value.name} · {value.address}</option>)}</select></label>}
-            <mdui-button variant="filled" full-width icon="bluetooth" disabled={!displayId.trim() || frozen || helperBusy || transport === 'native' && nativeConnection === 'insecure' || transport === 'browser' && !capability.supported} loading={connecting} onClick={() => void connect()}>连接设备</mdui-button>
+          {!!deviceHistory.length && <mdui-select label="已连接设备" variant="outlined" value={historySelection} disabled={frozen || helperBusy} onChange={event => chooseHistory(fieldValue(event))}>{deviceHistory.map(value => <mdui-menu-item key={panelDeviceKey(value)} value={panelDeviceKey(value)}>{value.name} · {value.transport === 'native' ? 'Windows' : '浏览器'}</mdui-menu-item>)}</mdui-select>}
+          {selectedDeviceName ? <div className="panel-connected-device"><mdui-icon name="bluetooth_connected"/><div><strong>{selectedDeviceName}</strong><span>{transport === 'native' ? nativeDevice?.address : '浏览器蓝牙'}</span></div><mdui-button variant="text" disabled={frozen || helperBusy} onClick={disconnect}>更换</mdui-button></div> : <>
+            <mdui-text-field label="蓝牙名称 / ID" variant="outlined" autocomplete="off" spellcheck={false} placeholder={transport === 'browser' ? '留空选择附近设备' : '输入墨水屏的蓝牙名称 / ID'} value={displayId} disabled={frozen} onInput={event => { setDisplayId(fieldValue(event).toUpperCase()); setRememberedBrowserId(''); setNativeDevice(null); setNativeDevices([]); setConnectionError('') }}/>
+            {transport === 'native' && !!nativeDevices.length && <mdui-select label="附近设备" variant="outlined" value={nativeDevice?.address || ''} disabled={frozen} onChange={event => setNativeDevice(nativeDevices.find(value => value.address === fieldValue(event)) || null)}>{nativeDevices.map(value => <mdui-menu-item key={value.address} value={value.address}>{value.name} · {value.address}</mdui-menu-item>)}</mdui-select>}
+            <mdui-button variant="filled" full-width icon="bluetooth" disabled={frozen || helperBusy || transport === 'native' && (!displayId.trim() || nativeConnection === 'insecure') || transport === 'browser' && !capability.supported} loading={connecting} onClick={() => void connect()}>{rememberedBrowserId && transport === 'browser' ? '重新连接设备' : '连接设备'}</mdui-button>
           </>}
-          {transport === 'native' && <p className="panel-device-note" role="status">{selectedDeviceName ? '已连接 · 自动读取任务状态' : nativeLabel}{selectedDeviceName && helperBusy ? ' · 正在更新' : ''}</p>}
+          {connecting && <div className="panel-search-progress" role="status"><mdui-linear-progress/><div><span>{searchProgress ? `${searchProgress.phase === 'scanning' ? '正在查找设备' : '正在连接设备'} ${searchProgress.attempt} / ${searchProgress.maxAttempts}` : '正在准备连接…'}</span>{(transport === 'browser' || searchProgress?.phase === 'scanning') && <mdui-button variant="text" onClick={() => void cancelConnection()}>取消</mdui-button>}</div></div>}
+          {transport === 'native' && !connecting && <p className="meta" role="status">{selectedDeviceName ? helperBusy ? '正在更新墨水屏…' : nativeHealth?.monitor?.pending ? '检测到变化，等待更新' : '任务变化后自动同步' : nativeLabel}</p>}
+          {syncFailure && <p className="panel-error" role="status">上次同步失败：{syncFailure}</p>}
           {nativeError && transport === 'native' && <p className="panel-error" role="status">{nativeError}</p>}{connectionError && <p className="panel-error" role="alert">{connectionError}</p>}
           {selectedDeviceName && <mdui-button variant="outlined" full-width icon="sync" disabled={!canSend} loading={sending} onClick={() => void send()}>{sending ? progress ? PHASE_LABELS[progress.phase] : '等待设备刷新…' : '更新墨水屏'}</mdui-button>}
-          {sending && transport === 'browser' && <div className="panel-transfer" role="status"><progress max={100} value={progress?.percent || 0}/><button className="panel-text-button" type="button" onClick={() => transferAbort.current?.abort()}>取消发送</button></div>}
+          {selectedDeviceName && transport === 'native' && profileDirty && <p className="meta" role="status">请先保存资料，后台将自动更新墨水屏。</p>}
+          {sending && transport === 'browser' && <div className="panel-transfer" role="status"><mdui-linear-progress value={(progress?.percent || 0) / 100}/><mdui-button variant="text" onClick={() => transferAbort.current?.abort()}>取消发送</mdui-button></div>}
           {writeError && <p className="panel-error" role="alert">{writeError}</p>}{written && <p className="panel-written" role="status">{written.signature === signature ? `${written.time} 已确认更新${written.pages > 1 ? ` · 第 ${written.page} / ${written.pages} 页` : ''}` : '预览已变化，等待更新'}</p>}
-          <details className="panel-details"><summary>连接帮助</summary><div className="panel-details-content"><label className="panel-field"><span>连接方式</span><select value={transport} disabled={frozen || helperBusy} onChange={event => { disconnect(); setTransport(event.target.value as 'native' | 'browser') }}><option value="native">Windows 助手</option><option value="browser">浏览器蓝牙</option></select></label>{transport === 'browser' ? <p className="panel-help">{capability.supported ? '浏览器蓝牙仅支持当前页面手动更新。自动同步请使用 Windows 助手。' : capability.reason}</p> : <><p className="panel-help">电脑需开机且未休眠，墨水屏在附近。首次连接请允许本地网络访问。</p><p className="panel-help">在 FastTask 目录运行：</p><code className="panel-native-command">{startCommand}</code><div className="panel-form-actions"><button className="panel-text-button" type="button" onClick={() => void copyStartCommand()}>复制命令</button>{commandCopied && <span className="panel-subtle" role="status">{commandCopied}</span>}<button className="panel-text-button" type="button" disabled={frozen || nativeConnection === 'insecure'} onClick={() => void loadNative(true)}>重新检测</button></div></>}</div></details>
-        </section>
+          <details className="panel-details"><summary>连接帮助</summary><div className="panel-details-content"><mdui-select label="连接方式" variant="outlined" value={transport} disabled={frozen || helperBusy} onChange={event => { disconnect(); setRememberedBrowserId(''); setTransport(fieldValue(event) as 'native' | 'browser') }}><mdui-menu-item value="native">Windows 助手</mdui-menu-item><mdui-menu-item value="browser">浏览器蓝牙</mdui-menu-item></mdui-select>{transport === 'browser' ? <><p className="meta">{capability.supported ? '浏览器连接仅在当前页面有效。关闭页面后自动同步需使用 Windows 助手。' : capability.reason}</p><mdui-button variant="text" disabled={frozen || helperBusy || !capability.supported} onClick={() => { disconnect(); setRememberedBrowserId(''); void connect(true) }}>选择其他设备</mdui-button></> : <><p className="meta">电脑需开机且未休眠，墨水屏在附近。首次连接请允许本地网络访问。</p><code className="panel-native-command">{startCommand}</code><div className="panel-form-actions"><mdui-button variant="text" onClick={() => void copyStartCommand()}>复制启动命令</mdui-button>{commandCopied && <span className="meta" role="status">{commandCopied}</span>}<mdui-button variant="text" disabled={frozen || nativeConnection === 'insecure'} onClick={() => void loadNative(true)}>重新检测</mdui-button></div></>}</div></details>
+        </mdui-card>
       </aside>
     </div>
   </section>

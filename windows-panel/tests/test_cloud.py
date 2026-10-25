@@ -79,18 +79,19 @@ class OriginTests(unittest.TestCase):
                         ph.parse_options(["--origin", supplied])
                     self.assertEqual(error.exception.code, 2)
 
-    def test_switching_origin_clears_token_target_schedule_and_old_attempt(self):
+    def test_switching_origin_clears_token_target_monitor_and_old_attempt(self):
         with temporary_engine(LOCAL) as original:
             original.config.update(enabled=True, device_name="WL14B00B1F", address="66:66:14:B0:0B:1F", panel_token=TOKEN, pairing_id="old-account")
             ph.write_private(original.config_path, original.config)
-            ph.write_private(original.state_path, {"last_attempted_slot": "2026-10-25T21:00", "last_status": {"status": "success"}})
+            ph.write_private(original.state_path, original.empty_state() | {"last_attempted_source": "old-source", "last_attempted_fingerprint": "old-frame", "last_success_fingerprint": "old-success", "last_status": {"status": "success"}})
             switched = ph.Engine(original.directory, CLOUD)
             self.assertFalse(switched.config["enabled"])
             self.assertEqual(switched.config["fasttask_url"], CLOUD)
             for key in ("panel_token", "pairing_id", "device_name", "address"):
                 self.assertEqual(switched.config[key], "")
             self.assertNotIn(TOKEN, switched.config_path.read_text(encoding="utf-8"))
-            self.assertEqual(switched.state["last_attempted_slot"], "")
+            self.assertEqual(switched.state["last_attempted_fingerprint"], "")
+            self.assertEqual(switched.state["last_success_fingerprint"], "")
             self.assertEqual(switched.state["last_status"]["operation"], "source_changed")
             with patch.object(ph.urllib.request, "build_opener") as opener:
                 with self.assertRaises(ph.PanelError) as error:

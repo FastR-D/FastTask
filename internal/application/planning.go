@@ -616,6 +616,12 @@ func (a *PlanService) refreshScheduleTx(tx *gorm.DB, user persistence.User, date
 		if plan.Status != "active" {
 			continue
 		}
+		// An explicit deletion leaves today's vacancies empty until the user
+		// explicitly replans. A later GET or background schedule refresh must
+		// not immediately undo the deletion by putting tasks back into them.
+		if day == 0 && plan.ManualItemsRemoved {
+			continue
+		}
 		core, activeCore, nextPosition := 0, 0, 1
 		for _, item := range days[day].Items {
 			if item.Kind == "core" {

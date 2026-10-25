@@ -1,4 +1,4 @@
-"""Loopback-only Windows WOLINK bridge and paired daily FastTask synchronizer."""
+"""Loopback-only Windows WOLINK bridge and change-driven FastTask synchronizer."""
 from __future__ import annotations
 
 import argparse
@@ -6,6 +6,7 @@ import asyncio
 import base64
 import concurrent.futures
 import io
+import hashlib
 import ipaddress
 import json
 import os
@@ -18,7 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -28,8 +29,11 @@ from wolink.image import image_to_raw
 from wolink.models import AUTH_UUID, DONE_NOTIFY_UUID, IMAGE_WRITE_UUID, SERVICE_UUID
 from wolink.protocol import SUCCESS_NOTIFICATION, build_image_stream, build_write_packets, encrypt_challenge
 
-VERSION = "1.0.0"
-SLOTS = ("14:00", "17:30", "21:00")
+VERSION = "1.1.0"
+POLL_SECONDS = 10
+DEBOUNCE_SECONDS = 2
+SCAN_ATTEMPTS = 4
+SCAN_SECONDS = 15
 MAX_BODY = 1_500_000
 MAX_IMAGE = 1_048_576
 NAME = re.compile(r"^WL[0-9A-F]{8}$")
@@ -95,7 +99,7 @@ def target(name, address):
 
 
 def paired(config):
-    """A schedule needs an explicit account pairing and one validated device."""
+    """Automatic synchronization needs an account pairing and validated device."""
     token, pairing_id = config.get("panel_token"), config.get("pairing_id")
     if not isinstance(token, str) or not TOKEN.fullmatch(token) or not isinstance(pairing_id, str) or not pairing_id.strip():
         return False
@@ -106,23 +110,28 @@ def paired(config):
     return True
 
 
-def due_slot(now, last_attempted=""):
-    local = now.astimezone(SHANGHAI)
-    today = local.date().isoformat()
-    eligible = [today + "T" + slot for slot in SLOTS if slot <= local.strftime("%H:%M")]
-    latest = eligible[-1] if eligible else None
-    # One latest missed slot for today. No historical backlog and no automatic transfer retries.
-    return latest if latest and latest > last_attempted else None
+def snapshot_fingerprint(snapshot, config):
+    """Hash visible content, excluding timestamps, revisions and legacy settings."""
+    profile, tasks, weather = (snapshot.get(key) or {} for key in ("profile", "tasks", "weather"))
+    overrides = profile.get("task_overrides") or {}
+    rows = []
+    for item in sorted(tasks.get("today_items") or [], key=lambda row: row.get("position", 0)):
+        if item.get("status") in ("superseded", "deleted") or item.get("deleted_at"):
+            continue
+        custom = overrides.get(item.get("logical_id") or item.get("id")) or {}
+        status = {"satisfied": "已完成", "not_completed": "未完成", "skipped": "已跳过"}.get(item.get("status"))
+        if not status:
+            status = "进行中" if item.get("status") == "in_progress" or item.get("task_status") == "in_progress" else "待完成"
+        rows.append([(custom.get("title") or "").strip() or item.get("title") or "未命名任务", (custom.get("detail") or "").strip(), status])
+    day = tasks.get("local_date")
+    manual = (profile.get("weather_override") or "").strip()
+    actual_weather = [weather.get("status"), weather.get("summary")] if weather.get("local_date") == day else ["unavailable"]
+    visible = [day, profile.get("display_name") or "未设置姓名", profile.get("title") or "今日任务", profile.get("avatar_data_url") or "", manual or actual_weather, rows, config["page"], config["device_name"], config["address"]]
+    return hashlib.sha256(json.dumps(visible, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def next_slot(now):
-    local = now.astimezone(SHANGHAI)
-    for offset in (0, 1):
-        day = local.date() + timedelta(days=offset)
-        for slot in SLOTS:
-            candidate = datetime.fromisoformat(f"{day}T{slot}").replace(tzinfo=SHANGHAI)
-            if candidate > local:
-                return candidate.isoformat()
+def raw_fingerprint(raw, name, address):
+    return hashlib.sha256(name.encode() + address.encode() + raw).hexdigest()
 
 
 def decode_image(encoded):
@@ -145,25 +154,32 @@ def decode_image(encoded):
         raise PanelError("图片解码失败", "invalid_image") from exc
 
 
-async def scan_devices(name=""):
-    from bleak import BleakScanner
+async def scan_devices(name="", scanner=None, on_progress=None, attempts=SCAN_ATTEMPTS):
+    if scanner is None:
+        from bleak import BleakScanner
+        scanner = BleakScanner
     if name and not NAME.fullmatch(name):
         raise PanelError("蓝牙 ID 格式应为 WLxxxxxxxx", "invalid_device")
-    found = await BleakScanner.discover(timeout=30.0, return_adv=True)
-    result = []
-    for device, adv in found.values():
-        advertised = (adv.local_name or device.name or "").upper()
-        if not NAME.fullmatch(advertised) or (name and advertised != name):
-            continue
-        try:
-            valid_name, address = target(advertised, device.address)
-        except PanelError:
-            continue
-        result.append({"name": valid_name, "address": address, "rssi": adv.rssi})
-    return sorted(result, key=lambda row: row["name"])
+    for attempt in range(1, attempts + 1):
+        if on_progress:
+            on_progress({"phase": "scanning", "attempt": attempt, "max_attempts": attempts, "message": f"正在持续查找墨水屏 {attempt}/{attempts}"})
+        found = await scanner.discover(timeout=SCAN_SECONDS, return_adv=True)
+        result = []
+        for device, adv in found.values():
+            advertised = (adv.local_name or device.name or "").upper()
+            if not NAME.fullmatch(advertised) or (name and advertised != name):
+                continue
+            try:
+                valid_name, address = target(advertised, device.address)
+            except PanelError:
+                continue
+            result.append({"name": valid_name, "address": address, "rssi": adv.rssi})
+        if result:
+            return sorted(result, key=lambda row: row["name"])
+    raise PanelError(f"连续查找 {attempts} 轮仍未找到墨水屏，请确认设备电源、距离及蓝牙状态后重试", "device_not_found", 503)
 
 
-async def send_raw(name, address, raw, scanner=None, client_factory=None, done_timeout=60):
+async def send_raw(name, address, raw, scanner=None, client_factory=None, done_timeout=60, on_progress=None, prepare_raw=None):
     """Never retry a transfer: a timeout may still mean the device received a packet."""
     name, address = target(name, address)
     if scanner is None or client_factory is None:
@@ -173,17 +189,46 @@ async def send_raw(name, address, raw, scanner=None, client_factory=None, done_t
     def matches(device, advertisement):
         return device.address.upper() == address and (advertisement.local_name or device.name or "").upper() == name
 
-    device = await scanner.find_device_by_filter(matches, timeout=35)
-    if device is None:
-        raise PanelError("未发现名称和地址均匹配的墨水屏，请检查电源、距离及蓝牙占用", "device_not_found", 503)
-    packets = build_write_packets(build_image_stream(raw))
-    client = client_factory(device, timeout=25, winrt={"use_cached_services": True})
+    client = None
+    for attempt in range(1, SCAN_ATTEMPTS + 1):
+        if on_progress:
+            on_progress({"phase": "scanning", "attempt": attempt, "max_attempts": SCAN_ATTEMPTS, "message": f"正在等待墨水屏广播 {attempt}/{SCAN_ATTEMPTS}"})
+        device = await scanner.find_device_by_filter(matches, timeout=SCAN_SECONDS)
+        if device is None:
+            continue
+        candidate = client_factory(device, timeout=20, winrt={"use_cached_services": True})
+        try:
+            if on_progress:
+                on_progress({"phase": "connecting", "attempt": attempt, "max_attempts": SCAN_ATTEMPTS, "message": f"正在连接墨水屏 {attempt}/{SCAN_ATTEMPTS}"})
+            await asyncio.wait_for(candidate.connect(), 25)
+            if candidate.is_connected:
+                client = candidate
+                break
+        except asyncio.CancelledError:
+            try:
+                await asyncio.wait_for(candidate.disconnect(), 5)
+            except Exception:
+                pass
+            raise
+        except Exception:
+            pass
+        if client is None:
+            try:
+                await asyncio.wait_for(candidate.disconnect(), 5)
+            except Exception:
+                pass
+    if client is None:
+        raise PanelError(f"连续查找并连接 {SCAN_ATTEMPTS} 轮仍无法连接墨水屏，请检查电源、距离及蓝牙占用后重试", "device_not_found", 503)
     notify_started, completed = False, asyncio.Event()
     acknowledged = 0
     try:
-        await asyncio.wait_for(client.connect(), 30)
         if not client.is_connected or client.services.get_service(SERVICE_UUID) is None:
             raise PanelError("设备未暴露预期 WOLINK 服务", "wrong_service", 503)
+        if prepare_raw is not None:
+            # A task may have changed while waiting for an intermittent advert.
+            # Read the latest frame after connecting, before any image write.
+            raw = await prepare_raw()
+        packets = build_write_packets(build_image_stream(raw))
         challenge = bytes(await asyncio.wait_for(client.read_gatt_char(AUTH_UUID), 20))
         await asyncio.wait_for(client.write_gatt_char(AUTH_UUID, encrypt_challenge(challenge), response=True), 20)
 
@@ -193,6 +238,8 @@ async def send_raw(name, address, raw, scanner=None, client_factory=None, done_t
 
         await asyncio.wait_for(client.start_notify(DONE_NOTIFY_UUID, on_done), 20)
         notify_started = True
+        if on_progress:
+            on_progress({"phase": "sending", "message": "已连接，正在更新工牌"})
         for packet in packets:
             await asyncio.wait_for(client.write_gatt_char(IMAGE_WRITE_UUID, packet, response=True), 20)
             acknowledged += 1
@@ -239,7 +286,7 @@ class Engine:
         private_directory(self.directory)
         self.config_path, self.state_path = self.directory / "config.json", self.directory / "status.json"
         self.config = {"enabled": False, "device_name": "", "address": "", "fasttask_url": self.origin, "page": 0, "panel_token": "", "pairing_id": ""}
-        self.state = {"last_attempted_slot": "", "last_status": None}
+        self.state = self.empty_state()
         source_changed = False
         if self.config_path.exists():
             saved = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -255,29 +302,66 @@ class Engine:
                 self.config.update({"enabled": False, "device_name": "", "address": "", "fasttask_url": self.origin, "page": 0, "panel_token": "", "pairing_id": ""})
             else:
                 self.config["fasttask_url"] = self.origin
-                # A complete pairing defaults to the fixed daily schedule.
+                # A complete pairing defaults to change-driven synchronization.
                 # Preserve a deliberately saved administrative disable.
                 self.config["enabled"] = paired(self.config) and saved.get("enabled", True) is True
             if source_changed or saved.get("fasttask_url") != self.origin or saved.get("enabled") != self.config["enabled"]:
                 write_private(self.config_path, self.config)
         if self.state_path.exists():
-            self.state.update(json.loads(self.state_path.read_text(encoding="utf-8")))
+            saved_state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            self.state.update({key: value for key, value in saved_state.items() if key in self.state})
         if source_changed:
-            self.state = {"last_attempted_slot": "", "last_status": {"status": "unpaired", "operation": "source_changed", "message": "FastTask 来源已变更，旧配对已清除；请登录新网站重新选择设备并配对"}}
+            self.state = self.empty_state() | {"last_status": {"status": "unpaired", "operation": "source_changed", "message": "FastTask 来源已变更，旧配对已清除；请登录新网站重新选择设备并配对"}}
             write_private(self.state_path, self.state)
+        scope = self.sync_scope(self.config)
+        if self.state["scope"] != scope:
+            self.state = self.empty_state() | {"scope": scope, "last_status": self.state["last_status"]}
         self.lock = asyncio.Lock()
         self.busy = False
+        self.active_task = None
+        self.generation = 0
+        self.pending_fingerprint, self.pending_since = "", 0
+        self.next_poll_at, self.network_failures = 0, 0
+        self.last_checked_at, self.monitor_message = None, "等待任务变化"
+
+    @staticmethod
+    def empty_state():
+        return {"scope": "", "last_status": None, "last_attempted_fingerprint": "", "last_attempted_source": "", "last_success_fingerprint": "", "last_success_source": "", "last_synced_at": None}
+
+    @staticmethod
+    def sync_scope(config):
+        values = [config.get(key) for key in ("fasttask_url", "pairing_id", "device_name", "address", "page")]
+        # Reissuing a credential must isolate persisted frames even if a
+        # pairing identifier is accidentally reused. Never persist its value.
+        values.append(hashlib.sha256(str(config.get("panel_token") or "").encode()).hexdigest())
+        return hashlib.sha256(json.dumps(values).encode()).hexdigest()
+
+    @staticmethod
+    def expected_target(config):
+        return {"expected_pairing_id": config.get("pairing_id"), "expected_device_name": config.get("device_name"), "expected_address": config.get("address")}
+
+    def verify_expected_target(self, body):
+        expected_id = body.get("expected_pairing_id")
+        if not isinstance(expected_id, str) or not expected_id or expected_id != self.config.get("pairing_id") or not paired(self.config):
+            raise PanelError("助手的账号配对已变化，请重新检测并连接当前账号的墨水屏", "pairing_changed", 409)
+        for expected, configured in (("expected_device_name", "device_name"), ("expected_address", "address")):
+            value = body.get(expected)
+            if not isinstance(value, str) or not value.strip() or value.strip().upper() != self.config.get(configured, "").upper():
+                raise PanelError("助手连接的墨水屏已变化，请重新选择设备后更新", "pairing_changed", 409)
 
     def public_config(self):
         return {key: value for key, value in self.config.items() if key != "panel_token"} | {"has_token": bool(self.config.get("panel_token"))}
 
     def health(self):
         return {"ok": True, "version": VERSION, "ble_supported": sys.platform == "win32", "busy": self.busy,
+                "capabilities": {"guarded_refresh": True},
                 "config": self.public_config(), "last_status": self.state["last_status"],
-                "next_run": next_slot(datetime.now(SHANGHAI)) if self.config["enabled"] and paired(self.config) else None,
-                "schedule": {"timezone": "Asia/Shanghai", "refresh_times": list(SLOTS)}}
+                "sync_mode": "on_change", "monitor": {"enabled": self.config["enabled"] and paired(self.config), "interval_seconds": POLL_SECONDS, "debounce_seconds": DEBOUNCE_SECONDS, "pending": bool(self.pending_fingerprint), "last_checked_at": self.last_checked_at, "last_synced_at": self.state["last_synced_at"], "message": self.monitor_message}}
 
     async def configure(self, values):
+        replacing = any(key in values and values[key] != self.config[key] for key in ("panel_token", "pairing_id", "device_name", "address", "page", "enabled"))
+        if replacing and self.active_task is not None:
+            self.active_task.cancel()
         async with self.lock:
             config = self.config | {key: values[key] for key in self.config if key in values}
             if type(config["page"]) is not int or not 0 <= config["page"] <= 999:
@@ -305,6 +389,12 @@ class Engine:
                 # pairing/configuration intact and never starts a BLE write.
                 await asyncio.to_thread(self.fetch_snapshot, config)
             write_private(self.config_path, config)
+            if changed_pairing or config["page"] != self.config["page"]:
+                self.generation += 1
+                self.state = self.empty_state() | {"scope": self.sync_scope(config)}
+                write_private(self.state_path, self.state)
+                self.pending_fingerprint, self.pending_since = "", 0
+            self.next_poll_at, self.network_failures = 0, 0
             self.config = config
             return {"ok": True, "config": self.public_config()}
 
@@ -339,44 +429,120 @@ class Engine:
             raise PanelError(f"FastTask 暂不可用（HTTP {exc.code}）", "snapshot_unavailable", 502) from exc
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise PanelError("无法读取 FastTask 今日任务，请检查网络、服务及 HTTPS 证书", "snapshot_unavailable", 503) from exc
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("tasks"), dict):
+            raise PanelError("FastTask 返回的工牌数据格式不正确", "snapshot_unavailable", 502)
         if snapshot.get("tasks", {}).get("local_date") != datetime.now(SHANGHAI).date().isoformat():
             raise PanelError("FastTask 返回的任务不是上海时区当日数据，未写入墨水屏", "stale_snapshot", 409)
         return snapshot
 
-    async def operation(self, kind, body=None, slot=None):
+    async def cancel(self):
+        if self.active_task is not None:
+            self.active_task.cancel()
+        return {"ok": True, "message": "已请求取消；如传输已经开始，请查看设备画面后再重试"}
+
+    async def operation(self, kind, body=None, snapshot=None, source_fingerprint=None, expected_generation=None):
         # Never queue another physical transfer behind an operation whose
         # browser request may already have timed out.
         if self.lock.locked():
             raise PanelError("助手仍有操作正在执行，请查询状态并等待完成，勿重复提交", "operation_busy", 409)
         async with self.lock:
+            if expected_generation is not None and expected_generation != self.generation:
+                return {"ok": True, "superseded": True}
+            if kind in ("refresh", "automatic"):
+                # This check belongs inside the same lock as page selection,
+                # snapshot reads and BLE. A stale tab cannot act on a newer
+                # account's pairing, even if its /health read was recent.
+                self.verify_expected_target(body or {})
+            if kind == "refresh" and "page" in (body or {}):
+                page = body["page"]
+                if type(page) is not int or not 0 <= page <= 999:
+                    raise PanelError("工牌预览页码不正确", "invalid_config")
+                if self.config["page"] != page:
+                    selected_config = self.config | {"page": page}
+                    write_private(self.config_path, selected_config)
+                    self.config = selected_config
+                    self.generation += 1
+                    self.pending_fingerprint = ""
+                    self.state["scope"] = self.sync_scope(self.config)
             self.busy = True
+            self.active_task = asyncio.current_task()
+            generation, config = self.generation, dict(self.config)
             started = datetime.now(SHANGHAI).isoformat()
-            info = {"status": "running", "operation": kind, "started_at": started, "slot": slot}
+            info = {"status": "running", "operation": kind, "started_at": started}
             self.record(info)
+            fingerprint = ""
+            metadata = {}
+
+            def progress(update):
+                info.update(update)
+                if update.get("phase") == "sending":
+                    # Persist immediately before the first image write. Never
+                    # automatically resend an unconfirmed frame after restart.
+                    self.state.update(last_attempted_fingerprint=fingerprint, last_attempted_source=source_fingerprint or "")
+                self.record(info)
+
+            def prepare(data):
+                image, result = render_snapshot(data, config["page"])
+                return image_to_raw(image, fit="stretch"), result
+
+            async def latest_frame():
+                nonlocal raw, metadata, fingerprint, source_fingerprint
+                data = await asyncio.to_thread(self.fetch_snapshot, config)
+                if generation != self.generation:
+                    raise PanelError("设备配置已变化，已取消旧画面", "configuration_changed", 409)
+                source_fingerprint = snapshot_fingerprint(data, config)
+                raw, metadata = await asyncio.to_thread(prepare, data)
+                fingerprint = raw_fingerprint(raw, name, address)
+                return raw
+
             try:
                 if kind == "scan":
-                    return {"ok": True, "devices": await scan_devices(str((body or {}).get("device_name", "")).strip().upper())}
+                    return {"ok": True, "devices": await scan_devices(str((body or {}).get("device_name", "")).strip().upper(), on_progress=progress)}
                 if kind == "send":
                     body = body or {}
                     name, address = target(body.get("device_name", ""), body.get("address", ""))
                     raw = decode_image(body.get("image_base64"))
-                    metadata = {}
                 else:
-                    name, address = target(self.config["device_name"], self.config["address"])
-                    snapshot = await asyncio.to_thread(self.fetch_snapshot)
-                    image, metadata = render_snapshot(snapshot, self.config["page"])
-                    raw = image_to_raw(image, fit="stretch")
+                    name, address = target(config["device_name"], config["address"])
+                    if snapshot is None:
+                        snapshot = await asyncio.to_thread(self.fetch_snapshot, config)
+                    source_fingerprint = snapshot_fingerprint(snapshot, config)
+                    raw, metadata = await asyncio.to_thread(prepare, snapshot)
                     info["snapshot_generated_at"] = snapshot.get("generated_at")
                     info["weather_status"] = snapshot.get("weather", {}).get("status", "unavailable")
-                result = await send_raw(name, address, raw)
+                fingerprint = raw_fingerprint(raw, name, address)
+                if kind == "automatic" and fingerprint == self.state["last_success_fingerprint"]:
+                    self.state["last_success_source"] = source_fingerprint
+                    info.update(status="unchanged", message="画面内容未变化，无需重复写屏")
+                    return {"ok": True, "unchanged": True}
+                if kind == "automatic" and fingerprint == self.state["last_attempted_fingerprint"]:
+                    self.state["last_attempted_source"] = source_fingerprint
+                    raise PanelError("上次相同画面未确认成功，请点击重试更新", "frame_unconfirmed", 409)
+                # Persist before discovery as well so an exhausted search is
+                # bounded across restarts. Upstream read failures clear it.
+                self.state.update(last_attempted_fingerprint=fingerprint, last_attempted_source=source_fingerprint or "")
+                self.record(info)
+                result = await send_raw(name, address, raw, on_progress=progress, prepare_raw=latest_frame if kind != "send" else None)
+                if not result.get("ok") or result.get("notification") != SUCCESS_NOTIFICATION.hex():
+                    raise PanelError("未收到设备准确完成通知", "completion_unconfirmed", 504)
                 result.update(metadata)
+                if generation != self.generation:
+                    raise PanelError("设备配置已变化，旧画面结果已忽略", "configuration_changed", 409)
                 if "page" in metadata and self.config["page"] != metadata["page"]:
                     self.config["page"] = metadata["page"]
                     write_private(self.config_path, self.config)
+                    self.state["scope"] = self.sync_scope(self.config)
+                self.state.update(last_success_fingerprint=fingerprint, last_success_source=source_fingerprint or "", last_synced_at=datetime.now(SHANGHAI).isoformat())
                 info.update({"status": "success", "message": "墨水屏已准确确认写入", "result": result})
                 return result
+            except asyncio.CancelledError as exc:
+                info.update(status="cancelled", error="operation_cancelled", message="操作已取消；如传输已经开始，请查看屏幕后重试")
+                raise PanelError(info["message"], "operation_cancelled", 409) from exc
             except Exception as exc:
                 error = exc if isinstance(exc, PanelError) else PanelError("蓝牙操作失败，请确认 Windows 蓝牙、设备电源及距离后手动重试", "bluetooth_failed", 503)
+                if error.code in ("snapshot_unavailable", "stale_snapshot", "pairing_expired"):
+                    # No image write has started when the latest read fails.
+                    self.state.update(last_attempted_fingerprint="", last_attempted_source="")
                 info.update({"status": "failed", "error": error.code, "message": str(error)})
                 raise error from exc
             finally:
@@ -385,25 +551,54 @@ class Engine:
                 info["finished_at"] = datetime.now(SHANGHAI).isoformat()
                 self.record(info)
                 self.busy = False
+                self.active_task = None
 
-    async def run_due_slot(self, now):
+    async def monitor_tick(self, now=None):
+        now = time.monotonic() if now is None else now
         if not self.config["enabled"] or not paired(self.config) or self.lock.locked():
             return None
-        slot = due_slot(now, self.state.get("last_attempted_slot", ""))
-        if slot:
-            # Persist BEFORE any BLE write: power loss must not cause an automatic resend.
-            self.state["last_attempted_slot"] = slot
-            write_private(self.state_path, self.state)
-            try:
-                await self.operation("scheduled", slot=slot)
-            except PanelError:
-                pass
-        return slot
+        if now < self.next_poll_at:
+            return None
+        self.next_poll_at = now + POLL_SECONDS
+        generation, config = self.generation, dict(self.config)
+        try:
+            snapshot = await asyncio.to_thread(self.fetch_snapshot, config)
+            if generation != self.generation or not self.config["enabled"]:
+                return None
+            self.last_checked_at = datetime.now(SHANGHAI).isoformat()
+            self.network_failures = 0
+            fingerprint = snapshot_fingerprint(snapshot, config)
+            if fingerprint in (self.state["last_success_source"], self.state["last_attempted_source"]):
+                self.pending_fingerprint = ""
+                self.monitor_message = "已同步，等待任务变化" if fingerprint == self.state["last_success_source"] else "上次更新未确认，等待手动重试或新的内容变化"
+                return None
+            if fingerprint != self.pending_fingerprint:
+                self.pending_fingerprint, self.pending_since = fingerprint, now
+                self.next_poll_at = now + DEBOUNCE_SECONDS
+                self.monitor_message = "已检测到内容变化，正在合并最新画面"
+                return None
+            if now - self.pending_since < DEBOUNCE_SECONDS:
+                return None
+            self.pending_fingerprint = ""
+            self.monitor_message = "已安排后台更新"
+            return await self.operation("automatic", self.expected_target(config), snapshot=snapshot, source_fingerprint=fingerprint, expected_generation=generation)
+        except PanelError as exc:
+            self.pending_fingerprint = ""
+            self.monitor_message = str(exc)
+            if exc.code in ("snapshot_unavailable", "stale_snapshot", "pairing_expired"):
+                self.network_failures += 1
+                self.next_poll_at = now + min(120, POLL_SECONDS * 2 ** min(self.network_failures - 1, 4))
+            return None
+        except Exception:
+            self.pending_fingerprint = ""
+            self.monitor_message = "工牌数据暂时无法处理，请检查服务后重试"
+            self.next_poll_at = now + 120
+            return None
 
-    async def scheduler(self):
+    async def watch_changes(self):
         while True:
-            await self.run_due_slot(datetime.now(SHANGHAI))
-            await asyncio.sleep(15)
+            await self.monitor_tick()
+            await asyncio.sleep(1)
 
 
 def handler_factory(engine, loop, port):
@@ -472,6 +667,8 @@ def handler_factory(engine, loop, port):
                     raise PanelError("请求必须为 JSON 对象", "invalid_json")
                 if self.command == "PUT" and path == "/config":
                     future = asyncio.run_coroutine_threadsafe(engine.configure(body), loop)
+                elif self.command == "POST" and path == "/cancel":
+                    future = asyncio.run_coroutine_threadsafe(engine.cancel(), loop)
                 elif self.command == "POST" and path in ("/scan", "/send", "/refresh"):
                     future = asyncio.run_coroutine_threadsafe(engine.operation(path[1:], body), loop)
                 else:
@@ -521,8 +718,8 @@ def main():
     server.daemon_threads = True
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
-    task = asyncio.run_coroutine_threadsafe(engine.scheduler(), loop)
-    print(f"FastTask Windows Panel {VERSION} http://127.0.0.1:{options.port}; 自动刷新={'开启' if engine.config['enabled'] else '未开启'}", flush=True)
+    task = asyncio.run_coroutine_threadsafe(engine.watch_changes(), loop)
+    print(f"FastTask Windows Panel {VERSION} http://127.0.0.1:{options.port}; 内容变化同步={'开启' if engine.config['enabled'] else '未开启'}", flush=True)
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:

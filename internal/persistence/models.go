@@ -25,10 +25,10 @@ type Session struct {
 }
 
 type FastResearchAccount struct {
-	AccountID string `json:"account_id" gorm:"primaryKey"`
-	UserID string `json:"user_id" gorm:"uniqueIndex"`
-	KeyID string `json:"key_id"`
-	Person string `json:"person"`
+	AccountID string    `json:"account_id" gorm:"primaryKey"`
+	UserID    string    `json:"user_id" gorm:"uniqueIndex"`
+	KeyID     string    `json:"key_id"`
+	Person    string    `json:"person"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -169,17 +169,18 @@ type Proposal struct {
 }
 
 type DailyPlan struct {
-	ID               string     `json:"id"`
-	UserID           string     `json:"-"`
-	LocalDate        string     `json:"local_date"`
-	Timezone         string     `json:"timezone"`
-	Status           string     `json:"status"`
-	AlgorithmVersion string     `json:"algorithm_version"`
-	CurrentRevision  int        `json:"current_revision"`
-	Revision         int        `json:"revision"`
-	FrozenAt         *time.Time `json:"frozen_at,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	ID                 string     `json:"id"`
+	UserID             string     `json:"-"`
+	LocalDate          string     `json:"local_date"`
+	Timezone           string     `json:"timezone"`
+	Status             string     `json:"status"`
+	AlgorithmVersion   string     `json:"algorithm_version"`
+	CurrentRevision    int        `json:"current_revision"`
+	Revision           int        `json:"revision"`
+	FrozenAt           *time.Time `json:"frozen_at,omitempty"`
+	ManualItemsRemoved bool       `json:"manual_items_removed"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 type DailyPlanRevision struct {

@@ -433,7 +433,7 @@ func (a *PlanService) ReplanDailyPlan(ctx context.Context, userID, localDate, ti
 			return err
 		}
 		freezePlanWithCore(&plan, now, hasCoreItem(resultItems))
-		update := tx.Model(&persistence.DailyPlan{}).Where("id = ? AND revision = ?", plan.ID, expected).Updates(map[string]any{"current_revision": newRevision, "revision": expected + 1, "status": "active", "updated_at": now, "frozen_at": plan.FrozenAt})
+		update := tx.Model(&persistence.DailyPlan{}).Where("id = ? AND revision = ?", plan.ID, expected).Updates(map[string]any{"current_revision": newRevision, "revision": expected + 1, "status": "active", "updated_at": now, "frozen_at": plan.FrozenAt, "manual_items_removed": false})
 		if update.Error != nil {
 			return update.Error
 		}

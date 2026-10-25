@@ -9,6 +9,15 @@ import {
 
 export interface BluetoothCapability { supported: boolean; reason: string }
 export interface PanelDevice { id: string; name: string }
+export interface SearchProgress { attempt: number; maxAttempts: number; phase: 'scanning' | 'connecting' }
+export interface ConnectOptions {
+  acceptAllDevices?: boolean;
+  signal?: AbortSignal;
+  onSearchProgress?: (progress: SearchProgress) => void;
+  maxAttempts?: number;
+  retryDelayMs?: number;
+  connectionTimeoutMs?: number;
+}
 export interface TransferProgress {
   phase: 'preparing' | 'authenticating' | 'sending' | 'waiting' | 'done';
   sentPackets: number;
@@ -52,6 +61,26 @@ function copyValue(value: DataView): Uint8Array {
 }
 
 function abortError(): DOMException { return new DOMException('已取消墨水屏传输。', 'AbortError'); }
+
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return bounded(new Promise(resolve => setTimeout(resolve, ms)), signal, ms + 1000);
+}
+
+async function advertisement(device: PanelBluetoothDevice, signal: AbortSignal): Promise<void> {
+  if (!device.watchAdvertisements) return;
+  const watching = new AbortController();
+  const stop = () => watching.abort();
+  let finish = () => {};
+  signal.addEventListener('abort', stop, { once: true });
+  try {
+    await bounded(new Promise<void>((resolve) => {
+      finish = () => { clearTimeout(timer); device.removeEventListener('advertisementreceived', finish); resolve(); };
+      const timer = setTimeout(finish, 12_000);
+      device.addEventListener('advertisementreceived', finish, { once: true });
+      void device.watchAdvertisements!({ signal: watching.signal }).catch(finish);
+    }), signal, 13_000);
+  } finally { finish(); watching.abort(); signal.removeEventListener('abort', stop); }
+}
 
 /** Race GATT operations against cancellation and a bounded transport timeout. */
 function bounded<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs = 20_000, message = '墨水屏蓝牙操作超时，请重新连接。'): Promise<T> {
@@ -109,7 +138,7 @@ export class WolinkPanelClient {
   }
 
   /** Call directly from a click handler, before any await, to preserve activation. */
-  async connect(displayId = '', options: { acceptAllDevices?: boolean } = {}): Promise<PanelDevice> {
+  async connect(displayId = '', options: ConnectOptions = {}): Promise<PanelDevice> {
     if (this.connecting) throw new Error('蓝牙设备选择或连接正在进行。');
     if (this.transfer) throw new Error('请等待当前传输结束后再连接墨水屏。');
     if (this.connected) throw new Error('请先断开当前墨水屏，再连接其他设备。');
@@ -130,47 +159,94 @@ export class WolinkPanelClient {
           : [{ namePrefix: 'WL' }, { services: [SERVICE_UUID] }],
         optionalServices: [SERVICE_UUID],
       });
+    return this.connectSelected(selected, requestedName ? fullName : '', options);
+  }
+
+  /** Reuse this site's existing browser authorization; never open a chooser. */
+  async connectRemembered(id: string, displayId: string, options: ConnectOptions = {}): Promise<PanelDevice> {
+    if (this.connecting || this.transfer || this.connected) throw new Error('请等待当前连接或传输结束后再连接。');
+    const capability = getBluetoothCapability();
+    if (!capability.supported) throw new Error(capability.reason);
+    const api = bluetooth()!;
+    if (!api.getDevices) throw new Error('当前浏览器无法恢复已授权设备，请点击“选择其他设备”重新选择。');
+    const name = displayId.trim().toUpperCase();
+    const fullName = name.startsWith('WL') ? name : `WL${name}`;
+    const selected = api.getDevices().then(devices => {
+      const remembered = devices.find(device => device.id === id && device.name?.toUpperCase() === fullName);
+      if (!remembered) throw new Error('此网站对历史设备的授权已失效，请点击“选择其他设备”重新选择。');
+      return remembered;
+    });
+    return this.connectSelected(selected, fullName, options, true);
+  }
+
+  private async connectSelected(selected: Promise<PanelBluetoothDevice>, fullName: string, options: ConnectOptions, remembered = false): Promise<PanelDevice> {
     this.connecting = true;
     const generation = ++this.generation;
     const controller = new AbortController();
     this.connectionAbort = controller;
+    const stop = () => controller.abort(abortError());
+    options.signal?.addEventListener('abort', stop, { once: true });
+    if (options.signal?.aborted) stop();
     let device: PanelBluetoothDevice | null = null;
     try {
-      device = await selected;
+      device = await bounded(selected, controller.signal, 120_000, '等待设备选择超时，请重新点击连接。');
       controller.signal.throwIfAborted();
       if (generation !== this.generation) throw abortError();
       if (!device.gatt) throw new Error('所选设备未提供可连接的蓝牙 GATT 服务。');
       // With a supplied ID, even the broad chooser must not bind another screen.
-      if (requestedName && device.name?.toUpperCase() !== fullName) {
+      if (fullName && device.name?.toUpperCase() !== fullName) {
         throw new Error(`所选设备与输入的 ${fullName} 不一致，请核对墨水屏广播 ID。`);
       }
       this.device = device;
-      device.addEventListener('gattserverdisconnected', this.handleDisconnected);
-      const connectingServer = device.gatt.connect();
-      // Windows may finish an in-flight connection after cancellation/timeout.
-      // Close that late connection rather than leaving an unowned GATT session.
-      void connectingServer.then((server) => {
-        if (controller.signal.aborted || generation !== this.generation) server.disconnect();
-      }, () => {});
-      const server = await bounded(connectingServer, controller.signal, 30_000);
-      const service = await bounded(server.getPrimaryService(SERVICE_UUID), controller.signal);
-      const auth = await bounded(service.getCharacteristic(AUTH_UUID), controller.signal);
-      const writer = await bounded(service.getCharacteristic(IMAGE_WRITE_UUID), controller.signal);
-      const done = await bounded(service.getCharacteristic(DONE_NOTIFY_UUID), controller.signal);
-      if (!auth.properties.write || !writer.properties.write || (!done.properties.notify && !done.properties.indicate)) {
-        throw new Error('所选设备不支持 WOLINK 墨水屏所需的写入与完成通知。');
+      const attempts = Math.max(1, Math.min(4, options.maxAttempts ?? 4));
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        controller.signal.throwIfAborted();
+        if (remembered || attempt > 1) {
+          options.onSearchProgress?.({ attempt, maxAttempts: attempts, phase: 'scanning' });
+          await advertisement(device, controller.signal);
+        }
+        options.onSearchProgress?.({ attempt, maxAttempts: attempts, phase: 'connecting' });
+        let connectionTimedOut = false;
+        try {
+          const connectingServer = device.gatt.connect();
+          let expired = false;
+          // Close late connections before another attempt owns this transport.
+          void connectingServer.then(server => {
+            if (expired || controller.signal.aborted || generation !== this.generation) server.disconnect();
+          }, () => {});
+          let server;
+          try { server = await bounded(connectingServer, controller.signal, options.connectionTimeoutMs ?? 20_000); }
+          catch (error) { expired = true; connectionTimedOut = error instanceof Error && error.message.includes('超时'); throw error; }
+          const service = await bounded(server.getPrimaryService(SERVICE_UUID), controller.signal);
+          const auth = await bounded(service.getCharacteristic(AUTH_UUID), controller.signal);
+          const writer = await bounded(service.getCharacteristic(IMAGE_WRITE_UUID), controller.signal);
+          const done = await bounded(service.getCharacteristic(DONE_NOTIFY_UUID), controller.signal);
+          if (!auth.properties.write || !writer.properties.write || (!done.properties.notify && !done.properties.indicate)) {
+            throw new Error('所选设备不支持 WOLINK 墨水屏所需的写入与完成通知。');
+          }
+          if (generation !== this.generation) throw abortError();
+          this.auth = auth; this.writer = writer; this.done = done;
+          device.addEventListener('gattserverdisconnected', this.handleDisconnected);
+          return { id: device.id, name: device.name || 'WOLINK 墨水屏' };
+        } catch (error) {
+          device.gatt.disconnect();
+          controller.signal.throwIfAborted();
+          // A still-pending connect promise cannot safely overlap a new one.
+          // Its eventual result is closed above; retry only settled failures.
+          if (connectionTimedOut) throw error;
+          if (!(error instanceof DOMException && ['NetworkError', 'TimeoutError'].includes(error.name)) && !(error instanceof Error && error.message.includes('超时'))) throw error;
+          if (attempt === attempts) throw new Error(`已连续查找 ${attempts} 次，仍无法连接墨水屏。请检查设备电源、距离及蓝牙占用。`);
+          await pause(options.retryDelayMs ?? 1500, controller.signal);
+        }
       }
-      if (generation !== this.generation) throw abortError();
-      this.auth = auth;
-      this.writer = writer;
-      this.done = done;
-      return { id: device.id, name: device.name || 'WOLINK 墨水屏' };
+      throw new Error('未找到可连接的墨水屏');
     } catch (error) {
       if (device?.gatt?.connected) device.gatt.disconnect();
       if (generation === this.generation) this.clearConnection();
       throw error;
     } finally {
       this.connecting = false;
+      options.signal?.removeEventListener('abort', stop);
       if (this.connectionAbort === controller) this.connectionAbort = null;
     }
   }

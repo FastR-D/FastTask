@@ -27,10 +27,11 @@ func workspaceTool(app *App) Tool {
 			if connection.System != system {
 				continue
 			}
-			if connection.WebURL == "" || validateIntegrationURL(connection.WebURL) != nil {
+			address := workspaceNavigationURL(system, connection.WebURL)
+			if address == "" {
 				return toolError("%s 的网页地址尚未配置或无效，请联系管理员配置模块网页地址；打开网页不需要复制授权令牌。", labels[system]), nil
 			}
-			return ToolResult{Result: map[string]any{"action": "open_workspace", "system": system, "url": connection.WebURL, "label": labels[system], "status": "ready_to_open", "note": "在对应模块网页继续操作；登录由该网页自己的正常登录流程处理。入口已准备，不代表正文已保存、全文已读或实验已执行。"}}, nil
+			return ToolResult{Result: map[string]any{"action": "open_workspace", "system": system, "url": address, "label": labels[system], "status": "ready_to_open", "note": "通过门户复用当前 Key 登录态并进入对应模块；入口已准备，不代表正文已保存、全文已读或实验已执行。"}}, nil
 		}
 		return toolError("未找到该模块的网页地址。"), nil
 	}}

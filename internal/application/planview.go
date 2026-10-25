@@ -161,7 +161,7 @@ func (a *App) PlanItemViews(ctx context.Context, userID string, items []persiste
 			}
 		}
 		if system := planItemWorkspaceSystem(item); system != "" {
-			view.Workspace = &PlanItemWorkspace{System: system, Label: workspaceLabels[system], URL: addresses[system]}
+			view.Workspace = &PlanItemWorkspace{System: system, Label: workspaceLabels[system], URL: workspaceNavigationURL(system, addresses[system])}
 		}
 		views = append(views, view)
 	}

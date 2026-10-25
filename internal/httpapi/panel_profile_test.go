@@ -118,7 +118,7 @@ func TestPanelHTTPReadOnlyCapabilityAndCredentialReceipts(t *testing.T) {
 	}
 	panelHeaders := map[string]string{"X-Panel-Token": pairing.Token}
 	snapshot := request("GET", "/panel/snapshot", "", panelHeaders)
-	if snapshot.Code != 200 || !strings.Contains(snapshot.Body.String(), `"display_name":"new"`) || !strings.Contains(snapshot.Body.String(), `"14:00"`) || !strings.Contains(snapshot.Body.String(), `"task_overrides":{"logical-1":{"selected":false}}`) {
+	if snapshot.Code != 200 || !strings.Contains(snapshot.Body.String(), `"display_name":"new"`) || !strings.Contains(snapshot.Body.String(), `"mode":"on_change"`) || strings.Contains(snapshot.Body.String(), `"schedule"`) || !strings.Contains(snapshot.Body.String(), `"task_overrides":{"logical-1":{"selected":false}}`) {
 		t.Fatalf("snapshot: %d %s", snapshot.Code, snapshot.Body.String())
 	}
 	if strings.Contains(snapshot.Body.String(), user.Identifier) || strings.Contains(snapshot.Body.String(), user.PasswordHash) {

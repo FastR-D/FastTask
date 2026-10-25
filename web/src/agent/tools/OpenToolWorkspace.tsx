@@ -1,4 +1,5 @@
 import { makeAssistantToolUI } from '@assistant-ui/react'
+import { workspaceURL } from '../../workspace-navigation'
 
 const moduleNames: Record<string, string> = {
   fastwrite: 'FastWrite', fastread: 'FastRead', fastnews: 'FastNews', fastppt: 'FastPPT', fastlab: 'FastLab',
@@ -9,11 +10,8 @@ function workspaceLink(result: unknown): { label: string; url: string } | null {
   const value = result as Record<string, unknown>
   if (value.action !== 'open_workspace' || value.status !== 'ready_to_open' || typeof value.system !== 'string' ||
       !moduleNames[value.system] || value.label !== moduleNames[value.system] || typeof value.url !== 'string') return null
-  try {
-    const url = new URL(value.url)
-    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash || /[\r\n\\]/.test(value.url)) return null
-    return { label: moduleNames[value.system], url: url.href }
-  } catch { return null }
+  const url = workspaceURL(value.url, value.system)
+  return url ? { label: moduleNames[value.system], url } : null
 }
 
 export function WorkspaceLink({ result, isError = false }: { result?: unknown; isError?: boolean }) {

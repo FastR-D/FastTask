@@ -270,3 +270,80 @@ test('leaving while the Windows GATT connection is pending closes a late connect
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(screen.device.gatt.connected, false);
 });
+
+test('remembered browser authorization reconnects without opening another chooser', async () => {
+  const screen = mockScreen();
+  navigator.bluetooth.getDevices = async () => [screen.device];
+  const client = new WolinkPanelClient();
+  await client.connectRemembered(screen.device.id, screen.device.name);
+  assert.equal(screen.requests.length, 0);
+  assert.equal(client.connected, true);
+  client.disconnect();
+});
+
+test('forgotten browser authorization cannot silently choose a different device', async () => {
+  const screen = mockScreen();
+  navigator.bluetooth.getDevices = async () => [];
+  const client = new WolinkPanelClient();
+  await assert.rejects(client.connectRemembered(screen.device.id, screen.device.name), /授权已失效/);
+  assert.equal(screen.requests.length, 0);
+  assert.equal(client.connected, false);
+});
+
+test('intermittent connection failures retry the same selected device before writing', async () => {
+  const screen = mockScreen();
+  const original = screen.device.gatt.connect.bind(screen.device.gatt);
+  let attempts = 0;
+  screen.device.gatt.connect = async () => {
+    if (++attempts < 3) throw new DOMException('Device asleep', 'NetworkError');
+    return original();
+  };
+  const progress = [];
+  const client = new WolinkPanelClient();
+  await client.connect(screen.device.name, {retryDelayMs:0,onSearchProgress:value=>progress.push(value.attempt)});
+  assert.equal(attempts, 3);
+  assert.equal(screen.requests.length, 1);
+  assert.equal(screen.writer.writes.length, 0);
+  assert.equal(progress.at(-1), 3);
+  client.disconnect();
+});
+
+test('unavailable browser device exhausts bounded attempts with no repeated chooser or writes', async () => {
+  const screen = mockScreen();
+  let attempts = 0;
+  screen.device.gatt.connect = async () => { attempts++; throw new DOMException('Asleep', 'NetworkError'); };
+  const client = new WolinkPanelClient();
+  await assert.rejects(client.connect(screen.device.name,{maxAttempts:2,retryDelayMs:0}), /连续查找 2 次/);
+  assert.equal(attempts, 2);
+  assert.equal(screen.requests.length, 1);
+  assert.equal(screen.writer.writes.length, 0);
+});
+
+test('canceling an advertisement wait stops its listener and never starts GATT', async () => {
+  const screen = mockScreen();
+  navigator.bluetooth.getDevices = async () => [screen.device];
+  let watching, announce;
+  const started = new Promise(resolve => { announce = resolve; });
+  screen.device.watchAdvertisements = async ({signal}) => { watching = signal; announce(); };
+  let connects = 0;
+  screen.device.gatt.connect = async () => { connects++; return screen.device.gatt; };
+  const controller = new AbortController(), client = new WolinkPanelClient();
+  const connecting = client.connectRemembered(screen.device.id,screen.device.name,{signal:controller.signal});
+  await started;
+  controller.abort();
+  await assert.rejects(connecting,{name:'AbortError'});
+  assert.equal(watching.aborted,true);
+  assert.equal(connects,0);
+});
+
+test('a pending timed-out GATT attempt never overlaps an automatic retry and closes its late result', async () => {
+  const screen = mockScreen();
+  let finish, attempts = 0;
+  screen.device.gatt.connect = () => { attempts++; return new Promise(resolve => { finish=()=>{screen.device.gatt.connected=true;resolve(screen.device.gatt)}; }); };
+  const client = new WolinkPanelClient();
+  await assert.rejects(client.connect(screen.device.name,{connectionTimeoutMs:5,retryDelayMs:0}),/超时/);
+  assert.equal(attempts,1);
+  finish();
+  await new Promise(resolve => setTimeout(resolve,0));
+  assert.equal(screen.device.gatt.connected,false);
+});

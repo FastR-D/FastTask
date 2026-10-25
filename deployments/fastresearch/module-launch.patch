@@ -1,0 +1,270 @@
+diff --git a/src/App2.tsx b/src/App2.tsx
+index 8e47ef1..0324163 100644
+--- a/src/App2.tsx
++++ b/src/App2.tsx
+@@ -2,6 +2,7 @@ import { ArrowUpRight, BookOpenText, CalendarCheck, CalendarClock, Check, CheckC
+ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+ import { createTranslator, getInitialLocale, saveLocale, type Locale, type Translate } from './i18n'
+ import { clearMemberSession, loadMemberSession, saveMemberSession } from './member-session'
++import { launchModuleInCurrentTab, moduleLaunchError, ModuleLaunchSessionError, selectModuleLaunch } from './module-launch'
+ 
+ type EntryId = 'fast-write' | 'fast-read' | 'fast-news' | 'fast-ppt'
+ type SsoEntryId = 'fast-read' | 'fast-news'
+@@ -30,6 +31,7 @@ const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '')
+ const apiUrl = (path: string) => `${API_BASE}${path}`
+ const adminStorageKey = 'fastresearch-admin-session'
+ const personalKeyStorage = 'fastresearch-personal-key'
++const pendingModuleStorage = 'fastresearch-pending-module-launch'
+ const MODULE_ORDER: EntryId[] = ['fast-news', 'fast-read', 'fast-write']
+ const WORKSPACE_VIEWS: WorkspaceView[] = ['today', 'workflow', 'insight', 'team', 'routing']
+ const SSO_AUDIENCE: Record<SsoEntryId, 'fast-news' | 'fast-read'> = { 'fast-read': 'fast-read', 'fast-news': 'fast-news' }
+@@ -138,6 +140,10 @@ function App2() {
+   const [busy, setBusy] = useState(false)
+   const pendingLaunch = useRef<PendingLaunch | null>(null)
+   const pendingFastTaskLaunch = useRef<string | null>(null)
++  const pendingModuleLaunch = useRef<EntryId | null>(null)
++  const moduleLaunchCaptured = useRef(false)
++  const moduleLaunchStarted = useRef(false)
++  const incomingLaunchSearch = useRef(window.location.search)
+   const workspaceRef = useRef<HTMLElement | null>(null)
+   const lastWorkspaceWheel = useRef(0)
+   const t = useMemo(() => createTranslator(locale), [locale])
+@@ -393,6 +399,53 @@ function App2() {
+     else setKeyOpen(true)
+   }, [launchFastTaskSso, member, t])
+ 
++  const launchModuleCurrentTab = useCallback(async (entryId: EntryId, memberSession: MemberSession) => {
++    try {
++      await launchModuleInCurrentTab(entryId, memberSession, {
++        entries, origin: window.location.origin, apiBase: API_BASE,
++        verifySession: value => request('/api/content/me', {}, value),
++        createWriteLogin: value => request<{url?: string}>('/api/fastwrite/login-url', {method: 'POST', body: JSON.stringify({})}, value),
++        navigate: url => { try { sessionStorage.removeItem(pendingModuleStorage) } catch { /* Optional recovery storage. */ }; window.location.assign(url) },
++        expiredMessage: t('error.memberExpired'), failedMessage: t('error.ssoFailed', {name: entries[entryId].name}),
++      })
++    } catch (error) {
++      moduleLaunchStarted.current = false
++      if (error instanceof ModuleLaunchSessionError) {
++        clearMemberSession(); setMember(null); pendingModuleLaunch.current = entryId; setKeyOpen(true)
++      } else {
++        pendingModuleLaunch.current = null
++        try { sessionStorage.removeItem(pendingModuleStorage) } catch { /* Optional recovery storage. */ }
++      }
++      setToast(moduleLaunchError(error, t('error.ssoFailed', {name: entries[entryId].name})))
++    }
++  }, [entries, t])
++
++  useEffect(() => {
++    if (!moduleLaunchCaptured.current) {
++      moduleLaunchCaptured.current = true
++      const incoming = new URLSearchParams(incomingLaunchSearch.current)
++      let entryId = selectModuleLaunch(incomingLaunchSearch.current)
++      // Existing FastTask callbacks and unsupported modules own their own flow.
++      if (incoming.has('launch') && !entryId) return
++      if (entryId) {
++        const page = new URL(window.location.href)
++        for (const key of ['launch', 'next', 'Key', 'key', 'token', 'ticket', 'sso']) page.searchParams.delete(key)
++        window.history.replaceState({}, '', page.pathname + page.search + page.hash)
++        try { sessionStorage.setItem(pendingModuleStorage, entryId) } catch { /* In-memory recovery still works. */ }
++      } else {
++        try { entryId = selectModuleLaunch(`?launch=${encodeURIComponent(sessionStorage.getItem(pendingModuleStorage) || '')}`) } catch { /* Optional recovery storage. */ }
++      }
++      pendingModuleLaunch.current = entryId
++    }
++    const pending = pendingModuleLaunch.current
++    if (!pending || moduleLaunchStarted.current) return
++    if (!member) { setKeyOpen(true); return }
++    moduleLaunchStarted.current = true
++    pendingModuleLaunch.current = null
++    setKeyOpen(false)
++    void launchModuleCurrentTab(pending, member)
++  }, [launchModuleCurrentTab, member])
++
+   const openEntry = (entry: Entry, popup?: Window | null) => {
+     const tab = popup && !popup.closed ? popup : window.open('about:blank', '_blank')
+     if (!tab) {
+@@ -483,6 +536,8 @@ function App2() {
+     pendingLaunch.current?.popup?.close()
+     pendingLaunch.current = null
+     pendingFastTaskLaunch.current = null
++    pendingModuleLaunch.current = null
++    try { sessionStorage.removeItem(pendingModuleStorage) } catch { /* Optional recovery storage. */ }
+     setKeyOpen(false)
+   }
+ 
+diff --git a/src/main.tsx b/src/main.tsx
+index 2b53d9d..7134219 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
+ import App from './App2'
+ import PromoPage from './PromoPage'
+ import { hasActiveMemberSession } from './member-session'
++import { selectModuleLaunch } from './module-launch'
+ import './index.css'
+ import './promo.css'
+ 
+@@ -14,7 +15,7 @@ const workspacePath = `${basePath}/workspace`
+ 
+ if (normalizedPath === basePath) {
+   const params = new URLSearchParams(window.location.search)
+-  const workspaceReturn = hasActiveMemberSession() || params.has('fastcas') || params.get('launch') === 'fast-task' || ['#home', '#modules'].includes(window.location.hash)
++  const workspaceReturn = hasActiveMemberSession() || params.has('fastcas') || params.get('launch') === 'fast-task' || Boolean(selectModuleLaunch(window.location.search)) || ['#home', '#modules'].includes(window.location.hash)
+   window.location.replace(`${workspaceReturn ? workspacePath : introPath}${window.location.search}${window.location.hash}`)
+ } else {
+   const isIntro = normalizedPath === introPath
+diff --git a/src/module-launch.ts b/src/module-launch.ts
+new file mode 100644
+index 0000000..34af3a1
+--- /dev/null
++++ b/src/module-launch.ts
+@@ -0,0 +1,67 @@
++export const MODULE_LAUNCH_IDS = ['fast-write', 'fast-read', 'fast-news', 'fast-ppt'] as const
++export type ModuleLaunchId = typeof MODULE_LAUNCH_IDS[number]
++type LaunchSession = { token: string; expiresAt: number }
++type LaunchDependencies<T extends LaunchSession> = {
++  entries: Record<ModuleLaunchId, { url?: string }>
++  origin: string
++  apiBase: string
++  verifySession: (session: T) => Promise<unknown>
++  createWriteLogin: (session: T) => Promise<{ url?: string }>
++  navigate: (url: string) => void
++  expiredMessage: string
++  failedMessage: string
++  now?: () => number
++}
++
++export function selectModuleLaunch(search: string): ModuleLaunchId | null {
++  const values = new URLSearchParams(search).getAll('launch')
++  return values.length === 1 && MODULE_LAUNCH_IDS.includes(values[0] as ModuleLaunchId) ? values[0] as ModuleLaunchId : null
++}
++
++/** Keep the original failure useful without reflecting account login tickets. */
++export function moduleLaunchError(error: unknown, fallback: string): string {
++  return (error instanceof Error ? error.message : fallback)
++    .replace(/(https?:\/\/[^\s<>"']+)/gi, value => {
++      try {
++        const url = new URL(value)
++        url.username = ''; url.password = ''
++        url.searchParams.forEach((_value, key) => { if (/^(?:token|ticket|sso|key|access_token|refresh_token|auth_token)$/i.test(key)) url.searchParams.set(key, '[hidden]') })
++        return url.toString()
++      } catch { return '[invalid URL]' }
++    })
++    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gi, '$1[hidden]')
++    .replace(/\b((?:token|ticket|sso|key|access_token|refresh_token|auth_token)\s*[:=]\s*)[^\s,;"'<>&?#]+/gi, '$1[hidden]')
++}
++
++export class ModuleLaunchSessionError extends Error {
++  constructor(message: string) { super(message); this.name = 'ModuleLaunchSessionError' }
++}
++
++function targetURL(value: string | undefined, origin: string, failure: string): URL {
++  try {
++    if (!value) throw new Error('missing URL')
++    const url = new URL(value, origin)
++    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid URL')
++    return url
++  } catch { throw new Error(failure) }
++}
++
++/** Query strings select a catalog entry only; they never supply next or keys. */
++export async function launchModuleInCurrentTab<T extends LaunchSession>(entryId: ModuleLaunchId, session: T | null, dependencies: LaunchDependencies<T>): Promise<void> {
++  const { entries, origin, apiBase, expiredMessage, failedMessage } = dependencies
++  if (!MODULE_LAUNCH_IDS.includes(entryId)) throw new Error(failedMessage)
++  if (!session || session.expiresAt <= (dependencies.now ?? Date.now)()) throw new ModuleLaunchSessionError(expiredMessage)
++  try { await dependencies.verifySession(session) }
++  catch (error) { throw new ModuleLaunchSessionError(moduleLaunchError(error, expiredMessage)) }
++  if (entryId === 'fast-write') {
++    const result = await dependencies.createWriteLogin(session)
++    dependencies.navigate(targetURL(result.url, origin, failedMessage).toString())
++    return
++  }
++  const target = targetURL(entries[entryId].url, origin, failedMessage)
++  if (entryId === 'fast-ppt') { dependencies.navigate(target.toString()); return }
++  const launch = targetURL(`${apiBase}/api/sso/launch`, origin, failedMessage)
++  launch.searchParams.set('audience', entryId)
++  launch.searchParams.set('next', target.toString())
++  dependencies.navigate(launch.toString())
++}
+diff --git a/src/module-launch.test.mjs b/src/module-launch.test.mjs
+new file mode 100644
+index 0000000..36403de
+--- /dev/null
++++ b/src/module-launch.test.mjs
+@@ -0,0 +1,76 @@
++import assert from 'node:assert/strict';
++import { test } from 'node:test';
++import { launchModuleInCurrentTab, moduleLaunchError, ModuleLaunchSessionError, selectModuleLaunch } from './module-launch.ts';
++
++const member = { token: 'member-secret', expiresAt: 2000 };
++const entries = { 'fast-write': {url: 'https://write.example/'}, 'fast-read': {url: 'https://read.example/library'}, 'fast-news': {url: 'https://news.example/news/'}, 'fast-ppt': {url: '/fastppt/'} };
++function dependencies(overrides = {}) {
++  const calls = [];
++  return { calls, entries, origin: 'https://fastrd.io', apiBase: '', now: () => 1000,
++    expiredMessage: 'expired', failedMessage: 'launch failed',
++    verifySession: async value => { calls.push(['verify', value.token]); },
++    createWriteLogin: async value => { calls.push(['write-login', value.token]); return {url: 'https://write.example/login?token=single-use'}; },
++    navigate: url => calls.push(['navigate', url]), ...overrides };
++}
++
++test('launch selector accepts only the four exact public modules and one launch value', () => {
++  for (const id of Object.keys(entries)) assert.equal(selectModuleLaunch('?launch='+id), id);
++  for (const search of ['', '?launch=fast-task', '?launch=fast-lab', '?launch=fast-write&launch=fast-read', '?launch=https://other.example', '?launch=Fast-Read', '?module=fast-read']) assert.equal(selectModuleLaunch(search), null);
++});
++
++test('write exchanges the current member session through the official login URL API', async () => {
++  const deps = dependencies();
++  await launchModuleInCurrentTab('fast-write', member, deps);
++  assert.deepEqual(deps.calls, [['verify','member-secret'],['write-login','member-secret'],['navigate','https://write.example/login?token=single-use']]);
++});
++
++test('read/news use only configured catalog URLs and the matching SSO audience', async () => {
++  for (const id of ['fast-read','fast-news']) {
++    const deps = dependencies();
++    const selected = selectModuleLaunch(`?launch=${id}&next=https://attacker.example&Key=ignored`);
++    await launchModuleInCurrentTab(selected, member, deps);
++    const target = new URL(deps.calls.at(-1)[1]);
++    assert.equal(target.origin, 'https://fastrd.io');
++    assert.equal(target.pathname, '/api/sso/launch');
++    assert.equal(target.searchParams.get('audience'), id);
++    assert.equal(target.searchParams.get('next'), entries[id].url);
++    assert.equal(target.searchParams.has('Key'), false);
++    assert.equal(target.toString().includes('attacker'), false);
++  }
++});
++
++test('ppt navigates to the catalog URL directly after member verification', async () => {
++  const deps = dependencies();
++  await launchModuleInCurrentTab('fast-ppt', member, deps);
++  assert.deepEqual(deps.calls, [['verify','member-secret'],['navigate','https://fastrd.io/fastppt/']]);
++});
++
++test('missing, expired or server-rejected sessions require login without creating launch tickets', async () => {
++  for (const value of [null, {...member, expiresAt: 1000}]) {
++    const deps = dependencies();
++    await assert.rejects(launchModuleInCurrentTab('fast-write', value, deps), ModuleLaunchSessionError);
++    assert.deepEqual(deps.calls, []);
++  }
++  const deps = dependencies({verifySession: async () => {throw new Error('server session expired');}});
++  await assert.rejects(launchModuleInCurrentTab('fast-read', member, deps), error => error instanceof ModuleLaunchSessionError && error.message === 'server session expired');
++  assert.deepEqual(deps.calls, []);
++});
++
++test('module failures preserve the useful original error and redact credentials', async () => {
++  const deps = dependencies({createWriteLogin: async () => {throw new Error('FastWrite service unavailable');}});
++  await assert.rejects(launchModuleInCurrentTab('fast-write', member, deps), /FastWrite service unavailable/);
++  assert.equal(deps.calls.some(call=>call[0]==='navigate'), false);
++  const redacted = moduleLaunchError(new Error('Failed https://write.example/login?token=secret-token&step=1 ticket=secret-ticket Bearer jwt-secret'), 'failed');
++  assert.equal(redacted.includes('secret-token'), false);
++  assert.equal(redacted.includes('secret-ticket'), false);
++  assert.equal(redacted.includes('jwt-secret'), false);
++  assert.equal(redacted.includes('step=1'), true);
++});
++
++test('unsafe catalog or server URLs never reach navigation', async () => {
++  for (const url of ['javascript:alert(1)', 'data:text/html,x', 'https://user:password@example.org/']) {
++    const deps = dependencies({createWriteLogin: async () => ({url})});
++    await assert.rejects(launchModuleInCurrentTab('fast-write', member, deps), /launch failed/);
++    assert.equal(deps.calls.some(call=>call[0]==='navigate'), false);
++  }
++});

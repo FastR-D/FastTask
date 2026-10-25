@@ -90,15 +90,6 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ph.PanelError):
             ph.target("OTHER", MAC)
 
-    def test_schedule_exact_slots_and_latest_same_day(self):
-        for hour, minute, expected in [(13, 59, None), (14, 0, "14:00"), (17, 29, "14:00"), (17, 30, "17:30"), (21, 0, "21:00"), (23, 59, "21:00")]:
-            now = datetime(2026, 10, 25, hour, minute, tzinfo=ph.SHANGHAI)
-            self.assertEqual(ph.due_slot(now), "2026-10-25T" + expected if expected else None)
-        now = datetime(2026, 10, 25, 22, 0, tzinfo=ph.SHANGHAI)
-        self.assertIsNone(ph.due_slot(now, "2026-10-25T21:00"))
-        self.assertEqual(ph.due_slot(now, "2026-10-24T21:00"), "2026-10-25T21:00")
-        self.assertIsNone(ph.due_slot(datetime(2026, 10, 26, 0, 1, tzinfo=ph.SHANGHAI), "2026-10-25T17:30"))
-
     def test_image_dimensions_and_decode_validation(self):
         buffer = io.BytesIO()
         Image.new("RGB", (800, 480), "white").save(buffer, format="PNG")
@@ -158,14 +149,99 @@ class BleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(FakeClient.instances), 1)
         self.assertFalse(FakeClient.instances[-1].is_connected)
 
+    async def test_intermittent_advertisement_is_searched_across_multiple_rounds(self):
+        class IntermittentScanner:
+            calls = 0
+
+            @classmethod
+            async def find_device_by_filter(cls, predicate, timeout):
+                cls.calls += 1
+                self.assertEqual(timeout, ph.SCAN_SECONDS)
+                if cls.calls < 3:
+                    return None
+                return await FakeScanner.find_device_by_filter(predicate, timeout)
+
+        progress = []
+        result = await ph.send_raw(NAME, MAC, self.raw, IntermittentScanner, FakeClient, .01, on_progress=progress.append)
+        self.assertTrue(result["ok"])
+        self.assertEqual(IntermittentScanner.calls, 3)
+        self.assertEqual(len(FakeClient.instances), 1)
+        self.assertEqual([row["attempt"] for row in progress if row["phase"] == "scanning"], [1, 2, 3])
+
+    async def test_exhausted_search_has_exact_bounded_attempts_and_no_gatt_write(self):
+        class SleepingScanner:
+            calls = 0
+
+            @classmethod
+            async def find_device_by_filter(cls, predicate, timeout):
+                cls.calls += 1
+                return None
+
+        with self.assertRaises(ph.PanelError) as raised:
+            await ph.send_raw(NAME, MAC, self.raw, SleepingScanner, FakeClient, .01)
+        self.assertEqual(raised.exception.code, "device_not_found")
+        self.assertEqual(SleepingScanner.calls, ph.SCAN_ATTEMPTS)
+        self.assertEqual(FakeClient.instances, [])
+
+    async def test_latest_content_is_prepared_after_connect_and_before_first_image_write(self):
+        prepared = False
+
+        async def prepare():
+            nonlocal prepared
+            self.assertTrue(FakeClient.instances[-1].is_connected)
+            self.assertEqual(FakeClient.instances[-1].writes, [])
+            prepared = True
+            return self.raw
+
+        await ph.send_raw(NAME, MAC, self.raw, FakeScanner, FakeClient, .01, prepare_raw=prepare)
+        self.assertTrue(prepared)
+
+    async def test_scan_retries_until_matching_advert_and_stops_promptly(self):
+        class Discovery:
+            calls = 0
+
+            @classmethod
+            async def discover(cls, timeout, return_adv):
+                cls.calls += 1
+                if cls.calls < 2:
+                    return {}
+                device = SimpleNamespace(name=NAME, address=MAC)
+                return {MAC: (device, SimpleNamespace(local_name=NAME, rssi=-42))}
+
+        progress = []
+        result = await ph.scan_devices(NAME, Discovery, progress.append)
+        self.assertEqual(Discovery.calls, 2)
+        self.assertEqual(result, [{"name": NAME, "address": MAC, "rssi": -42}])
+        self.assertEqual([row["attempt"] for row in progress], [1, 2])
+
+    async def test_cancel_current_scan_does_not_queue_or_transmit(self):
+        started = asyncio.Event()
+
+        async def pending(*args, **kwargs):
+            started.set()
+            await asyncio.Future()
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(ph, "private_directory", lambda path: path.mkdir(exist_ok=True)):
+            engine = ph.Engine(directory, "http://127.0.0.1:10000")
+            with patch.object(ph, "scan_devices", side_effect=pending), patch.object(ph, "send_raw") as send:
+                operation = asyncio.create_task(engine.operation("scan", {"device_name": NAME}))
+                await started.wait()
+                await engine.cancel()
+                with self.assertRaises(ph.PanelError) as raised:
+                    await operation
+                self.assertEqual(raised.exception.code, "operation_cancelled")
+                self.assertFalse(engine.busy)
+                self.assertEqual(engine.state["last_status"]["status"], "cancelled")
+                send.assert_not_called()
+
     async def test_failed_background_refresh_records_failure_without_success(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(ph, "private_directory", lambda path: path.mkdir(exist_ok=True)):
                 engine = ph.Engine(directory, "http://127.0.0.1:10000")
-            engine.config.update({"device_name": NAME, "address": MAC, "panel_token": "ftp_" + "x" * 32})
+            engine.config.update({"device_name": NAME, "address": MAC, "panel_token": "ftp_" + "x" * 32, "pairing_id": "test-pairing"})
             with patch.object(engine, "fetch_snapshot", side_effect=ph.PanelError("已撤销，请配对", "pairing_expired", 401)):
                 with self.assertRaises(ph.PanelError):
-                    await engine.operation("scheduled", slot="2026-10-25T14:00")
+                    await engine.operation("automatic", engine.expected_target(engine.config))
             self.assertEqual(engine.state["last_status"]["status"], "failed")
             self.assertEqual(engine.state["last_status"]["error"], "pairing_expired")
             self.assertFalse(engine.busy)
@@ -240,6 +316,19 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(json.loads(self.engine.config_path.read_text())["panel_token"], token)
         body["fasttask_url"] = "https://evil.example"
         self.assertEqual(self.request("/config", "PUT", body, origin=self.engine.origin)[0], 400)
+
+    def test_http_refresh_requires_the_calling_tabs_expected_pairing_before_any_io(self):
+        self.engine.config.update({"enabled": True, "device_name": NAME, "address": MAC, "panel_token": "ftp_" + "B" * 32, "pairing_id": "account-b"})
+        before = dict(self.engine.config)
+        with patch.object(self.engine, "fetch_snapshot") as fetch, patch.object(ph, "send_raw") as send:
+            for body in ({"page": 3}, {"expected_pairing_id": "account-a", "page": 3}, {"expected_pairing_id": "account-b", "page": 3}, {"expected_pairing_id": "account-b", "expected_device_name": NAME, "page": 3}, {"expected_pairing_id": "account-b", "expected_address": MAC, "page": 3}, {"expected_pairing_id": "account-b", "expected_device_name": NAME, "expected_address": "", "page": 3}):
+                status, _, data = self.request("/refresh", "POST", body, origin=self.engine.origin)
+                self.assertEqual(status, 409)
+                self.assertEqual(data["error"], "pairing_changed")
+            fetch.assert_not_called(); send.assert_not_called()
+        self.assertEqual(self.engine.config, before)
+        self.assertIsNone(self.engine.state["last_status"])
+        self.assertTrue(self.request()[2]["capabilities"]["guarded_refresh"])
 
 
 if __name__ == "__main__":

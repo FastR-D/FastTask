@@ -249,6 +249,7 @@ func (a *App) ApplyDailyPlanProposal(ctx context.Context, userID string, proposa
 		inputHash := persistence.Hash(string(input))
 		if replan {
 			plan = existing
+			plan.ManualItemsRemoved = false
 			plan.CurrentRevision, plan.Revision, plan.Status, plan.UpdatedAt = newRevision, existing.Revision+1, "active", now
 			freezePlanWithCore(&plan, now, hasCoreItem(resultItems))
 			if len(resultItems) > 0 {
@@ -261,7 +262,7 @@ func (a *App) ApplyDailyPlanProposal(ctx context.Context, userID string, proposa
 			if err := tx.Create(&rev).Error; err != nil {
 				return err
 			}
-			update := tx.Model(&persistence.DailyPlan{}).Where("id = ? AND revision = ?", existing.ID, existing.Revision).Updates(map[string]any{"current_revision": newRevision, "revision": existing.Revision + 1, "status": "active", "updated_at": now, "frozen_at": plan.FrozenAt})
+			update := tx.Model(&persistence.DailyPlan{}).Where("id = ? AND revision = ?", existing.ID, existing.Revision).Updates(map[string]any{"current_revision": newRevision, "revision": existing.Revision + 1, "status": "active", "updated_at": now, "frozen_at": plan.FrozenAt, "manual_items_removed": false})
 			if update.Error != nil {
 				return update.Error
 			}

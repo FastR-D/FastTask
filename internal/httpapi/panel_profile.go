@@ -92,16 +92,17 @@ func (s panelRoutes) registerPanelPairings(api huma.API) {
 	})
 }
 
-type panelSchedule struct {
-	Timezone     string   `json:"timezone"`
-	RefreshTimes []string `json:"refresh_times"`
+type panelSync struct {
+	Mode                string `json:"mode"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds"`
+	DebounceSeconds     int    `json:"debounce_seconds"`
 }
 
 type panelSnapshotBody struct {
 	Profile     persistence.PanelProfile `json:"profile"`
 	Weather     panelweather.Snapshot    `json:"weather"`
 	Tasks       panelTasksBody           `json:"tasks"`
-	Schedule    panelSchedule            `json:"schedule"`
+	Sync        panelSync                `json:"sync"`
 	GeneratedAt time.Time                `json:"generated_at"`
 }
 
@@ -140,7 +141,7 @@ func (s panelRoutes) registerPanelSnapshot(api huma.API) {
 			return nil, mapError(err)
 		}
 		tasks := panelTasksBody{DailyPlanID: plan.ID, LocalDate: plan.LocalDate, Timezone: plan.Timezone, PlanStatus: plan.Status, PlanRevision: plan.CurrentRevision, PlanETag: application.StrongETag("plan", plan.ID, plan.Revision), TodayItems: views, UpdatedAt: plan.UpdatedAt, ReadOnly: true}
-		body := panelSnapshotBody{Profile: *profile, Weather: panelweather.Default.Get(ctx), Tasks: tasks, Schedule: panelSchedule{Timezone: "Asia/Shanghai", RefreshTimes: []string{"14:00", "17:30", "21:00"}}, GeneratedAt: persistence.Now()}
+		body := panelSnapshotBody{Profile: *profile, Weather: panelweather.Default.Get(ctx), Tasks: tasks, Sync: panelSync{Mode: "on_change", PollIntervalSeconds: 10, DebounceSeconds: 2}, GeneratedAt: persistence.Now()}
 		return &response{CacheControl: "private, no-store", Body: body}, nil
 	})
 }

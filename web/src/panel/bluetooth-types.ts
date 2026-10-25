@@ -23,9 +23,11 @@ export interface PanelBluetoothDevice extends EventTarget {
   readonly id: string;
   readonly name?: string;
   readonly gatt?: PanelBluetoothServer;
+  watchAdvertisements?(options?: { signal?: AbortSignal }): Promise<void>;
 }
 
 export interface PanelBluetooth {
+  getDevices?(): Promise<PanelBluetoothDevice[]>;
   requestDevice(options: {
     filters?: Array<{ name?: string; namePrefix?: string; services?: string[] }>;
     acceptAllDevices?: boolean;

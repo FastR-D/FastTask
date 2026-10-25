@@ -8,15 +8,16 @@ import { PwaUpdate } from './PwaUpdate'
 import { ResearchWorkspace } from './ResearchWorkspace'
 import { GoalManager } from './GoalManager'
 import { FastPanel } from './FastPanel'
+import badgeConsoleIcon from './assets/badge-console.svg?no-inline'
 import { timezoneOrDefault } from './date'
 import { assertAccessOwner } from './session-owner'
 export { Today, focusEvidence } from './Today'
 
 type Tab = 'today' | 'goals' | 'panel' | 'jobs' | 'review'
 
-const NAV_ICONS: Record<Tab, string> = {
+const NAV_ICONS: Record<Tab, string | undefined> = {
   today: 'today', goals: 'account_tree', jobs: 'pending',
-  panel: 'bluetooth', review: 'fact_check',
+  panel: undefined, review: 'fact_check',
 }
 const BAR_TABS: Tab[] = ['today', 'goals', 'panel', 'review', 'jobs']
 
@@ -166,7 +167,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
       <div className="drawer-inner">
         <div className="drawer-head"><span className="brand-mark">3</span><div><b>FastTask</b><small>每天推进重要的事</small></div></div>
         <mdui-list className="drawer-nav">
-          {items.map(([id, label]) => <mdui-list-item key={id} icon={NAV_ICONS[id]} active={tab === id} onClick={() => { setTab(id); setDrawerOpen(false) }}>{label}</mdui-list-item>)}
+          {items.map(([id, label]) => <mdui-list-item key={id} icon={NAV_ICONS[id]} active={tab === id} onClick={() => { setTab(id); setDrawerOpen(false) }}>{id === 'panel' && <mdui-icon slot="icon" src={badgeConsoleIcon}/>} {label}</mdui-list-item>)}
         </mdui-list>
         <div className="drawer-foot">
           <mdui-divider/>
@@ -178,7 +179,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
     </mdui-navigation-drawer>
     <mdui-navigation-rail className="app-rail" value={tab} divider>
       <div slot="top" className="rail-brand"><span className="brand-mark">3</span></div>
-      {items.map(([id, label]) => <mdui-navigation-rail-item key={id} value={id} icon={NAV_ICONS[id]} onClick={() => setTab(id)}>{label}</mdui-navigation-rail-item>)}
+      {items.map(([id, label]) => <mdui-navigation-rail-item key={id} value={id} icon={NAV_ICONS[id]} onClick={() => setTab(id)}>{id === 'panel' && <><mdui-icon slot="icon" src={badgeConsoleIcon}/><mdui-icon slot="active-icon" src={badgeConsoleIcon}/></>}{label}</mdui-navigation-rail-item>)}
       <div slot="bottom" className="rail-profile">
         <mdui-tooltip content={`${user?.display_name || '加载中'} · ${user?.timezone || ''}`} placement="left">
           <span className="rail-avatar">{user?.display_name?.slice(0, 1) || 'F'}</span>
@@ -201,14 +202,14 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
       </div>
     </mdui-layout-main>
     <mdui-navigation-bar className="app-nav" value={tab} label-visibility="labeled">
-      {items.filter(([id]) => BAR_TABS.includes(id)).map(([id, label]) => <mdui-navigation-bar-item key={id} value={id} icon={NAV_ICONS[id]} onClick={() => setTab(id)}>{label}</mdui-navigation-bar-item>)}
+      {items.filter(([id]) => BAR_TABS.includes(id)).map(([id, label]) => <mdui-navigation-bar-item key={id} value={id} icon={NAV_ICONS[id]} onClick={() => setTab(id)}>{id === 'panel' && <><mdui-icon slot="icon" src={badgeConsoleIcon}/><mdui-icon slot="active-icon" src={badgeConsoleIcon}/></>}{label}</mdui-navigation-bar-item>)}
     </mdui-navigation-bar>
     <mdui-snackbar ref={snackbarRef} className="app-snackbar" placement="top" closeable auto-close-delay={4000} open={Boolean(notice)}>{notice}</mdui-snackbar>
   </mdui-layout>
 }
 
 function navItems(): [Tab,string][] {
-  return [['today','工作台'],['goals','目标任务'],['panel','pannel'],['review','复盘'],['jobs','后台作业']]
+  return [['today','工作台'],['goals','目标任务'],['panel','工牌更新'],['review','复盘'],['jobs','后台作业']]
 }
 
 
