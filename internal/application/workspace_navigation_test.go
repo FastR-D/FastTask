@@ -3,13 +3,12 @@ package application
 import "testing"
 
 func TestWorkspaceNavigationUsesPublishedPortalAndKeepsCustomSites(t *testing.T) {
-	for system, entry := range portalWorkspaceEntries {
-		want := "https://fastrd.io/workspace?launch=" + entry
+	for system, want := range portalWorkspacePages {
 		if got := workspaceNavigationURL(system, ""); got != want {
 			t.Fatalf("%s default = %q, want %q", system, got, want)
 		}
 		if got := workspaceNavigationURL(system, portalWorkspacePages[system]); got != want {
-			t.Fatalf("%s published page must use the hub login: %q", system, got)
+			t.Fatalf("%s published page overwritten: %q", system, got)
 		}
 	}
 	for _, system := range []string{"fastlab", "unknown"} {

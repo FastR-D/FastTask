@@ -73,7 +73,7 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 		// allowed: the refresh token lives in localStorage, and every origin this policy admits is one
 		// more place a script or stylesheet could be served from. form-action closes the one sink
 		// default-src does not cover.
-		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:19743 http://localhost:19743; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://fastrd.io http://127.0.0.1:19743 http://localhost:19743; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		switch {
 		case strings.HasPrefix(c.Request.URL.Path, "/assets/"):
 			c.Header("Cache-Control", "public, max-age=31536000, immutable")

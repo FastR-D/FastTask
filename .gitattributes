@@ -1,4 +1,2 @@
 # Docker build contexts and shell entrypoints must stay LF even on Windows checkouts.
 *.sh text eol=lf
-# Unified diff context lines require a prefix space, including empty lines.
-deployments/fastresearch/*.patch text eol=lf -whitespace

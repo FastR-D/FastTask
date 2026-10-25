@@ -6,6 +6,7 @@ import { fieldValue } from './mdui-react'
 import { localDateInTimezone, timezoneOrDefault } from './date'
 import { waitJob } from './jobs'
 import { workspaceURL } from './workspace-navigation'
+import { ModuleWorkspaceLink } from './ModuleWorkspaceLink'
 import type { CompletionType, Goal, Job, Plan, PlanAvailability, PlanItem, PlanningSettings, ScheduledDay, Task, WorkSession } from './types'
 
 const COMPLETION_LABELS: Record<CompletionType, string> = { minimum_action: '最小行动', step: '完成关键步骤', result: '取得结果', time: '累计专注时长' }
@@ -411,7 +412,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
       const draft=draftOf(item),evidence=focusEvidence(item,sessions),enoughTime=evidence.seconds>=item.target_minutes*60,focusMinutes=Number(draft.focusMinutes),open=expanded===itemKey(item),methods=allowedCompletionTypes(item)
       const canProgress=planEditable&&(!optional||supportUnlocked)
       const workspace=item.workspace,url=workspaceURL(workspace?.url,workspace?.system)
-      const workspaceAction=workspace&&(url?<mdui-button variant="text" icon="open_in_new" href={url} target="_blank" rel="noreferrer">打开 {workspace.label}</mdui-button>:<span className="meta">{workspace.label} 网页暂不可用</span>)
+      const workspaceAction=workspace&&(url?<ModuleWorkspaceLink url={url} system={workspace.system} label={workspace.label} userId={userId} onNotice={onNotice}/>:<span className="meta">{workspace.label} 网页暂不可用</span>)
       return <article key={itemKey(item)} className={`today-item${item.status==='satisfied'?' done':''}`} aria-label={item.title}>
         <div className="today-item-head">
           <span className="today-item-number" aria-hidden="true">{item.status==='satisfied'?<mdui-icon name="check"/>:optional?<mdui-icon name="menu_book"/>:String(index+1).padStart(2,'0')}</span>

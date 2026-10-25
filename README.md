@@ -241,9 +241,9 @@ Windows 笔记本的蓝牙墨水屏入口为“工牌更新”，使用控制台
 
 ### 模块任务直达与门户 Key 登录
 
-任务操作和助手给出的模块入口统一走门户的固定模块选择器 `https://fastrd.io/workspace?launch=...`，支持 FastWrite、FastRead、FastNews、FastPPT。门户在自己的站点内复用现有 Key 会话，写作换取官方登录链接，阅读和资讯走其既有一次性 SSO 票据，演示进入已发布工作区。个人 Key 不会附在 URL，也不会从 FastTask 转发给模块。已配置的其它部署地址继续保留。
+任务操作和助手给出的模块入口使用已发布的 FastWrite、FastRead、FastNews、FastPPT 网页。FastTask 在用户点击时通过门户现有带 Cookie 的跨域接口复用 Key 会话，校验关联账号后，写作调用已有 `/api/fastwrite/login-url`，阅读和资讯走已有 `/api/sso/launch`，演示直接进入工作区。跨域请求不会附带 FastTask Bearer，个人 Key 不会放进 URL，门户返回的会话不保存。门户会话过期时打开原有 Key 登录页并提示重试；不要求修改门户代码。已配置的其它部署地址继续保留。
 
-此能力需要 FastResearch 门户同时支持四个 `launch` 值；配套补丁和部署步骤见 [门户跳转说明](deployments/fastresearch/module-launch.md)。当前公开门户未发布 FastLab 入口，管理员可为其配置真实网页地址；代码不生成不存在的模块页面。
+云端页面与门户需使用同站 HTTPS 域名。FastTask 的 CSP 只新增允许连接 `https://fastrd.io`；现有门户已允许 `https://task.fastrd.io` 携带 Cookie 访问上述接口。当前公开门户未发布 FastLab 入口，管理员可为其配置真实网页地址；代码不生成不存在的模块页面。
 
 协议回归可使用支持原生 TypeScript 类型剥离和 `module.registerHooks` 的 Node.js 运行（本地验证使用 Node 25.9.0）：
 
