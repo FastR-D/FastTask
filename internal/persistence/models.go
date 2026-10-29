@@ -413,6 +413,7 @@ type AgentRun struct {
 	// turn budget stays a server-side limit (doc/harness.md §1.1).
 	ModelCalls        int        `json:"model_calls,omitempty"`
 	ModelAttempts     int        `json:"model_attempts,omitempty"`
+	ModelVerifiedStop string     `json:"-"`
 	ModelInflight     string     `json:"-"`
 	StartedAt         *time.Time `json:"started_at,omitempty"`
 	ApprovalStartedAt *time.Time `json:"approval_started_at,omitempty"`
@@ -430,12 +431,15 @@ type AgentRun struct {
 // can never be read back. A token dies when it expires, when the run reaches a
 // terminal state, or when a newer token for the same run replaces it.
 type AgentHarnessToken struct {
-	ID        string `json:"id"`
-	TokenHash string `json:"-"`
-	UserID    string `json:"-"`
-	ThreadID  string `json:"thread_id"`
-	RunID     string `json:"run_id"`
-	Mode      string `json:"mode"`
+	Generation      string     `json:"-"`
+	NextTokenCipher string     `json:"-"`
+	RotationUntil   *time.Time `json:"-"`
+	ID              string     `json:"id"`
+	TokenHash       string     `json:"-"`
+	UserID          string     `json:"-"`
+	ThreadID        string     `json:"thread_id"`
+	RunID           string     `json:"run_id"`
+	Mode            string     `json:"mode"`
 	// The column is tools_etag; GORM would otherwise split the initialism into tools_e_tag.
 	ToolsETag       string     `gorm:"column:tools_etag" json:"tools_etag,omitempty"`
 	ExpiresAt       time.Time  `json:"expires_at"`

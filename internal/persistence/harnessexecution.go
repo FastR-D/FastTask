@@ -9,16 +9,19 @@ import (
 
 var ErrModelBusy = errors.New("model attempt already active or budget exhausted")
 
-func (r *AgentRepository) AcquireModelAttempt(ctx context.Context, userID, runID string, maxAttempts, maxTurns int) (string, error) {
+func (r *AgentRepository) AcquireModelAttempt(ctx context.Context, userID, runID string, maxAttempts, maxTurns int, tokens ...string) (string, error) {
 	id := NewID("attempt")
 	q := r.db(ctx).Model(&AgentRun{}).Where("id = ? AND user_id = ? AND status = ? AND cancel_requested = 0 AND model_inflight = ''", runID, userID, RunRunning)
+	if len(tokens) > 0 && tokens[0] != "" {
+		q = q.Where("EXISTS (SELECT 1 FROM agent_harness_tokens WHERE id = ? AND run_id = ? AND expires_at > ? AND (revoked_at IS NULL OR rotation_until > ?))", tokens[0], runID, Now(), Now())
+	}
 	if maxAttempts > 0 {
 		q = q.Where("model_attempts < ?", maxAttempts)
 	}
 	if maxTurns > 0 {
 		q = q.Where("model_calls < ?", maxTurns)
 	}
-	res := q.Updates(map[string]any{"model_inflight": id, "model_attempts": gorm.Expr("model_attempts + 1"), "started_at": gorm.Expr("COALESCE(started_at, ?)", Now())})
+	res := q.Updates(map[string]any{"model_verified_stop": "", "model_inflight": id, "model_attempts": gorm.Expr("model_attempts + 1"), "started_at": gorm.Expr("COALESCE(started_at, ?)", Now())})
 	if res.Error != nil {
 		return "", res.Error
 	}

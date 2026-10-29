@@ -1147,6 +1147,10 @@ func (a *DeviceService) DeviceByToken(ctx context.Context, token string) (*persi
 func (a *GoalService) ApplyProposal(ctx context.Context, userID string, proposal *persistence.Proposal, patches []map[string]any, expectedTreeRevision ...int) (int, error) {
 	created := 0
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		if err := guardApprovalTx(ctx, tx, userID); err != nil {
+			return err
+		}
+
 		var err error
 		created, err = a.applyProposalTx(tx, userID, proposal, patches, expectedTreeRevision...)
 		return err
@@ -1398,6 +1402,9 @@ func (a *GoalService) applyProposalTx(tx *gorm.DB, userID string, proposal *pers
 		}
 		if result.RowsAffected != 1 {
 			return ErrRevision
+		}
+		if err := recordAppliedApprovalTx(tx, userID, current.ID, current.GoalID); err != nil {
+			return err
 		}
 		return createOutbox(tx, userID, "task_tree.proposal_applied", map[string]any{"proposal_id": current.ID, "goal_id": current.GoalID})
 	}()

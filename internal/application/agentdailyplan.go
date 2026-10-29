@@ -98,6 +98,10 @@ func (a *App) ApplyDailyPlanProposal(ctx context.Context, userID string, proposa
 	var plan persistence.DailyPlan
 	var resultItems []persistence.DailyPlanItem
 	err = a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		if err := guardApprovalTx(ctx, tx, userID); err != nil {
+			return err
+		}
+
 		// A busy rollback can retry this closure. Only items built by the
 		// successful attempt may escape; prior IDs and protected copies are stale.
 		resultItems = nil
@@ -323,7 +327,7 @@ func markProposalApplied(tx *gorm.DB, proposal *persistence.Proposal, now time.T
 	if result.RowsAffected != 1 {
 		return ErrRevision
 	}
-	return nil
+	return recordAppliedApprovalTx(tx, proposal.UserID, proposal.ID, proposal.GoalID)
 }
 
 // buildAgentPlanItem renders a daily slice. Older proposals without an explicit

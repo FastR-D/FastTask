@@ -23,10 +23,11 @@ import (
 // Worker 使用确定性本地 Provider" — it falls back to a deterministic reply so the
 // product and its tests keep working without a model.
 type AgentService struct {
-	store *persistence.Store
-	app   *App
-	repo  *persistence.AgentRepository
-	tools *ToolRegistry
+	tokenKey []byte
+	store    *persistence.Store
+	app      *App
+	repo     *persistence.AgentRepository
+	tools    *ToolRegistry
 	// sidecar drives the runs whose host is the Node process instead of the browser
 	// (doc/harness.md §8). Nil in the common case: the sidecar is a fallback.
 	sidecar SidecarDriver
@@ -269,6 +270,14 @@ func NewAgentService(app *App, opts ...AgentOption) *AgentService {
 		approvalService:    &approvalService{app: app, repo: repo, store: app.Store},
 		threadStateService: &threadStateService{repo: repo},
 		// svc is filled in below: a rebuilt thread state needs the pending-proposal list.
+	}
+	s.tokenKey = app.ProviderService.secretKey
+	if len(s.tokenKey) == 0 {
+		secret, err := newHarnessToken()
+		if err != nil {
+			panic(err)
+		}
+		s.tokenKey = deriveLabeledKey("fasttask:harness-rotation:", secret)
 	}
 	// The harness reaches its collaborators through the service, so it is built after the
 	// fields exist and before options run: an option may replace the clock or the credentials

@@ -117,7 +117,7 @@ func (s *harnessTools) ExecuteHarnessTool(ctx context.Context, p HarnessPrincipa
 	}
 	// Claim only a finalized call from the current model response. Retrying the
 	// same id cannot consume another call, including an identical-argument call.
-	claimed, err := s.repo().ClaimToolCall(ctx, run.UserID, run.ID, sess.assistantID, part.ID, part.ToolModelTurn)
+	claimed, err := s.repo().ClaimToolCall(ctx, run.UserID, run.ID, sess.assistantID, part.ID, part.ToolModelTurn, p.TokenID)
 	if err != nil {
 		return HarnessToolOutcome{}, err
 	}
@@ -291,6 +291,8 @@ func partFromRow(part *persistence.AgentMessagePart) protocol.Part {
 // recordToolResult writes a finished tool result onto its part and pushes the update to the
 // client (§4.4.1: the execution surface owns the result, never the call).
 func (s *harnessTools) recordToolResult(ctx context.Context, sess *runSession, part *persistence.AgentMessagePart, result ToolResult) HarnessToolOutcome {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
 	resultJSON, isError := resultPayload(result)
 	if err := s.repo().UpdatePartResult(ctx, part.UserID, part.ID, resultJSON, isError); err != nil {
 		return HarnessToolOutcome{Status: "error", IsError: true, Error: "failed to record the tool result"}

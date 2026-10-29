@@ -116,6 +116,8 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 		}
 	}
 
+	ctx = context.WithValue(ctx, approvalRunKey{}, run.ID)
+	ctx = context.WithValue(ctx, approvalPartKey{}, part.ID)
 	// The client has already rendered chunks [0, CheckpointSeq); the continuation
 	// streams from there so no append-text is re-applied (§2.8).
 	fromSeq := run.CheckpointSeq
@@ -145,6 +147,9 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 			}
 			goal, count, applyErr := s.app.ApplyGoalWithTasks(ctx, userID, &proposal, run.ThreadID)
 			if applyErr != nil {
+				if errors.Is(applyErr, ErrApprovalNotAwaiting) || errors.Is(applyErr, ErrApprovalDuplicate) {
+					return SubmitResult{}, applyErr
+				}
 				s.markProposalConflict(ctx, proposal.ID)
 				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
 				s.releaseHarnessRun(ctx, userID, run, part.ID)
@@ -157,6 +162,9 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 			}
 			goal, applyErr := s.app.ApplyGoalUpdateProposal(ctx, userID, &proposal)
 			if applyErr != nil {
+				if errors.Is(applyErr, ErrApprovalNotAwaiting) || errors.Is(applyErr, ErrApprovalDuplicate) {
+					return SubmitResult{}, applyErr
+				}
 				s.markProposalConflict(ctx, proposal.ID)
 				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
 				s.releaseHarnessRun(ctx, userID, run, part.ID)
@@ -176,6 +184,9 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 			}
 			plan, items, applyErr := s.app.ApplyDailyPlanProposal(ctx, userID, &proposal, payload)
 			if applyErr != nil {
+				if errors.Is(applyErr, ErrApprovalNotAwaiting) || errors.Is(applyErr, ErrApprovalDuplicate) {
+					return SubmitResult{}, applyErr
+				}
 				s.markProposalConflict(ctx, proposal.ID)
 				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
 				s.releaseHarnessRun(ctx, userID, run, part.ID)
@@ -205,6 +216,9 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 			// ErrRevision → 412, and the proposal is marked conflict, never overwritten.
 			newRevision, applyErr := s.app.ApplyProposal(ctx, userID, &proposal, patches, proposal.BaseRevision)
 			if applyErr != nil {
+				if errors.Is(applyErr, ErrApprovalNotAwaiting) || errors.Is(applyErr, ErrApprovalDuplicate) {
+					return SubmitResult{}, applyErr
+				}
 				s.markProposalConflict(ctx, proposal.ID)
 				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
 				// A host is waiting on this decision, so the run has to go back to running even
@@ -247,26 +261,25 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 	} else {
 		// Reject: the reason is recorded as the tool result so the model sees it on
 		// resume and can re-propose (§7: "拒绝是有价值的信号").
-		if part.ProposalID != nil {
-			var proposal persistence.Proposal
-			err := s.store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", *part.ProposalID, userID).First(&proposal).Error
-			if err != nil {
-				return SubmitResult{}, err
+		resultJSON, _ := json.Marshal(map[string]any{"decision": "reject", "reason": decision.Reason, "applied": false})
+		if err := s.store.Transaction(ctx, func(tx *gorm.DB) error {
+			if err := guardApprovalTx(ctx, tx, userID); err != nil {
+				return err
 			}
-			result := s.store.DB.WithContext(ctx).Model(&proposal).Where("user_id = ? AND status = 'pending' AND revision = ?", userID, proposal.Revision).Updates(map[string]any{"status": "rejected", "revision": proposal.Revision + 1, "updated_at": persistence.Now()})
-			if result.Error != nil {
-				return SubmitResult{}, result.Error
+			if part.ProposalID != nil {
+				result := tx.Model(&persistence.Proposal{}).Where("id = ? AND user_id = ? AND status = 'pending'", *part.ProposalID, userID).Updates(map[string]any{"status": "rejected", "revision": gorm.Expr("revision + 1"), "updated_at": persistence.Now()})
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected != 1 {
+					return ErrApprovalDuplicate
+				}
 			}
-			if result.RowsAffected != 1 {
-				return SubmitResult{}, ErrApprovalDuplicate
-			}
-		}
-		resultJSON, _ := json.Marshal(map[string]any{
-			"decision": "reject", "reason": decision.Reason, "applied": false,
-		})
-		if err := s.recordApproval(ctx, userID, part.ID, protocol.ApprovalRejected, string(resultJSON)); err != nil {
+			return tx.Model(&persistence.AgentMessagePart{}).Where("id = ? AND user_id = ? AND approval_status = 'pending'", part.ID, userID).Updates(map[string]any{"approval_status": protocol.ApprovalRejected, "result_json": string(resultJSON), "is_error": false, "updated_at": persistence.Now()}).Error
+		}); err != nil {
 			return SubmitResult{}, err
 		}
+
 	}
 
 	if current, err := s.repo.GetRun(ctx, userID, run.ID); err != nil {
@@ -357,17 +370,20 @@ func (s *approvalService) recordConflict(ctx context.Context, userID, partID, re
 		"error":  "the approved change could not be applied; the proposal was marked conflict. Read the detail and current state, then propose a corrected change without claiming success",
 		"detail": reason,
 	})
-	_ = s.repo.UpdatePartResult(ctx, userID, partID, string(payload), true)
-	_ = s.repo.UpdatePartApproval(ctx, userID, partID, "conflict", nil)
+	_ = s.store.DB.WithContext(ctx).Model(&persistence.AgentMessagePart{}).Where("id = ? AND user_id = ? AND approval_status = 'pending'", partID, userID).Updates(map[string]any{"result_json": string(payload), "is_error": true, "approval_status": "conflict", "updated_at": persistence.Now()}).Error
 }
 
 // recordApproval writes the decision onto the tool-call part so the resumed run
 // feeds it back to the model and the client renders the resolved approval.
 func (s *approvalService) recordApproval(ctx context.Context, userID, partID, status, resultJSON string) error {
-	if err := s.repo.UpdatePartResult(ctx, userID, partID, resultJSON, false); err != nil {
-		return err
+	res := s.store.DB.WithContext(ctx).Model(&persistence.AgentMessagePart{}).Where("id = ? AND user_id = ? AND approval_status IN ?", partID, userID, []string{protocol.ApprovalPending, status}).Updates(map[string]any{"result_json": resultJSON, "is_error": false, "approval_status": status, "updated_at": persistence.Now()})
+	if res.Error != nil {
+		return res.Error
 	}
-	return s.repo.UpdatePartApproval(ctx, userID, partID, status, nil)
+	if res.RowsAffected != 1 {
+		return ErrApprovalDuplicate
+	}
+	return nil
 }
 
 // markProposalConflict flags a proposal whose base revision moved, so it can no

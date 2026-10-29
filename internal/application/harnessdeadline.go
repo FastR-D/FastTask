@@ -40,7 +40,7 @@ func (s *harnessProxy) OpenModelProxy(parent context.Context, p HarnessPrincipal
 		_ = s.lifecycle().finishRun(parent, run, persistence.RunFailed, "MAX_ATTEMPTS", "model attempt budget exhausted", protocol.ReasonMaxTurns)
 		return nil, &ProxyError{Code: "MAX_ATTEMPTS", Status: 409, Detail: "model attempt budget exhausted", Fatal: true}
 	}
-	lease, err := s.repo().AcquireModelAttempt(parent, p.UserID, p.RunID, maxAttempts, s.svc.limits.MaxTurns)
+	lease, err := s.repo().AcquireModelAttempt(parent, p.UserID, p.RunID, maxAttempts, s.svc.limits.MaxTurns, p.TokenID)
 	if err != nil {
 		return nil, &ProxyError{Code: "MODEL_ATTEMPT_ACTIVE", Status: 409, Detail: err.Error()}
 	}
@@ -73,7 +73,7 @@ func (s *harnessProxy) OpenModelProxy(parent context.Context, p HarnessPrincipal
 				}
 				if p.TokenID != "" {
 					token, e := s.repo().GetHarnessToken(ctx, p.TokenID)
-					if e == nil && token.RevokedAt != nil {
+					if e == nil && !s.svc.harnessTokens.validTokenRow(token) {
 						cancel(ErrHarnessToken)
 						return
 					}

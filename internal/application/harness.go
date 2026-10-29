@@ -303,29 +303,35 @@ func (s *harnessTokens) issueRunGrant(ctx context.Context, userID, runID, toolsE
 		return RunGrant{}, ErrToolsETagStale
 	}
 
-	// One authorized host per run: a re-issue (a reload, a second tab) revokes the
-	// previous token so a lost one stops working.
-	if _, err := s.repo().RevokeHarnessTokensForRun(ctx, run.ID); err != nil {
-		return RunGrant{}, err
-	}
 	plaintext, err := newHarnessToken()
 	if err != nil {
 		return RunGrant{}, err
 	}
 	now := s.clock()
 	expires := now.Add(harnessTokenTTL)
-	row := &persistence.AgentHarnessToken{
-		TokenHash: persistence.Hash(plaintext), UserID: userID, ThreadID: run.ThreadID,
-		RunID: run.ID, Mode: run.HarnessMode, ToolsETag: current, ExpiresAt: expires, CreatedAt: now,
-	}
-	if err := s.repo().CreateHarnessToken(ctx, row); err != nil {
-		return RunGrant{}, err
-	}
-	// A host has arrived: the run is being driven now.
-	if run.Status == persistence.RunQueued {
-		if err := s.repo().UpdateRun(ctx, userID, run.ID, map[string]any{"status": persistence.RunRunning, "started_at": now}); err != nil {
-			return RunGrant{}, err
+	row := &persistence.AgentHarnessToken{TokenHash: persistence.Hash(plaintext), UserID: userID, ThreadID: run.ThreadID, RunID: run.ID, Mode: run.HarnessMode, ToolsETag: current, ExpiresAt: expires, CreatedAt: now}
+	err = s.svc.store.Transaction(ctx, func(tx *gorm.DB) error {
+		repo := s.repo().WithTx(tx)
+		fresh, err := repo.GetRun(ctx, userID, run.ID)
+		if err != nil {
+			return err
 		}
+		if IsTerminalRunStatus(fresh.Status) || fresh.CancelRequested {
+			return ErrRunNotActive
+		}
+		if _, err := repo.RevokeHarnessTokensForRun(ctx, run.ID); err != nil {
+			return err
+		}
+		if err := repo.CreateHarnessToken(ctx, row); err != nil {
+			return err
+		}
+		if fresh.Status == persistence.RunQueued {
+			return repo.UpdateRun(ctx, userID, run.ID, map[string]any{"status": persistence.RunRunning, "started_at": now})
+		}
+		return nil
+	})
+	if err != nil {
+		return RunGrant{}, err
 	}
 
 	instructions, degraded, err := s.instructionsFor(ctx, run)
@@ -470,7 +476,7 @@ func (s *harnessTokens) AuthenticateHarness(ctx context.Context, authorization s
 	if err != nil {
 		return HarnessPrincipal{}, ErrHarnessToken
 	}
-	if token.RevokedAt != nil || !token.ExpiresAt.After(s.clock()) {
+	if !s.validTokenRow(token) {
 		return HarnessPrincipal{}, ErrHarnessToken
 	}
 	// A token dies with its run (§10.2). Checking the run rather than trusting the
@@ -510,6 +516,14 @@ func (s *harnessTokens) HarnessHeartbeat(ctx context.Context, p HarnessPrincipal
 	if err != nil {
 		return HeartbeatReply{}, err
 	}
+	old, err := s.repo().GetHarnessToken(ctx, p.TokenID)
+	if err != nil || !s.validTokenRow(old) {
+		return HeartbeatReply{}, ErrHarnessToken
+	}
+	if old.RevokedAt != nil {
+		renewed, expires, err := s.renewToken(ctx, p, now)
+		return HeartbeatReply{CancelRequested: run.CancelRequested, RunStatus: run.Status, ExpiresAt: expires, HarnessToken: renewed}, err
+	}
 	ok, err := s.repo().BeatHarnessToken(ctx, p.TokenID, now)
 	if err != nil {
 		return HeartbeatReply{}, err
@@ -542,24 +556,48 @@ func (s *harnessTokens) HarnessHeartbeat(ctx context.Context, p HarnessPrincipal
 // renewToken replaces a token that is inside its renewal window (§10.4). The old one
 // is revoked in the same breath, so a run has at most one usable token at any instant.
 func (s *harnessTokens) renewToken(ctx context.Context, p HarnessPrincipal, now time.Time) (string, time.Time, error) {
-	plaintext, err := newHarnessToken()
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	expires := now.Add(harnessTokenTTL)
-	row := &persistence.AgentHarnessToken{
-		TokenHash: persistence.Hash(plaintext), UserID: p.UserID, ThreadID: p.ThreadID,
-		RunID: p.RunID, Mode: p.Mode, ToolsETag: s.svc.ToolsETag(), ExpiresAt: expires, CreatedAt: now,
-	}
-	err = s.svc.store.Transaction(ctx, func(tx *gorm.DB) error {
+	var plaintext string
+	var expires time.Time
+	err := s.svc.store.Transaction(ctx, func(tx *gorm.DB) error {
 		repo := s.repo().WithTx(tx)
+		old, err := repo.GetHarnessToken(ctx, p.TokenID)
+		if err != nil {
+			return err
+		}
+		if !s.validTokenRow(old) {
+			return ErrHarnessToken
+		}
+		if old.NextTokenCipher != "" {
+			plaintext, err = decryptWithKey(s.svc.tokenKey, old.NextTokenCipher)
+			if err != nil {
+				return err
+			}
+			next, err := repo.GetHarnessTokenByHash(ctx, persistence.Hash(plaintext))
+			if err != nil {
+				return err
+			}
+			expires = next.ExpiresAt
+			_, err = repo.BeatHarnessToken(ctx, next.ID, now)
+			return err
+		}
+		plaintext, err = newHarnessToken()
+		if err != nil {
+			return err
+		}
+		expires = now.Add(harnessTokenTTL)
+		cipher, err := encryptWithKey(s.svc.tokenKey, plaintext)
+		if err != nil {
+			return err
+		}
+		row := &persistence.AgentHarnessToken{TokenHash: persistence.Hash(plaintext), UserID: p.UserID, ThreadID: p.ThreadID, RunID: p.RunID, Mode: p.Mode, Generation: old.Generation, ToolsETag: old.ToolsETag, ExpiresAt: expires, CreatedAt: now}
 		if err := repo.CreateHarnessToken(ctx, row); err != nil {
 			return err
 		}
-		return repo.RevokeHarnessToken(ctx, p.TokenID, now)
+		return tx.Model(&persistence.AgentHarnessToken{}).Where("id = ? AND revoked_at IS NULL", old.ID).Updates(map[string]any{"revoked_at": now, "rotation_until": now.Add(30 * time.Second), "next_token_cipher": cipher}).Error
 	})
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	return plaintext, expires, nil
+	return plaintext, expires, err
+}
+
+func (s *harnessTokens) validTokenRow(token *persistence.AgentHarnessToken) bool {
+	return token != nil && token.ExpiresAt.After(s.clock()) && (token.RevokedAt == nil || (token.RotationUntil != nil && token.RotationUntil.After(s.clock())))
 }

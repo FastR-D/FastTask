@@ -743,7 +743,11 @@ func (t *harnessTranscript) finish(parser *agent.StreamParser) {
 		if err != nil {
 			return err
 		}
-		if err := repo.UpdateRun(ctx, t.run.UserID, t.run.ID, map[string]any{"usage_json": string(usageJSON)}); err != nil {
+		verifiedStop := ""
+		if !t.failed && t.finishRS == "stop" && len(t.callOrder) == 0 {
+			verifiedStop = "stop"
+		}
+		if err := repo.UpdateRun(ctx, t.run.UserID, t.run.ID, map[string]any{"usage_json": string(usageJSON), "model_verified_stop": verifiedStop}); err != nil {
 			return err
 		}
 		turn, err := repo.CountModelCall(ctx, t.run.UserID, t.run.ID)

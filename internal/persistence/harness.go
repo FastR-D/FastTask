@@ -24,6 +24,9 @@ func (r *AgentRepository) CreateHarnessToken(ctx context.Context, token *AgentHa
 	if token.ID == "" {
 		token.ID = NewID("htok")
 	}
+	if token.Generation == "" {
+		token.Generation = token.ID
+	}
 	if token.CreatedAt.IsZero() {
 		token.CreatedAt = Now()
 	}
@@ -93,8 +96,8 @@ func (r *AgentRepository) RevokeHarnessToken(ctx context.Context, tokenID string
 func (r *AgentRepository) RevokeHarnessTokensForRun(ctx context.Context, runID string) (int64, error) {
 	now := Now()
 	res := r.db(ctx).Model(&AgentHarnessToken{}).
-		Where("run_id = ? AND revoked_at IS NULL", runID).
-		Updates(map[string]any{"revoked_at": now})
+		Where("run_id = ?", runID).
+		Updates(map[string]any{"revoked_at": now, "rotation_until": nil, "next_token_cipher": ""})
 	return res.RowsAffected, res.Error
 }
 

@@ -77,6 +77,10 @@ func (s *harnessLifecycle) CompleteRun(ctx context.Context, p HarnessPrincipal, 
 		// keeping: it is thread history, not run state.
 		return nil
 	}
+	token, tokenErr := s.repo().GetHarnessToken(ctx, p.TokenID)
+	if tokenErr != nil || !s.svc.harnessTokens.validTokenRow(token) {
+		return ErrHarnessToken
+	}
 	if err := s.saveCheckpoint(ctx, p, in); err != nil {
 		return err
 	}
@@ -91,7 +95,7 @@ func (s *harnessLifecycle) CompleteRun(ctx context.Context, p HarnessPrincipal, 
 		}
 		return s.finishRun(ctx, run, persistence.RunFailed, code, message, protocol.ReasonError)
 	case strings.EqualFold(in.StopReason, "stop"), strings.EqualFold(in.StopReason, "end_turn"):
-		if run.ModelCalls == 0 {
+		if run.ModelCalls == 0 || run.ModelVerifiedStop != "stop" || run.ModelInflight != "" {
 			return s.finishRun(ctx, run, persistence.RunFailed, "EMPTY_COMPLETION", "no completed model response", protocol.ReasonError)
 		}
 		return s.finishRun(ctx, run, persistence.RunSucceeded, "", "", protocol.ReasonStop)
@@ -268,6 +272,12 @@ func (s *harnessLifecycle) PruneHarnessTokens(ctx context.Context) (int64, error
 // drivable. Every harness endpoint goes through it, so a terminal run cannot be
 // written to by a host that has not noticed yet.
 func (s *harnessLifecycle) activeRun(ctx context.Context, p HarnessPrincipal) (*persistence.AgentRun, error) {
+	if p.TokenID != "" {
+		token, err := s.repo().GetHarnessToken(ctx, p.TokenID)
+		if err != nil || !s.svc.harnessTokens.validTokenRow(token) {
+			return nil, ErrHarnessToken
+		}
+	}
 	run, err := s.repo().GetRun(ctx, p.UserID, p.RunID)
 	if err != nil {
 		return nil, err

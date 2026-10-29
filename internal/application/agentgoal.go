@@ -235,6 +235,10 @@ func (a *App) ApplyGoalWithTasks(ctx context.Context, userID string, proposal *p
 	var goal persistence.Goal
 	created := 0
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		if err := guardApprovalTx(ctx, tx, userID); err != nil {
+			return err
+		}
+
 		var current persistence.Proposal
 		if err := tx.Where("id = ? AND user_id = ? AND kind = 'goal_with_tasks' AND status = 'pending' AND goal_id IS NULL", proposal.ID, userID).First(&current).Error; err != nil {
 			return notFound(err)
@@ -306,6 +310,10 @@ func (a *App) ApplyGoalWithTasks(ctx context.Context, userID string, proposal *p
 func (a *App) ApplyGoalUpdateProposal(ctx context.Context, userID string, proposal *persistence.Proposal) (*persistence.Goal, error) {
 	var goal *persistence.Goal
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		if err := guardApprovalTx(ctx, tx, userID); err != nil {
+			return err
+		}
+
 		var current persistence.Proposal
 		if err := tx.Where("id = ? AND user_id = ? AND kind = 'goal_update' AND status = 'pending'", proposal.ID, userID).First(&current).Error; err != nil {
 			return notFound(err)
@@ -326,7 +334,7 @@ func (a *App) ApplyGoalUpdateProposal(ctx context.Context, userID string, propos
 		if result.RowsAffected != 1 {
 			return ErrRevision
 		}
-		return nil
+		return recordAppliedApprovalTx(tx, userID, current.ID, current.GoalID)
 	})
 	return goal, err
 }
