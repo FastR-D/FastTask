@@ -90,7 +90,7 @@ func NewProposalTools(app *App) []Tool {
 				Parameters: objectSchema(map[string]any{
 					"goal_id":       stringProp("The goal whose task tree to change."),
 					"instruction":   stringProp("Short human-readable rationale for the change."),
-					"base_revision": integerProp("The tree_revision from get_task_tree this patch is based on; omit to use the current revision.", 0, 0),
+					"base_revision": integerProp("The tree_revision from get_task_tree this patch is based on; omit only to reuse this run's verified observation.", 0, 0),
 					"patch": map[string]any{
 						"type":        "array",
 						"description": "Ordered operations. create requires type/title/success_criteria/minimum_action; update requires target_id and at least one changed field; move requires target_id and an explicit parent_id (null for root) or earlier parent_ref; supersede/delete/restore only accept op and target_id. estimate_minutes is TOTAL work, not today's budget. Parent is tree structure; array order recommends sequence. depends_on/depends_on_refs is only for required finished artifacts; explain that artifact in description. Omitted dependencies stay unchanged; an empty depends_on array explicitly removes them. Do not invent quantitative research targets the user did not request.",
@@ -202,15 +202,21 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 		}); err != nil {
 			return PendingProposalRef{}, nil, "", err
 		}
-		base := current
+		base, err := observedTreeRevision(ctx, a, tc, goalID)
+		if err != nil {
+			return PendingProposalRef{}, nil, "", patchError(err.Error())
+		}
 		if raw, provided := args["base_revision"]; provided && raw != nil {
 			var revision int
 			if err := changeInt(args, "base_revision", &revision); err != nil || revision < 0 {
-				return PendingProposalRef{}, nil, "", patchError("base_revision must be a non-negative whole number from get_task_tree")
+				return PendingProposalRef{}, nil, "", patchError("base_revision must be a non-negative integer")
 			}
-			if revision > 0 {
-				base = revision
+			if revision != base {
+				return PendingProposalRef{}, nil, "", patchError("base_revision differs from the observed tree; read again")
 			}
+		}
+		if base != current {
+			return PendingProposalRef{}, nil, "", ErrRevision
 		}
 		ref := PendingProposalRef{
 			GoalID: goalID, BaseRevision: base,

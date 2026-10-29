@@ -10,6 +10,7 @@ import (
 	"github.com/FastR-D/FastTask/internal/agent"
 	"github.com/FastR-D/FastTask/internal/domain"
 	"github.com/FastR-D/FastTask/internal/persistence"
+	"gorm.io/gorm"
 )
 
 // funcTool is a compact Tool implementation so readonly tools stay declarative.
@@ -37,6 +38,7 @@ func toolError(format string, parts ...any) ToolResult {
 // identity argument (enforced at registry construction, §5.2).
 func NewReadonlyTools(app *App) []Tool {
 	return []Tool{
+		planningContextTool(app),
 		funcTool{def: agent.ToolDefinition{
 			Name:        "list_goals",
 			Description: "List the user's goals with their acceptance criteria. Defaults to active goals; pass status to widen.",
@@ -51,6 +53,9 @@ func NewReadonlyTools(app *App) []Tool {
 			Description: "Get the task tree and current tree revision for one goal. Use the revision as the base for any task-tree proposal. To find an existing task the user explicitly wants to recover, pass include_deleted=true and inspect deleted_at/deletion_id. Restoring a selected task also restores its descendants from that same deletion batch; explain that scope before approval and do not recover unrelated deleted subtrees.",
 			Parameters: objectSchema(map[string]any{
 				"goal_id":         stringProp("The goal whose task tree to read."),
+				"limit":           integerProp("Maximum tasks per page; default 200.", 1, 200),
+				"offset":          integerProp("Next offset returned by the previous page; keep the same revision.", 0, 100000),
+				"format":          stringProp("One representation only; flat by default.", "flat", "tree"),
 				"include_deleted": map[string]any{"type": "boolean", "description": "Include recoverable deleted tasks with their original IDs, hierarchy and deletion state; defaults to false."},
 			}, "goal_id"),
 		}, fn: app.toolGetTaskTree},
@@ -133,6 +138,17 @@ func (a *App) toolListGoals(ctx context.Context, tc ToolContext, args map[string
 }
 
 func (a *App) toolGetTaskTree(ctx context.Context, tc ToolContext, args map[string]any) (ToolResult, error) {
+	var result ToolResult
+	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		local := *a
+		local.Store = &persistence.Store{DB: tx}
+		var err error
+		result, err = local.readTaskTree(ctx, tc, args)
+		return err
+	})
+	return result, err
+}
+func (a *App) readTaskTree(ctx context.Context, tc ToolContext, args map[string]any) (ToolResult, error) {
 	goalID := stringArg(args, "goal_id")
 	if goalID == "" {
 		return toolError("goal_id is required"), nil
@@ -151,12 +167,18 @@ func (a *App) toolGetTaskTree(ctx context.Context, tc ToolContext, args map[stri
 	if !includeDeleted {
 		query = query.Where("deleted_at IS NULL")
 	}
-	if err := query.Order("position, id").Find(&tasks).Error; err != nil {
+	limit := clampInt(intArg(args, "limit", 200), 1, 200)
+	offset := clampInt(intArg(args, "offset", 0), 0, 100000)
+	if err := query.Order("position, id").Offset(offset).Limit(limit + 1).Find(&tasks).Error; err != nil {
 		return ToolResult{}, err
 	}
 	var revision int
 	if err := db.Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", goalID).Select("COALESCE(MAX(revision),0)").Scan(&revision).Error; err != nil {
 		return ToolResult{}, err
+	}
+	hasMore := len(tasks) > limit
+	if hasMore {
+		tasks = tasks[:limit]
 	}
 	nodes := make([]map[string]any, 0, len(tasks))
 	deletedCount := 0
@@ -171,11 +193,17 @@ func (a *App) toolGetTaskTree(ctx context.Context, tc ToolContext, args map[stri
 			"priority": task.Priority, "estimate_minutes": task.EstimateMinutes, "position": task.Position, "revision": task.Revision,
 		})
 	}
-	return ToolResult{Result: map[string]any{
+	result := map[string]any{
 		"goal_id": goal.ID, "goal_title": goal.Title, "goal_status": goal.Status,
 		"tree_revision": revision, "task_count": len(nodes), "deleted_task_count": deletedCount, "include_deleted": includeDeleted,
-		"tasks": nodes, "tree": BuildTree(tasks),
-	}}, nil
+		"has_more": hasMore, "offset": offset, "next_offset": offset + len(tasks), "scope": "page",
+	}
+	if stringArg(args, "format") == "tree" {
+		result["tree"] = BuildTree(tasks)
+	} else {
+		result["tasks"] = nodes
+	}
+	return ToolResult{Result: result}, nil
 }
 
 func (a *App) toolGetDailyPlan(ctx context.Context, tc ToolContext, args map[string]any) (ToolResult, error) {

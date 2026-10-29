@@ -84,5 +84,9 @@ func (s *harnessProxy) modelContext(ctx context.Context, run *persistence.AgentR
 	if err := s.canonicalInput(ctx, run, out); err != nil {
 		return nil, err
 	}
-	return out, nil
+	budget := s.svc.limits.ContextBytes
+	if budget <= 0 {
+		budget = 128 * 1024
+	}
+	return boundModelContext(out, budget)
 }
