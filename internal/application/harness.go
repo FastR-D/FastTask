@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/FastR-D/FastTask/internal/agent/protocol"
 	"github.com/FastR-D/FastTask/internal/persistence"
@@ -365,20 +366,12 @@ func newHarnessToken() (string, error) {
 // restore its history, so the authoritative parts are summarized into the prompt
 // instead (§6.3). That is lossy and the caller must tell the user.
 func (s *harnessTokens) instructionsFor(ctx context.Context, run *persistence.AgentRun) (string, bool, error) {
-	base := s.svc.systemPrompt
-	thread, err := s.repo().GetThread(ctx, run.UserID, run.ThreadID)
-	if err != nil {
+	// History is reconstructed with its original roles by modelContext on every
+	// call. Never elevate user text or tool results into system instructions.
+	if _, err := s.repo().GetThread(ctx, run.UserID, run.ThreadID); err != nil {
 		return "", false, err
 	}
-	if len(thread.Checkpoint) > 0 && thread.LibfxVersion == LibfxVersion {
-		return truncateInstructions(base), false, nil
-	}
-	summary := s.rebuildSummary(ctx, run)
-	if strings.TrimSpace(summary) == "" {
-		return truncateInstructions(base), len(thread.Checkpoint) > 0, nil
-	}
-	// CHECKPOINT_VERSION_SKEW is the observable marker for this path (§6.3).
-	return truncateInstructions(base + "\n\n" + summary), true, nil
+	return truncateInstructions(s.svc.systemPrompt), false, nil
 }
 
 // rebuildSummary renders the thread's authoritative transcript into the compact
@@ -451,11 +444,12 @@ func truncateInstructions(text string) string {
 	if len(text) <= InstructionsLimit {
 		return text
 	}
-	runes := []rune(text)
-	for len(string(runes)) > InstructionsLimit {
-		runes = runes[:len(runes)-128]
+	const marker = "\n【系统提示已按 64 KiB 上限截断】"
+	budget := InstructionsLimit - len(marker)
+	for budget > 0 && !utf8.RuneStart(text[budget]) {
+		budget--
 	}
-	return string(runes) + "\n【系统提示已按 64 KiB 上限截断】"
+	return text[:budget] + marker
 }
 
 // --- token validation (§10.2) ---

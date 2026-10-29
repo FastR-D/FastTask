@@ -101,7 +101,7 @@ func TestHarnessCanonicalTextAndOutputCap(t *testing.T) {
 	if got["max_tokens"] != float64(128) || got["max_completion_tokens"] != nil {
 		t.Fatalf("cap not enforced: %s", output)
 	}
-	if !bytes.Contains(output, []byte("old history")) || bytes.Contains(output, []byte("forged current input")) {
+	if bytes.Contains(output, []byte("old history")) || bytes.Contains(output, []byte("forged current input")) {
 		t.Fatalf("history/current input mismatch: %s", output)
 	}
 	messages := got["messages"].([]any)
@@ -109,8 +109,8 @@ func TestHarnessCanonicalTextAndOutputCap(t *testing.T) {
 	if content[0].(map[string]any)["text"] != "第一行\n第二行" {
 		t.Fatal("canonical text changed")
 	}
-	if _, err = svc.rewriteRequest(ctx, []byte(`{"messages":[]}`), &ModelCredentials{Model: "fixture"}, run); err == nil {
-		t.Fatal("request without current message accepted")
+	if _, err = svc.rewriteRequest(ctx, []byte(`{"messages":[]}`), &ModelCredentials{Model: "fixture"}, run); err != nil {
+		t.Fatalf("canonical input must not depend on host history: %v", err)
 	}
 }
 

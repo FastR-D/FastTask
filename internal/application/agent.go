@@ -745,13 +745,9 @@ func (s *AgentService) driveViaSidecar(ctx context.Context, job persistence.Agen
 	if err != nil {
 		return nil, s.failHarnessRun(ctx, run, "HARNESS_UNAVAILABLE", err.Error())
 	}
-	thread, err := s.repo.GetThread(ctx, run.UserID, run.ThreadID)
-	if err != nil {
-		return nil, s.failHarnessRun(ctx, run, "STATE_ERROR", err.Error())
-	}
 	result, err := s.sidecar.Drive(ctx, SidecarRun{
 		RunID: run.ID, HarnessToken: grant.HarnessToken, Prompt: prompt,
-		Checkpoint: thread.Checkpoint, LibfxVersion: thread.LibfxVersion,
+		Checkpoint: nil, LibfxVersion: LibfxVersion,
 		Model: grant.Model, Instructions: grant.Instructions, ThreadID: run.ThreadID,
 	})
 	if err != nil {

@@ -15,3 +15,9 @@
 尚未完成：checkpoint 元数据与 baseline 恢复、执行期间 deadline、model step / attempt 单飞、有序事件事务、所有网络 signal 贯通、Provider 参数适配、共享 driver、完整 86 项用例及真实双 host / 人工 QA。当前不能把本批回归视为整个设计已验收。
 
 规范输入仍通过代理校验最终上游请求；libfx 的真实 resource / checkpoint 合约及完整视觉模型端到端验收留待后续测试任务。没有新增迁移，没有修改业务提案与审批权限。
+
+第二批：权威历史恢复。
+
+采用设计允许的“始终由服务端重建模型上下文”替代 checkpoint 水位 / baseline 双轨方案。每次代理请求按数据库消息、part 次序恢复原角色的文本及工具交互，读取晚到审批结果；host 伪造历史不进入模型。浏览器与 sidecar 不再恢复 opaque checkpoint，历史文件保留兼容，不需要新增水位迁移，也不存在代理 baseline 被新 checkpoint 遗漏的问题。历史材料不再拼入 system，当前输入仍做严格附件校验。读取失败不会静默返回空历史；修正 system UTF-8 上限含标记的计算。
+
+验证：application / httpapi 回归通过；新增 stale / 损坏 checkpoint、晚到结果连续读取、工具前后文本次序、system 角色边界和中英文截断上限测试通过。后续补 token 预算和实际双 host 合约，不能把本步视为整体 QA 完成。

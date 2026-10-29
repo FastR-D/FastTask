@@ -209,10 +209,11 @@ func (s *harnessProxy) rewriteRequest(ctx context.Context, body []byte, creds *M
 	// 2. System prompt and tools are the server's, not the host's (§4.3, agent-impl.md §6). Images are
 	//    expanded here rather than in the host, so every one of them passes an ownership check
 	//    (doc/chat-features.md §4.4).
-	payload["messages"] = s.sanitizeMessages(ctx, run.UserID, payload["messages"], instructions)
-	if err := s.canonicalInput(ctx, run, payload["messages"].([]any)); err != nil {
+	messages, err := s.modelContext(ctx, run, instructions)
+	if err != nil {
 		return nil, &ProxyError{Code: "INPUT_UNAVAILABLE", Status: http.StatusUnprocessableEntity, Detail: err.Error()}
 	}
+	payload["messages"] = messages
 	if cap := s.svc.limits.MaxOutputTokens; cap > 0 {
 		delete(payload, "max_completion_tokens")
 		payload["max_tokens"] = cap

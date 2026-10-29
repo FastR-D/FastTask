@@ -120,20 +120,12 @@ type ThreadCheckpoint struct {
 
 // GetThreadCheckpoint returns a thread's checkpoint to its own host.
 func (s *harnessLifecycle) GetThreadCheckpoint(ctx context.Context, p HarnessPrincipal) (ThreadCheckpoint, error) {
-	thread, err := s.repo().GetThread(ctx, p.UserID, p.ThreadID)
-	if err != nil {
+	if _, err := s.repo().GetThread(ctx, p.UserID, p.ThreadID); err != nil {
 		return ThreadCheckpoint{}, err
 	}
-	if len(thread.Checkpoint) == 0 {
-		return ThreadCheckpoint{LibfxVersion: LibfxVersion}, nil
-	}
-	skew := thread.LibfxVersion != LibfxVersion
-	if skew {
-		// A version the running host cannot read is not handed out: restoring it would
-		// throw inside createFxAgent, and §6.3 wants the degraded path instead.
-		return ThreadCheckpoint{LibfxVersion: thread.LibfxVersion, Skew: true}, nil
-	}
-	return ThreadCheckpoint{Checkpoint: thread.Checkpoint, LibfxVersion: thread.LibfxVersion}, nil
+	// The gateway supplies canonical history, including late tool decisions.
+	// Restoring opaque host state is unnecessary and can fail on damaged bytes.
+	return ThreadCheckpoint{LibfxVersion: LibfxVersion}, nil
 }
 
 // PutThreadCheckpoint stores a checkpoint mid-thread (§6.1). A host that wants its run

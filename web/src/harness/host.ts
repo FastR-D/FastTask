@@ -286,14 +286,9 @@ function isStaleManifest(error: unknown): boolean {
 /** readCheckpoint restores the thread's libfx history. A checkpoint written by another libfx version is
  *  refused by the server, which has already folded a summary into the instructions (§6.3). */
 async function readCheckpoint(run: ActiveRun): Promise<Uint8Array | null> {
-  try {
-    const body = await hostFetch(run, 'GET', `/agent/threads/${encodeURIComponent(run.threadId)}/checkpoint`)
-    if (body.skew || !body.checkpoint) return null
-    return base64ToBytes(String(body.checkpoint))
-  } catch {
-    // A thread that has never run has no checkpoint; that is the normal first message.
-    return null
-  }
+  const body = await hostFetch(run, 'GET', `/agent/threads/${encodeURIComponent(run.threadId)}/checkpoint`)
+  if (body.skew || !body.checkpoint) return null
+  return base64ToBytes(String(body.checkpoint))
 }
 
 /**
