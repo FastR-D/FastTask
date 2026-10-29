@@ -55,13 +55,20 @@ type ToolResult struct {
 // PendingProposalRef describes a Proposal awaiting approval, carrying exactly the
 // fields the wire state's fasttask.pendingProposals entry needs (§2.7) plus the
 // structured diff the approval card renders.
+type RestoreScope struct {
+	Count     int                 `json:"count"`
+	Tasks     []map[string]string `json:"tasks"`
+	Truncated bool                `json:"truncated"`
+}
+
 type PendingProposalRef struct {
-	ProposalID   string `json:"id"`
-	GoalID       string `json:"goalId"`
-	BaseRevision int    `json:"baseRevision"`
-	Summary      string `json:"summary"`
-	Kind         string `json:"kind"`
-	Diff         any    `json:"diff,omitempty"`
+	RestoreScope *RestoreScope `json:"restore_scope,omitempty"`
+	ProposalID   string        `json:"id"`
+	GoalID       string        `json:"goalId"`
+	BaseRevision int           `json:"baseRevision"`
+	Summary      string        `json:"summary"`
+	Kind         string        `json:"kind"`
+	Diff         any           `json:"diff,omitempty"`
 }
 
 // Tool is a controlled projection of an application use case (§5). The Execute

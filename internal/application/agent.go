@@ -758,6 +758,10 @@ func (s *AgentService) driveViaSidecar(ctx context.Context, job persistence.Agen
 	if err != nil {
 		return nil, s.failHarnessRun(ctx, run, "HARNESS_UNAVAILABLE", err.Error())
 	}
+	principal, err := s.AuthenticateHarness(ctx, "Bearer "+grant.HarnessToken)
+	if err != nil {
+		return nil, s.failHarnessRun(ctx, run, "HARNESS_UNAVAILABLE", "the sidecar capability could not be authenticated")
+	}
 	result, err := s.sidecar.Drive(ctx, SidecarRun{
 		RunID: run.ID, HarnessToken: grant.HarnessToken, Prompt: prompt,
 		Checkpoint: nil, LibfxVersion: LibfxVersion,
@@ -766,7 +770,20 @@ func (s *AgentService) driveViaSidecar(ctx context.Context, job persistence.Agen
 	if err != nil {
 		return nil, s.failHarnessRun(ctx, run, "PROVIDER_ERROR", err.Error())
 	}
-	principal := HarnessPrincipal{UserID: run.UserID, ThreadID: run.ThreadID, RunID: run.ID, Mode: HarnessModeSidecar}
+	// A legitimate token rotation retains the worker's generation. A new grant
+	// belongs to a different host and cannot be completed by this old worker.
+	if current, e := s.repo.ActiveHarnessTokenForRun(ctx, run.ID); e == nil {
+		original, e := s.repo.GetHarnessToken(ctx, principal.TokenID)
+		if e != nil {
+			return nil, e
+		}
+		if original.Generation != current.Generation {
+			return nil, ErrHarnessToken
+		}
+		principal.TokenID = current.ID
+	} else if !persistence.IsNotFound(e) {
+		return nil, e
+	}
 	completion := Completion{
 		StopReason: result.StopReason, ErrorMessage: result.ErrorMessage, Usage: result.Usage,
 		Checkpoint: result.Checkpoint, LibfxVersion: result.LibfxVersion,
@@ -775,13 +792,23 @@ func (s *AgentService) driveViaSidecar(ctx context.Context, job persistence.Agen
 		return nil, err
 	}
 	_ = job.ID
-	return map[string]any{"run_id": run.ID, "status": "succeeded", "stop_reason": result.StopReason}, nil
+	current, err := s.repo.GetRun(ctx, run.UserID, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	output := map[string]any{"run_id": run.ID, "status": current.Status, "stop_reason": result.StopReason}
+	if current.Status == persistence.RunFailed {
+		return output, fmt.Errorf("agent run failed: %s", current.ErrorCode)
+	}
+	return output, nil
 }
 
 // failHarnessRun records a run that never got as far as a host, and returns the error so the
 // Worker's own bookkeeping sees it too.
 func (s *AgentService) failHarnessRun(ctx context.Context, run *persistence.AgentRun, code, message string) error {
-	_ = s.repo.SetRunStatus(ctx, run.UserID, run.ID, persistence.RunFailed, code, message)
+	if err := s.harnessLifecycle.finishRun(ctx, run, persistence.RunFailed, code, message, protocol.ReasonError); err != nil {
+		return err
+	}
 	// This path never reached a session, so runSession.failRun — the other failure funnel —
 	// will not announce it.
 	notifyRunFailed(ctx, s.app, run, code, message)

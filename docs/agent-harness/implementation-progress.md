@@ -87,3 +87,11 @@ browser / sidecar 现在共用 run-driver，统一 heartbeat（等待上一次�
 版本冲突的业务结果、proposal conflict、用户可见的“提案未生效”说明及对应事件现在同事务提交，不依赖模型恰好在下一次工具调用前生成一句解释。写失败向调用者传播，重复审批不会覆盖已完成结果。model turn 上限不再沿用旧的 succeeded 收尾，明确记录 failed / MAX_TURNS，并保留具体 incomplete 原因。
 
 验证：审批冲突的可见说明、并发 / detached 回执、预算不进入 Provider 且不假成功的回归通过。完整 Go 与 race 检查已执行，最终验收记录汇总。行为评测工具及实际汇总后续提交。
+
+第十二批：Worker sidecar 收尾与可审阅恢复范围。
+
+补测实际 ExecuteRun → sidecar driver → CompleteRun 路径，发现此前 token fencing 后内部 Worker 仍构造空 TokenID principal。现在保存已认证的原 generation，完成时只接受同 generation 的当前 token（包含合法轮换），新 grant generation 不能被旧 Worker 收尾；job 输出按真实 run 状态返回，失败不再写成 succeeded。初始失败也统一经过终态事务。
+
+恢复提案使用与 restoreTaskTx 相同的同批子树规则生成服务端预览，确认卡片显示准确项数及任务名称（至多展示 50 项，截断明确标注），其他批次保持原样。用户无需只依赖模型关于子树范围的措辞。新增同批 / 独立旧批次 / 重复 root 去重测试及真实 Chromium 组件呈现检查。纯图片提示进一步要求先描述可见内容，不为识图读取目标 / 计划，也不估算没有标示的角度、像素或增幅。
+
+验证：完整 Go、前端生产构建、55 项前端测试通过；Worker 正常、合法 token 轮换、新 generation fencing、未知 stop reason 和取消状态五种路径通过；相关组三轮 race 通过。服务端恢复范围的真实浏览器呈现通过。

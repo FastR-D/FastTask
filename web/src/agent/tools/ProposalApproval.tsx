@@ -1,5 +1,6 @@
 import { makeAssistantToolUI, useAssistantTransportState } from '@assistant-ui/react'
 import { useEffect, useRef, useState } from 'react'
+import { RestoreScopeSummary } from './RestoreScopeSummary'
 import { fieldValue } from '../../mdui-react'
 import { request } from '../../api'
 import { TOOL_DAILY_PLAN, TOOL_GOAL_UPDATE, TOOL_GOAL_WITH_TASKS, TOOL_TASK_TREE_PATCH, type ApprovalDecision, type ServerAgentState } from '../state'
@@ -62,6 +63,7 @@ export function ProposalCard({ title, args, result, isError, addResult, taskTitl
       {applied || rejected
         ? <details className="agent-proposal-review"><summary>{text(args?.title) || '查看方案详情'}</summary><ProposalSummary args={args} taskTitles={taskTitles}/></details>
         : <ProposalSummary args={args} taskTitles={taskTitles} />}
+      {!applied && !rejected && <RestoreScopeSummary value={response.restore_scope}/>}
       {applied&&<AppliedTodaySummary value={response.today_summary} kind={text(response.kind)}/>}
 
       {rejected && text(response.reason) && (

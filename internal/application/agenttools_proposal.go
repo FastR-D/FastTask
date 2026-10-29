@@ -67,7 +67,7 @@ func (p proposalTool) Execute(ctx context.Context, tc ToolContext, args map[stri
 		Proposal: &ref,
 		Result: map[string]any{
 			"proposal_id": proposal.ID, "status": "pending", "base_revision": proposal.BaseRevision,
-			"summary": ref.Summary, "kind": p.kind, "diff": ref.Diff, "note": "需用户确认后才会落库",
+			"summary": ref.Summary, "kind": p.kind, "diff": ref.Diff, "restore_scope": ref.RestoreScope, "note": "需用户确认后才会落库",
 		},
 	}, nil
 }
@@ -188,6 +188,7 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 			return PendingProposalRef{}, nil, "", patchError(problem)
 		}
 		var current int
+		var restoreScope *RestoreScope
 		// The identity check and implicit base revision must describe the same
 		// tree. Apply keeps its revision guard if the tree changes after staging.
 		if err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
@@ -198,7 +199,12 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 			if err := tx.Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", goalID).Select("COALESCE(MAX(revision),0)").Scan(&current).Error; err != nil {
 				return err
 			}
-			return validateNewPatchSteps(patch, tasks)
+			if err := validateNewPatchSteps(patch, tasks); err != nil {
+				return err
+			}
+			var err error
+			restoreScope, err = previewRestoreScope(patch, tasks)
+			return err
 		}); err != nil {
 			return PendingProposalRef{}, nil, "", err
 		}
@@ -220,7 +226,7 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 		}
 		ref := PendingProposalRef{
 			GoalID: goalID, BaseRevision: base,
-			Diff: patch, Summary: summarizePatch(patch),
+			Diff: patch, Summary: summarizePatch(patch), RestoreScope: restoreScope,
 		}
 		return ref, patch, strings.TrimSpace(stringArg(args, "instruction")), nil
 	}
@@ -539,4 +545,50 @@ func summarizePatch(patch []map[string]any) string {
 		return "任务树变更"
 	}
 	return "任务树提案：" + strings.Join(parts, "、")
+}
+
+// Mirror restoreTaskTx's same-batch subtree selection for the confirmation card.
+func previewRestoreScope(patch []map[string]any, tasks []persistence.Task) (*RestoreScope, error) {
+	byID := map[string]persistence.Task{}
+	children := map[string][]persistence.Task{}
+	for _, task := range tasks {
+		byID[task.ID] = task
+		children[derefString(task.ParentID)] = append(children[derefString(task.ParentID)], task)
+	}
+	scope := &RestoreScope{Tasks: []map[string]string{}}
+	seen := map[string]bool{}
+	for _, op := range patch {
+		if textValue(op["op"]) != "restore" {
+			continue
+		}
+		root, ok := byID[textValue(op["target_id"])]
+		if !ok || root.DeletedAt == nil || root.DeletionID == "" {
+			return nil, patchError("restore requires an existing deleted task; read include_deleted first")
+		}
+		stack := []persistence.Task{root}
+		walked := map[string]bool{}
+		for len(stack) > 0 {
+			task := stack[0]
+			stack = stack[1:]
+			if walked[task.ID] {
+				continue
+			}
+			walked[task.ID] = true
+			stack = append(stack, children[task.ID]...)
+			if task.DeletionID != root.DeletionID || seen[task.ID] {
+				continue
+			}
+			seen[task.ID] = true
+			scope.Count++
+			if len(scope.Tasks) < 50 {
+				scope.Tasks = append(scope.Tasks, map[string]string{"task_id": task.ID, "title": task.Title})
+			} else {
+				scope.Truncated = true
+			}
+		}
+	}
+	if scope.Count == 0 {
+		return nil, nil
+	}
+	return scope, nil
 }
