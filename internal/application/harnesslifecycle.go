@@ -2,12 +2,12 @@ package application
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"time"
 
 	"github.com/FastR-D/FastTask/internal/agent/protocol"
 	"github.com/FastR-D/FastTask/internal/persistence"
+	"gorm.io/gorm"
 )
 
 // Run lifecycle under a harness host (doc/harness.md §5, §6, §11). The host drives the
@@ -75,7 +75,7 @@ func (s *harnessLifecycle) CompleteRun(ctx context.Context, p HarnessPrincipal, 
 	if IsTerminalRunStatus(run.Status) {
 		// A late report after the reaper got there first. The checkpoint is still worth
 		// keeping: it is thread history, not run state.
-		return s.saveCheckpoint(ctx, p, in)
+		return nil
 	}
 	if err := s.saveCheckpoint(ctx, p, in); err != nil {
 		return err
@@ -90,8 +90,13 @@ func (s *harnessLifecycle) CompleteRun(ctx context.Context, p HarnessPrincipal, 
 			message = "the harness reported a failed turn"
 		}
 		return s.finishRun(ctx, run, persistence.RunFailed, code, message, protocol.ReasonError)
-	default:
+	case strings.EqualFold(in.StopReason, "stop"), strings.EqualFold(in.StopReason, "end_turn"):
+		if run.ModelCalls == 0 {
+			return s.finishRun(ctx, run, persistence.RunFailed, "EMPTY_COMPLETION", "no completed model response", protocol.ReasonError)
+		}
 		return s.finishRun(ctx, run, persistence.RunSucceeded, "", "", protocol.ReasonStop)
+	default:
+		return s.finishRun(ctx, run, persistence.RunFailed, "UNKNOWN_STOP_REASON", "unrecognized host stop reason", protocol.ReasonError)
 	}
 }
 
@@ -148,32 +153,48 @@ func (s *harnessLifecycle) PutThreadCheckpoint(ctx context.Context, p HarnessPri
 // error path.
 func (s *harnessLifecycle) finishRun(ctx context.Context, run *persistence.AgentRun, status, code, message, _ string) error {
 	sess, err := s.loadRunSession(ctx, run)
-	switch {
-	case err != nil:
+	if err != nil {
 		return err
-	case sess == nil:
-		if err := s.repo().SetRunStatus(ctx, run.UserID, run.ID, status, code, message); err != nil {
-			return err
-		}
-	case status == persistence.RunSucceeded:
-		if _, err := sess.succeed(); err != nil {
-			return err
-		}
-	case status == persistence.RunCancelled:
-		if _, err := sess.cancelRun(); err != nil {
-			return err
-		}
-	case status == persistence.RunInterrupted:
-		// Interrupted is not failed: the transcript so far stays readable and a pending proposal
-		// stays pending, so the user can pick it up later (§11).
-		if _, err := sess.interruptRun(code, message); err != nil {
-			return err
-		}
-	default:
-		_, _ = sess.failRun(code, errors.New(message))
 	}
-	_, _ = s.repo().RevokeHarnessTokensForRun(ctx, run.ID)
-	return nil
+	return s.svc.store.Transaction(ctx, func(tx *gorm.DB) error {
+		repo := s.repo().WithTx(tx)
+		current, err := repo.GetRun(ctx, run.UserID, run.ID)
+		if err != nil {
+			return err
+		}
+		if IsTerminalRunStatus(current.Status) {
+			return nil
+		}
+		if current.CancelRequested {
+			status = persistence.RunCancelled
+			code = "CANCELLED"
+			message = "cancelled by user"
+		}
+		if sess != nil {
+			svc := *s.svc
+			svc.repo = repo
+			sess.svc = &svc
+			sess.sink.repo = repo
+			terminal := protocol.IncompleteStatus(protocol.ReasonError)
+			if status == persistence.RunSucceeded {
+				terminal = protocol.CompleteStatus(protocol.ReasonStop)
+			}
+			if status == persistence.RunCancelled {
+				terminal = protocol.IncompleteStatus(protocol.ReasonCancelled)
+			}
+			if err := sess.emitSet(protocol.MessageStatusPath(sess.assistantIdx), terminal); err != nil {
+				return err
+			}
+			if err := sess.emitSet(protocol.IsRunningPath(), false); err != nil {
+				return err
+			}
+		}
+		if err := repo.SetRunStatus(ctx, run.UserID, run.ID, status, code, message); err != nil {
+			return err
+		}
+		_, err = repo.RevokeHarnessTokensForRun(ctx, run.ID)
+		return err
+	})
 }
 
 // ReapHarnessRuns is the periodic half of run recovery (§11). It interrupts the runs
@@ -184,6 +205,16 @@ func (s *harnessLifecycle) ReapHarnessRuns(ctx context.Context) (int, error) {
 	stale, err := s.repo().ListStaleHarnessRuns(ctx, now.Add(-HarnessHeartbeatLoss), now.Add(-harnessPickupGrace))
 	if err != nil {
 		return 0, err
+	}
+	var expired []persistence.AgentRun
+	_, approvalLimit := s.svc.approvalWait()
+	if err := s.svc.store.DB.WithContext(ctx).Where("status = ? AND approval_started_at < ?", persistence.RunAwaitingApproval, now.Add(-approvalLimit)).Find(&expired).Error; err != nil {
+		return 0, err
+	}
+	for _, run := range expired {
+		if err := s.finishRun(ctx, &run, persistence.RunFailed, "APPROVAL_TIMEOUT", "approval deadline exceeded", protocol.ReasonError); err != nil {
+			return 0, err
+		}
 	}
 	reaped := 0
 	seen := map[string]bool{}
@@ -254,6 +285,10 @@ func (s *harnessLifecycle) activeRun(ctx context.Context, p HarnessPrincipal) (*
 // wait is subtracted (§7: waiting for a human is not the model's budget).
 func (s *harnessLifecycle) wallClockExceeded(run *persistence.AgentRun, now time.Time) bool {
 	limit := s.runWallClock()
-	elapsed := now.Sub(run.CreatedAt) - time.Duration(run.ApprovalWaitMs)*time.Millisecond
+	started := run.CreatedAt
+	if run.StartedAt != nil {
+		started = *run.StartedAt
+	}
+	elapsed := now.Sub(started) - time.Duration(run.ApprovalWaitMs)*time.Millisecond
 	return elapsed > limit
 }

@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"errors"
+	"github.com/FastR-D/FastTask/internal/agent/protocol"
 	"strings"
 
 	"gorm.io/gorm"
@@ -293,18 +294,36 @@ func (r *AgentRepository) updateRun(ctx context.Context, userID, runID string, f
 
 // SetRunStatus transitions a run's status. A terminal status stamps finished_at.
 func (r *AgentRepository) SetRunStatus(ctx context.Context, userID, runID, status, errorCode, errorMessage string) error {
-	fields := map[string]any{"status": status, "error_code": errorCode, "error_message": errorMessage}
-	switch status {
-	case RunSucceeded, RunFailed, RunCancelled, RunInterrupted:
-		now := Now()
-		fields["finished_at"] = &now
+	fields := map[string]any{"status": status, "error_code": errorCode, "error_message": errorMessage, "updated_at": Now(), "revision": gorm.Expr("revision + 1")}
+	if !containsActiveStatus(status) {
+		fields["finished_at"] = Now()
 	}
-	return r.UpdateRun(ctx, userID, runID, fields)
+	q := r.db(ctx).Model(&AgentRun{}).Where("id = ? AND user_id = ? AND status IN ?", runID, userID, activeRunStatuses)
+	if status == RunSucceeded || status == RunRunning {
+		q = q.Where("cancel_requested = 0 AND status <> ?", RunCancelling)
+	}
+	res := q.Updates(fields)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // SaveRunState persists the retained resume snapshot and checkpoint sequence
 // (doc/agent-impl.md §2.8, §3.1 state_json).
 func (r *AgentRepository) SaveRunState(ctx context.Context, userID, runID, stateJSON string, checkpointSeq int, allowDetached ...bool) error {
+	// Every event already folds its exact state under the write transaction.
+	// A stale request-local session must never roll that snapshot back.
+	var count int64
+	if err := r.db(ctx).Model(&AgentRunChunk{}).Where("run_id = ? AND user_id = ?", runID, userID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
 	return r.updateRun(ctx, userID, runID, map[string]any{"state_json": stateJSON, "checkpoint_seq": checkpointSeq}, len(allowDetached) > 0 && allowDetached[0])
 }
 
@@ -528,15 +547,36 @@ func (r *AgentRepository) UpdatePartApproval(ctx context.Context, userID, partID
 // next sequence number atomically, and returns that sequence. The log is the
 // replay source for resume (doc/agent-impl.md §2.8, §8).
 func (r *AgentRepository) AppendChunk(ctx context.Context, userID, runID, chunkJSON string) (int, error) {
-	seq, err := r.NextChunkSeq(ctx, userID, runID)
-	if err != nil {
-		return 0, err
+	var assigned int
+	write := func(repo *AgentRepository) error {
+		run, err := repo.GetRun(ctx, userID, runID)
+		if err != nil {
+			return err
+		}
+		seq, err := repo.NextChunkSeq(ctx, userID, runID)
+		if err != nil {
+			return err
+		}
+		state, err := protocol.ApplyStateJSON(run.StateJSON, chunkJSON)
+		if err != nil {
+			return err
+		}
+		chunk := AgentRunChunk{RunID: runID, Seq: seq, UserID: userID, ChunkJSON: chunkJSON, CreatedAt: Now()}
+		if err := repo.db(ctx).Create(&chunk).Error; err != nil {
+			return err
+		}
+		if err := repo.db(ctx).Model(&AgentRun{}).Where("id = ? AND user_id = ?", runID, userID).Updates(map[string]any{"state_json": state, "checkpoint_seq": seq + 1}).Error; err != nil {
+			return err
+		}
+		assigned = seq
+		return nil
 	}
-	chunk := AgentRunChunk{RunID: runID, Seq: seq, UserID: userID, ChunkJSON: chunkJSON, CreatedAt: Now()}
-	if err := r.db(ctx).Create(&chunk).Error; err != nil {
-		return 0, err
+	if r.tx != nil {
+		err := write(r)
+		return assigned, err
 	}
-	return seq, nil
+	err := r.store.Transaction(ctx, func(tx *gorm.DB) error { return write(r.WithTx(tx)) })
+	return assigned, err
 }
 
 // NextChunkSeq returns the next chunk sequence for a run (0-based log).

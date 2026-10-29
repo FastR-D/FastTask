@@ -65,7 +65,7 @@ type ModelProxyStream struct {
 var errRunCancelled = errors.New("run cancelled while the model was streaming")
 
 // OpenModelProxy performs one proxied chat completion for a harness run.
-func (s *harnessProxy) OpenModelProxy(ctx context.Context, p HarnessPrincipal, body []byte) (*ModelProxyStream, error) {
+func (s *harnessProxy) openModelProxy(ctx context.Context, p HarnessPrincipal, body []byte) (*ModelProxyStream, error) {
 	run, err := s.lifecycle().activeRun(ctx, p)
 	if err != nil {
 		return nil, s.proxyError(err)
@@ -385,7 +385,14 @@ func (r *proxyReader) Read(p []byte) (int, error) {
 				r.transcript.fail(closeErr)
 				return n, closeErr
 			}
+			if r.transcript.finishRS != "stop" && r.transcript.finishRS != "tool_calls" {
+				r.transcript.fail(errors.New("MODEL_STREAM_INCOMPLETE"))
+				return n, errors.New("MODEL_STREAM_INCOMPLETE")
+			}
 			r.transcript.finish(r.parser)
+			if r.transcript.persistErr != nil {
+				return n, r.transcript.persistErr
+			}
 		} else {
 			r.transcript.fail(err)
 		}
@@ -445,9 +452,10 @@ type harnessTranscript struct {
 	calls     map[int]*pendingToolPart
 	callOrder []int
 
-	done     bool
-	failed   bool
-	finishRS string
+	done       bool
+	failed     bool
+	persistErr error
+	finishRS   string
 }
 
 type pendingToolPart struct {
@@ -646,59 +654,60 @@ func (t *harnessTranscript) finish(parser *agent.StreamParser) {
 		return
 	}
 	t.done = true
-	ctx := t.ctx
-	if t.textID != "" {
-		_ = t.svc.repo().UpdatePartText(ctx, t.run.UserID, t.textID, t.text.String())
-	}
-	if t.reasoningID != "" {
-		_ = t.svc.repo().UpdatePartText(ctx, t.run.UserID, t.reasoningID, t.reasoning.String())
-	}
-	for _, index := range t.callOrder {
-		slot := t.calls[index]
-		if slot == nil || slot.partID == "" {
-			continue
-		}
-		args := slot.args.String()
-		if strings.TrimSpace(args) == "" {
-			args = "{}"
-		}
-		if err := t.svc.repo().UpdatePartArgs(ctx, t.run.UserID, slot.partID, args); err != nil {
-			continue
-		}
-		// Re-emit so the client sees the arguments the model settled on.
-		if part, err := t.svc.repo().GetPart(ctx, t.run.UserID, slot.partID); err == nil {
-			updated := partFromRow(part)
-			if slot.idx < len(t.sess.assistantParts()) {
-				t.sess.state.Messages[t.sess.assistantIdx].Parts[slot.idx] = updated
-			}
-			_ = t.sess.emitSet(protocol.PartPath(t.sess.assistantIdx, slot.idx), updated)
-		}
-	}
-	// finishRS comes only from an actual provider Finish event. Result() also
-	// infers "stop" for an incomplete stream and cannot prove readiness.
-	_ = t.sess.saveState()
-	// One proxied call is one turn of the budget (§6). Counting it here rather than at entry
-	// means a call that never produced a stream does not consume the budget.
-	if _, err := t.svc.repo().CountModelCall(ctx, t.run.UserID, t.run.ID); err == nil {
-		t.run.ModelCalls++
-		// Partial/broken responses are retained as history, never executable.
-		if !t.failed && (t.finishRS == "tool_calls" || t.finishRS == "stop") {
-			for _, index := range t.callOrder {
-				slot := t.calls[index]
-				if slot == nil || slot.partID == "" {
-					continue
-				}
-				args := slot.args.String()
-				if strings.TrimSpace(args) == "" {
-					args = "{}"
-				}
-				if !json.Valid([]byte(args)) {
-					continue
-				}
-				_ = t.svc.repo().FinalizeToolCall(ctx, t.run.UserID, slot.partID, t.run.ModelCalls, args)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.ctx), 3*time.Second)
+	defer cancel()
+	t.persistErr = t.svc.svc.store.Transaction(ctx, func(tx *gorm.DB) error {
+		repo := t.svc.repo().WithTx(tx)
+		if t.textID != "" {
+			if err := repo.UpdatePartText(ctx, t.run.UserID, t.textID, t.text.String()); err != nil {
+				return err
 			}
 		}
-	}
+		if t.reasoningID != "" {
+			if err := repo.UpdatePartText(ctx, t.run.UserID, t.reasoningID, t.reasoning.String()); err != nil {
+				return err
+			}
+		}
+		turn, err := repo.CountModelCall(ctx, t.run.UserID, t.run.ID)
+		if err != nil {
+			return err
+		}
+		for _, index := range t.callOrder {
+			slot := t.calls[index]
+			if slot == nil || slot.partID == "" {
+				continue
+			}
+			args := slot.args.String()
+			if strings.TrimSpace(args) == "" {
+				args = "{}"
+			}
+			if err := repo.UpdatePartArgs(ctx, t.run.UserID, slot.partID, args); err != nil {
+				return err
+			}
+			if !t.failed && (t.finishRS == "tool_calls" || t.finishRS == "stop") && json.Valid([]byte(args)) {
+				if err := repo.FinalizeToolCall(ctx, t.run.UserID, slot.partID, turn, args); err != nil {
+					return err
+				}
+			}
+			part, err := repo.GetPart(ctx, t.run.UserID, slot.partID)
+			if err != nil {
+				return err
+			}
+			op, err := protocol.Set(protocol.PartPath(t.sess.assistantIdx, slot.idx), partFromRow(part))
+			if err != nil {
+				return err
+			}
+			encoded, err := json.Marshal(protocol.UpdateState(op))
+			if err != nil {
+				return err
+			}
+			if _, err := repo.AppendChunk(ctx, t.run.UserID, t.run.ID, string(encoded)); err != nil {
+				return err
+			}
+		}
+		t.run.ModelCalls = turn
+		return nil
+	})
 }
 
 // fail flushes what was written before a stream broke. A partial transcript is kept rather

@@ -366,6 +366,10 @@ func (s *harnessTools) WaitForApproval(ctx context.Context, p HarnessPrincipal, 
 	if err != nil {
 		return ApprovalWait{}, err
 	}
+	message, err := s.repo().GetMessage(ctx, p.UserID, part.MessageID)
+	if err != nil || message.RunID != p.RunID {
+		return ApprovalWait{}, ErrHarnessToken
+	}
 	deadline := s.clock().Add(segment)
 	started := s.clock()
 	for {
@@ -392,7 +396,10 @@ func (s *harnessTools) WaitForApproval(ctx context.Context, p HarnessPrincipal, 
 		now := s.clock()
 		if !now.Before(deadline) {
 			waited := s.recordApprovalWait(ctx, p, started)
-			total := time.Duration(current.ApprovalWaitMs)*time.Millisecond + waited
+			total := waited
+			if current.ApprovalStartedAt != nil {
+				total = s.clock().Sub(*current.ApprovalStartedAt)
+			}
 			if total >= waitLimit {
 				// The user never decided. The run cannot stay parked forever (§7): it fails
 				// with a code the model is not blamed for, and the proposal stays pending so
@@ -478,12 +485,6 @@ func (s *harnessTools) readApprovalDecision(ctx context.Context, p HarnessPrinci
 // wall clock the model proxy enforces does not include time spent waiting for a human (§7).
 // It returns the wait it recorded.
 func (s *harnessTools) recordApprovalWait(ctx context.Context, p HarnessPrincipal, started time.Time) time.Duration {
-	waited := s.clock().Sub(started)
-	if waited <= 0 {
-		return 0
-	}
-	if err := s.repo().AddApprovalWait(ctx, p.UserID, p.RunID, waited); err != nil {
-		return waited
-	}
-	return waited
+	// Waiting belongs to the run state interval, not to overlapping HTTP polls.
+	return 0
 }

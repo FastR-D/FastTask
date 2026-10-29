@@ -323,7 +323,7 @@ func (s *harnessTokens) issueRunGrant(ctx context.Context, userID, runID, toolsE
 	}
 	// A host has arrived: the run is being driven now.
 	if run.Status == persistence.RunQueued {
-		if err := s.repo().SetRunStatus(ctx, userID, run.ID, persistence.RunRunning, "", ""); err != nil {
+		if err := s.repo().UpdateRun(ctx, userID, run.ID, map[string]any{"status": persistence.RunRunning, "started_at": now}); err != nil {
 			return RunGrant{}, err
 		}
 	}

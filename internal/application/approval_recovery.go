@@ -69,7 +69,7 @@ func (s *harnessTools) commitPendingApproval(ctx context.Context, sess *runSessi
 		now := persistence.Now()
 		changed := tx.Model(&persistence.AgentRun{}).
 			Where("id = ? AND user_id = ? AND cancel_requested = ? AND status IN ?", run.ID, run.UserID, false, []string{persistence.RunRunning, persistence.RunAwaitingApproval}).
-			Updates(map[string]any{"status": persistence.RunAwaitingApproval, "revision": gorm.Expr("revision + 1"), "updated_at": now})
+			Updates(map[string]any{"status": persistence.RunAwaitingApproval, "approval_started_at": gorm.Expr("COALESCE(approval_started_at, ?)", now), "revision": gorm.Expr("revision + 1"), "updated_at": now})
 		if changed.Error != nil {
 			return changed.Error
 		}
@@ -179,8 +179,7 @@ func (s *approvalService) setApprovalRunStatus(ctx context.Context, userID, runI
 		if pending > 0 {
 			status = persistence.RunAwaitingApproval
 		}
-		return tx.Model(&run).Where("user_id = ? AND status IN ? AND cancel_requested = ?", userID, []string{persistence.RunRunning, persistence.RunAwaitingApproval}, false).
-			Updates(map[string]any{"status": status, "revision": gorm.Expr("revision + 1"), "updated_at": persistence.Now()}).Error
+		return s.repo.WithTx(tx).SetApprovalStatus(ctx, userID, runID, status, s.svc.harnessLifecycle.clock())
 	})
 	return status, err
 }

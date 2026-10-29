@@ -411,13 +411,18 @@ type AgentRun struct {
 	ApprovalWaitMs int64 `json:"approval_wait_ms,omitempty"`
 	// ModelCalls counts the proxied model calls of a run. The host drives the loop, but the
 	// turn budget stays a server-side limit (doc/harness.md §1.1).
-	ModelCalls   int        `json:"model_calls,omitempty"`
-	ErrorCode    string     `json:"error_code,omitempty"`
-	ErrorMessage string     `json:"error_message,omitempty"`
-	Revision     int        `json:"revision"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	ModelCalls        int        `json:"model_calls,omitempty"`
+	ModelAttempts     int        `json:"model_attempts,omitempty"`
+	ModelInflight     string     `json:"-"`
+	StartedAt         *time.Time `json:"started_at,omitempty"`
+	ApprovalStartedAt *time.Time `json:"approval_started_at,omitempty"`
+	UsageJSON         string     `json:"-"`
+	ErrorCode         string     `json:"error_code,omitempty"`
+	ErrorMessage      string     `json:"error_message,omitempty"`
+	Revision          int        `json:"revision"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	FinishedAt        *time.Time `json:"finished_at,omitempty"`
 }
 
 // AgentHarnessToken is one issued run capability (doc/harness.md §10). Only

@@ -125,6 +125,9 @@ type LoopLimits struct {
 	WallClock       time.Duration // single run wall clock (default 180s)
 	ToolTimeout     time.Duration // single tool execution (default 10s)
 	MaxOutputTokens int           // per-turn output cap; 0 defers to the provider
+	MaxAttempts     int
+	HeaderTimeout   time.Duration
+	IdleTimeout     time.Duration
 }
 
 // DefaultLoopLimits returns the §6 conservative defaults.
