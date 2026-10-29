@@ -55,3 +55,11 @@ browser / sidecar 现在共用 run-driver，统一 heartbeat（等待上一次�
 新增完整代理 SSE → finalized call → 真实 registry 执行 → SQLite result 的服务集成测试。覆盖缺失 / 伪造 ID、工具名 / 参数变化、20 路并发、响应丢失后的原结果重放、claimed unknown、取消 / 旧轮次 / 旧 generation 拒绝，以及 host 跳过工具伪报成功和重复终态。工具结果与对应事件 / snapshot 同事务提交，持久化失败返回明确未确认结果。Provider 非成功 body 仅用于能力分类，客户端错误与终态不再保存任意上游 body；避免截断后只剩半个密钥而脱敏失败。host 错误上报同样使用服务端固定说明。
 
 验证：application / persistence 全量通过；新增真实工具身份 / 完成与错误 body 脱敏测试通过。行为评测 runner 与验收报告单独交付，相关底层回归不能替代真实模型质量验收。
+
+第八批：真实双 host 合约、owner 交接和故障验收。
+
+真实 Chromium 使用 JSPI / libfx WASM 执行工具并保存 checkpoint，同时验证现行 wasm CSP 允许编译、移除 wasm-unsafe-eval 后拒绝编译。测试通过 CDP 注入隔离 bundle / fetch 夹具，不依赖容器 Chromium 的网络直连；Node 合约单独覆盖真实 HTTP。浏览器 grant / checkpoint 的异步边界重新核对 owner 和 access subject，模型 / 工具网络入口也复核；旧 owner 返回不再启动新账号 driver 或覆盖通知。未知 SDK stop reason 不默认当成功，清理移除父 signal listener。
+
+新增 HTTP 的 JWT / capability 双向隔离及 run / thread scope、取消后工具拒绝；多个 pending 提案、detached 审批、审批超时 reaper、取消后保存已提交成果、20 路终态争抢；SQLite trigger 注入结果 / 终态事件失败并验证整体回滚、claim 不释放重做。reaper 不再吞掉数据库写失败。旧版本 21 schema 真实升级到 23、checkpoint 保留与迁移幂等测试通过；新迁移 22 / 23 两份 SQL 字节一致（历史版本 1 的两份文件已有排版差异，本批不改旧迁移）。
+
+前端 52 项测试全部通过，其中真实 Chromium 合约实际运行、无 skip；生产前端与 sidecar 构建通过。底层 race 组与最终完整 Go 回归在最后交付记录再次汇总。用户已授权使用当前 DeepSeek 配置运行完整真实模型评测；具体行为结果另行报告，不能从这些底层回归推定模型质量。

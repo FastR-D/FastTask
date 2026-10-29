@@ -261,11 +261,12 @@ export function useAgentRuntime(
     // it, and nothing else does (doc/harness.md §1.2). The stream keeps rendering from server state
     // while the host works, so the UI needs no change (§13 phase D).
     onResponse: response => {
+      if (options.getUserId && options.getUserId() !== owner.current) return
       const runId = harnessRunOf(response)
       if (!runId || drivenRuns.current.has(runId)) return
       drivenRuns.current.add(runId)
-      void driveRun({ runId, text: lastUserText, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
-        noticeRef.current(`对话驱动失败：${agentErrorText(error)}`)
+      void driveRun({ ownerId: owner.current, getOwner: options.getUserId, runId, text: lastUserText, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
+        if (!options.getUserId || options.getUserId() === owner.current) noticeRef.current(`对话驱动失败：${agentErrorText(error)}`)
       })
     },
     // assistant-ui also invokes onCancel({error}) after a transport failure.
@@ -311,14 +312,15 @@ export function useAgentRuntime(
   // WASM; a wasm request may have fallen back to the sidecar.
   useEffect(() => {
     const maybeDrive = () => {
+      if (options.getUserId && options.getUserId() !== owner.current) return
       if (lastRequestedHarnessMode !== 'wasm') return
       const state = runtime.thread.getState().state as ServerAgentState | undefined
       if (state?.fasttask?.harnessMode !== 'wasm') return
       const runId = state?.fasttask?.runId
       if (!state?.isRunning || !runId || drivenRuns.current.has(runId) || activeRunId() === runId) return
       drivenRuns.current.add(runId)
-      void driveRun({ runId, text: lastUserText, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
-        noticeRef.current(`对话驱动失败：${agentErrorText(error)}`)
+      void driveRun({ ownerId: owner.current, getOwner: options.getUserId, runId, text: lastUserText, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
+        if (!options.getUserId || options.getUserId() === owner.current) noticeRef.current(`对话驱动失败：${agentErrorText(error)}`)
       })
     }
     maybeDrive()

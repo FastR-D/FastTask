@@ -113,9 +113,10 @@ export async function driveSharedRun(deps: SidecarDeps, request: SidecarRunReque
       if (!closed && !controller.signal.aborted) scheduleBeat()
     }, Math.max(1, request.heartbeat_interval_s ?? 10) * 1000)
   }
+  const abortFromParent = () => controller.abort()
   if (deps.signal) {
     if (deps.signal.aborted) controller.abort()
-    else deps.signal.addEventListener('abort', () => controller.abort(), { once: true })
+    else deps.signal.addEventListener('abort', abortFromParent, { once: true })
   }
 
   async function beat(): Promise<void> {
@@ -168,7 +169,7 @@ export async function driveSharedRun(deps: SidecarDeps, request: SidecarRunReque
     const result = await turn.result
     const checkpoint = encodeCheckpoint(await agent.checkpoint().catch(() => undefined))
     return {
-      stop_reason: result.stopReason ?? 'stop',
+      stop_reason: result.stopReason ?? 'unknown',
       usage: result.usage as Record<string, unknown> | undefined,
       checkpoint,
       libfx_version: request.libfx_version,
@@ -185,6 +186,7 @@ export async function driveSharedRun(deps: SidecarDeps, request: SidecarRunReque
     }
   } finally {
     controller.abort()
+    deps.signal?.removeEventListener('abort', abortFromParent)
     closed = true
     clearTimeout(heartbeat)
     try {

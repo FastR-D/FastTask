@@ -217,7 +217,7 @@ func (s *harnessLifecycle) ReapHarnessRuns(ctx context.Context) (int, error) {
 			return 0, err
 		}
 	}
-	reaped := 0
+	reaped := len(expired)
 	seen := map[string]bool{}
 	for _, item := range stale {
 		if seen[item.RunID] {
@@ -226,7 +226,10 @@ func (s *harnessLifecycle) ReapHarnessRuns(ctx context.Context) (int, error) {
 		seen[item.RunID] = true
 		run, err := s.repo().GetRun(ctx, item.UserID, item.RunID)
 		if err != nil {
-			continue
+			if persistence.IsNotFound(err) {
+				continue
+			}
+			return reaped, err
 		}
 		if IsTerminalRunStatus(run.Status) {
 			continue
@@ -238,7 +241,7 @@ func (s *harnessLifecycle) ReapHarnessRuns(ctx context.Context) (int, error) {
 		// interrupted, not failed: the transcript so far stays readable and any pending
 		// proposal stays pending for the user to decide later (§11).
 		if err := s.finishRun(ctx, run, persistence.RunInterrupted, "INTERRUPTED", message, protocol.ReasonError); err != nil {
-			continue
+			return reaped, err
 		}
 		reaped++
 	}
@@ -250,7 +253,7 @@ func (s *harnessLifecycle) ReapHarnessRuns(ctx context.Context) (int, error) {
 	for i := range overdue {
 		run := overdue[i]
 		if err := s.finishRun(ctx, &run, persistence.RunCancelled, "CANCELLED", "cancelled by user", protocol.ReasonCancelled); err != nil {
-			continue
+			return reaped, err
 		}
 		reaped++
 	}

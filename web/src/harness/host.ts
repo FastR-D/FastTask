@@ -1,8 +1,9 @@
 import { createFxAgent, type FxAgent, type FxTurn } from './runtime'
-import { ensureFreshAccessToken, request } from '../api'
+import { ensureFreshAccessToken, request, token, readOfflineUser } from '../api'
 import { absoluteAssetURL, cachedMode, selectMode, WASM_ASSET_PATH, type HarnessMode } from './backend'
 import type { ToolDef } from './tools'
 import { driveSharedRun } from './run-driver'
+import { assertHarnessOwner } from './owner'
 import { requestRunCancellation } from './cancellation'
 
 // The browser harness host (doc/harness.md §3, §5, §6, §7, §10).
@@ -35,6 +36,8 @@ type Listener = (status: HarnessStatus) => void
 /** One driven run. Exactly one may exist at a time (§3.7). */
 type ActiveRun = {
   runId: string
+  ownerId: string
+  getOwner: () => string | undefined
   agent: FxAgent | null
   turn: FxTurn | null
   token: string
@@ -80,6 +83,8 @@ function diagnostics(event: { type: string; [key: string]: unknown }): void {
 }
 
 export type DriveRunOptions = {
+  ownerId?: string
+  getOwner?: () => string | undefined
   runId: string
   /** The user's message text. The server already stored it; the host needs it to prompt (§5.1). */
   text: string
@@ -97,7 +102,12 @@ export type DriveRunOptions = {
  * running in the background is exactly what the instance budget forbids.
  */
 export async function driveRun(options: DriveRunOptions): Promise<void> {
+  const ownerId = options.ownerId ?? readOfflineUser()?.id ?? ''
+  const getOwner = options.getOwner ?? (() => readOfflineUser()?.id)
+  const checkOwner = () => assertHarnessOwner(ownerId, getOwner(), token.get())
+  checkOwner()
   const selection = await selectMode(options.forcedMode ?? null)
+  checkOwner()
   publish({ mode: selection.mode, reason: selection.reason, detail: selection.detail })
   if (selection.mode === 'sidecar') {
     // The Worker drives a sidecar run; the browser only renders the stream (§1.2). Starting an agent
@@ -110,27 +120,33 @@ export async function driveRun(options: DriveRunOptions): Promise<void> {
     return
   }
   await teardownActive('a new run replaced it')
+  checkOwner()
 
   const controller = new AbortController()
   const run: ActiveRun = {
-    runId: options.runId, agent: null, turn: null, token: '',
+    runId: options.runId, ownerId, getOwner, agent: null, turn: null, token: '',
     threadId: '', libfxVersion: '', heartbeat: null, controller,
   }
   active = run
   publish({ running: true, runId: run.runId, error: undefined })
 
   try {
-    const manifest = await readManifest()
-    const grant = await issueGrant(options.runId, manifest.etag)
+    const manifest = await readManifest(ownerId)
+    checkOwner()
+    const grant = await issueGrant(options.runId, manifest.etag, ownerId)
+    checkOwner()
+    controller.signal.throwIfAborted()
     run.token = grant.harness_token
     run.threadId = grant.thread_id
     run.libfxVersion = grant.libfx_version
     publish({ contextDegraded: grant.context_degraded || undefined })
 
     const checkpoint = await readCheckpoint(run)
+    checkOwner()
+    controller.signal.throwIfAborted()
     const report = await driveSharedRun({
       serverOrigin: globalThis.location.origin,
-      createAgent: settings => createFxAgent({ ...settings, wasm: absoluteAssetURL(WASM_ASSET_PATH) }),
+      createAgent: settings => createFxAgent({ ...settings, fetch: (input, init) => { checkOwner(); return settings.fetch(input, init) }, wasm: absoluteAssetURL(WASM_ASSET_PATH) }),
       call: (method, path, token, body, signal) => hostFetch({ ...run, token }, method, path, body, signal),
       signal: controller.signal,
       onToken: token => { run.token = token },
@@ -145,13 +161,17 @@ export async function driveRun(options: DriveRunOptions): Promise<void> {
     await hostFetch(run, 'PUT', `/agent/threads/${encodeURIComponent(run.threadId)}/checkpoint`, {
       ...report, checkpoint: report.checkpoint ?? '',
     })
+    checkOwner()
     if (report.error_message) publish({ error: report.error_message })
     options.onDone?.()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    publish({ error: message })
-    await reportCompletion(run, 'error', message)
-    options.onDone?.(message)
+    if (getOwner() === ownerId) {
+      publish({ error: message })
+      await reportCompletion(run, 'error', message)
+      options.onDone?.(message)
+    }
+    controller.abort()
   } finally {
     await closeRun(run)
   }
@@ -191,7 +211,7 @@ async function closeRun(run: ActiveRun): Promise<void> {
   run.agent = null
   run.turn = null
   if (active === run) active = null
-  publish({ running: active !== null, runId: active?.runId })
+  if (run.getOwner() === run.ownerId) publish({ running: active !== null, runId: active?.runId })
 }
 
 // --- the server surface a host uses ---
@@ -216,9 +236,9 @@ let manifestCache: Manifest | null = null
 
 /** readManifest fetches the tool projection. It is cached per session with its etag, which is what
  *  lets the server detect a manifest that changed mid-flight (§10.3). */
-async function readManifest(): Promise<Manifest> {
+async function readManifest(ownerId: string): Promise<Manifest> {
   if (manifestCache) return manifestCache
-  const { data, etag } = await request<{ tools: ToolDef[] }>('/agent/tools')
+  const { data, etag } = await request<{ tools: ToolDef[] }>('/agent/tools', {}, ownerId)
   manifestCache = { tools: data?.tools ?? [], etag: etag ?? '' }
   return manifestCache
 }
@@ -228,22 +248,22 @@ export function forgetManifest(): void {
   manifestCache = null
 }
 
-async function issueGrant(runId: string, toolsEtag: string): Promise<RunGrant> {
+async function issueGrant(runId: string, toolsEtag: string, ownerId: string): Promise<RunGrant> {
   try {
     const { data } = await request<RunGrant>('/agent/runs', {
       method: 'POST',
       body: JSON.stringify({ run_id: runId, tools_etag: toolsEtag }),
-    })
+    }, ownerId)
     return data
   } catch (error) {
     // The manifest changed under us: refetch it once and ask again (§10.3).
     if (isStaleManifest(error)) {
       forgetManifest()
-      const manifest = await readManifest()
+      const manifest = await readManifest(ownerId)
       const { data } = await request<RunGrant>('/agent/runs', {
         method: 'POST',
         body: JSON.stringify({ run_id: runId, tools_etag: manifest.etag }),
-      })
+      }, ownerId)
       return data
     }
     throw error
@@ -294,6 +314,7 @@ async function reportCompletion(run: ActiveRun, stopReason: string, errorMessage
  *  harness token would be refused on the user endpoints — the two are deliberately not interchangeable
  *  (§10.2). */
 async function hostFetch(run: ActiveRun, method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  assertHarnessOwner(run.ownerId, run.getOwner(), token.get())
   const response = await fetch(`/api/v1${path}`, {
     method,
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(35_000)]) : AbortSignal.timeout(15_000),
