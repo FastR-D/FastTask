@@ -109,6 +109,8 @@ export async function driveSharedRun(deps: SidecarDeps, request: SidecarRunReque
     heartbeat = setTimeout(async () => {
       try { await beat() } catch (error) {
         diagnostics({ type: 'harness.heartbeat_error', error: String(error) })
+        const status = error && typeof error === 'object' && 'status' in error ? Number(error.status) : 0
+        if ([401, 403, 409].includes(status)) controller.abort()
       }
       if (!closed && !controller.signal.aborted) scheduleBeat()
     }, Math.max(1, request.heartbeat_interval_s ?? 10) * 1000)

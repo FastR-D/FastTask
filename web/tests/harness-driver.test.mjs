@@ -23,3 +23,9 @@ test('an already cancelled run never starts an agent',async()=>{
  let created=false;const controller=new AbortController();controller.abort();
  const f=fixture({signal:controller.signal,createAgent:async()=>{created=true;throw new Error('should not start');}});const report=await driveSharedRun(f.deps,request);assert.equal(created,false);assert.equal(report.stop_reason,'cancelled');
 });
+
+test('a revoked capability heartbeat aborts a live host after server cancellation', {timeout:4000},async()=>{
+ let beats=0,closed=0
+ const report=await driveSharedRun({serverOrigin:'http://fixture.invalid',call:async(method,path)=>{if(path.endsWith('/heartbeat')){if(++beats>1)throw Object.assign(new Error('capability revoked'),{status:401});return {}};return {tools:[]}},createAgent:async()=>({prompt(_input,{signal}){let resolve;const result=new Promise(r=>{resolve=r});signal.addEventListener('abort',()=>resolve({stopReason:'cancelled'}),{once:true});return {result,cancel(){},async *[Symbol.asyncIterator](){await result}}},checkpoint:async()=>new Uint8Array(),close:async()=>{closed++}})}, {...request,heartbeat_interval_s:1})
+ assert.equal(report.stop_reason,'cancelled');assert.equal(beats,2);assert.equal(closed,1)
+})

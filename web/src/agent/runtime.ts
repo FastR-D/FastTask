@@ -3,6 +3,7 @@ import { AssistantMessageAccumulator, AssistantTransportDecoder, unstable_create
 import { asAsyncIterableStream, type ReadonlyJSONValue } from 'assistant-stream/utils'
 import { useEffect, useRef } from 'react'
 import { ensureFreshAccessToken, offlineSessionAvailable, readOfflineUser, refreshAccessTokenAfterUnauthorized } from '../api'
+import { stopWithFeedback } from '../harness/cancellation'
 import { activeRunId, cancelActiveRun, driveRun, selectMode } from '../harness'
 import { forcedModeOf, readModePreference } from './modePreference'
 import { convertState } from './converter'
@@ -274,10 +275,9 @@ export function useAgentRuntime(
     // explicit stop (without an error) requests cancellation on the server.
     onCancel: ({ error }) => {
       if (error) return
+      if (options.getUserId && options.getUserId() !== owner.current) return
       const state = runtime.thread.getState().state as ServerAgentState | undefined
-      void cancelActiveRun(state?.fasttask?.runId).catch(error => {
-        noticeRef.current(`停止请求未送达：${agentErrorText(error)}`)
-      })
+      void stopWithFeedback(() => cancelActiveRun(state?.fasttask?.runId, owner.current), message => noticeRef.current(message), agentErrorText)
     },
     onError: async (error, { commands }) => {
       const unsent = commands.find(command => command.type === 'add-message')

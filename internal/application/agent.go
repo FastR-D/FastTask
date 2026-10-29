@@ -809,7 +809,7 @@ func (s *AgentService) runPromptText(ctx context.Context, run *persistence.Agent
 	if strings.TrimSpace(text) == "" {
 		for _, part := range parts {
 			if part.Type == "image" {
-				return "请分析本条消息中的图片。", nil
+				return imageOnlyPrompt, nil
 			}
 		}
 	}

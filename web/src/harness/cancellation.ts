@@ -11,3 +11,13 @@ export async function requestRunCancellation(
     abortLocal()
   }
 }
+
+/** Shared stop-button feedback. Delivery failure stays visible and retryable. */
+export async function stopWithFeedback(
+  stop: () => Promise<void>,
+  notify: (message: string) => void,
+  format: (error: unknown) => string = error => error instanceof Error ? error.message : String(error),
+): Promise<boolean> {
+  try { await stop(); return true }
+  catch (error) { notify(`停止请求未送达：${format(error)}`); return false }
+}

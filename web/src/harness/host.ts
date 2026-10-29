@@ -179,11 +179,11 @@ export async function driveRun(options: DriveRunOptions): Promise<void> {
 
 /** cancelActiveRun is the user's stop button: it tells the server first — cancelling is the user's
  *  power, and a host may not cancel its own run (§5.2, §10.2) — then breaks the turn. */
-export async function cancelActiveRun(runId = active?.runId): Promise<void> {
+export async function cancelActiveRun(runId = active?.runId, ownerId?: string): Promise<void> {
   const run = active?.runId === runId ? active : null
   await requestRunCancellation(runId, id => request(`/agent/runs/${encodeURIComponent(id)}/cancellation`, {
     method: 'POST', body: JSON.stringify({}),
-  }), () => {
+  }, ownerId ?? run?.ownerId ?? readOfflineUser()?.id), () => {
     run?.turn?.cancel()
     run?.controller.abort()
   })
@@ -210,8 +210,10 @@ async function closeRun(run: ActiveRun): Promise<void> {
   }
   run.agent = null
   run.turn = null
-  if (active === run) active = null
+  const ownedActive = active === run
+  if (ownedActive) active = null
   if (run.getOwner() === run.ownerId) publish({ running: active !== null, runId: active?.runId })
+  else if (ownedActive) publish({ mode: 'idle', running: false, runId: undefined, reason: undefined, detail: undefined, error: undefined, contextDegraded: undefined })
 }
 
 // --- the server surface a host uses ---
@@ -326,7 +328,7 @@ async function hostFetch(run: ActiveRun, method: string, path: string, body?: un
   })
   if (!response.ok) {
     const problem = await response.json().catch(() => ({})) as { detail?: string; title?: string }
-    throw new Error(problem.detail || problem.title || `${method} ${path} failed with ${response.status}`)
+    throw Object.assign(new Error(problem.detail || problem.title || `${method} ${path} failed with ${response.status}`), { status: response.status })
   }
   if (response.status === 204) return {}
   return (await response.json()) as Record<string, unknown>

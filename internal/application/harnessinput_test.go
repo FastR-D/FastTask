@@ -42,6 +42,9 @@ func TestHarnessCanonicalImageInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !bytes.Contains(payload, []byte(imageOnlyPrompt)) {
+		t.Fatal("image-only canonical prompt missing")
+	}
 	if bytes.Contains(payload, []byte("stale text")) || !bytes.Contains(payload, []byte("data:image/png;base64,")) {
 		t.Fatalf("canonical image missing or stale input retained: %s", payload)
 	}

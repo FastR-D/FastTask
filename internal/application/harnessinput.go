@@ -3,9 +3,12 @@ package application
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/FastR-D/FastTask/internal/persistence"
 )
+
+const imageOnlyPrompt = "请分析本条消息中的图片。"
 
 // canonicalInput binds the current model input to the stored user message. Images
 // are expanded only here, never in host checkpoints or the persisted transcript.
@@ -15,11 +18,14 @@ func (s *harnessProxy) canonicalInput(ctx context.Context, run *persistence.Agen
 		return err
 	}
 	content := make([]any, 0, len(parts))
+	hasText, hasImage := false, false
 	for _, part := range parts {
 		switch part.Type {
 		case "text":
+			hasText = hasText || strings.TrimSpace(part.Text) != ""
 			content = append(content, map[string]any{"type": "text", "text": part.Text})
 		case "image":
+			hasImage = true
 			id, ok := AttachmentIDFromRef(part.Text)
 			if !ok {
 				return errors.New("invalid attachment reference")
@@ -34,6 +40,9 @@ func (s *harnessProxy) canonicalInput(ctx context.Context, run *persistence.Agen
 			}
 			content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{"url": uri}})
 		}
+	}
+	if hasImage && !hasText {
+		content = append([]any{map[string]any{"type": "text", "text": imageOnlyPrompt}}, content...)
 	}
 	if len(content) == 0 {
 		return errors.New("run has no canonical user input")

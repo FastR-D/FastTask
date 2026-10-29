@@ -134,6 +134,7 @@ export function createSidecarServer(options: SidecarServerOptions) {
         } catch { /* retain the known HTTP status when its body cannot be read */ }
         const error = new Error(String(parsed.detail ?? parsed.title ?? `${method} ${path} failed with ${response.status}`))
         error.name = 'HTTPError'
+        Object.assign(error, { status: response.status })
         throw error
       }
       const text = await response.text()
