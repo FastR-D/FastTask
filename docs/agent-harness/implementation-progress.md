@@ -95,3 +95,11 @@ browser / sidecar 现在共用 run-driver，统一 heartbeat（等待上一次�
 恢复提案使用与 restoreTaskTx 相同的同批子树规则生成服务端预览，确认卡片显示准确项数及任务名称（至多展示 50 项，截断明确标注），其他批次保持原样。用户无需只依赖模型关于子树范围的措辞。新增同批 / 独立旧批次 / 重复 root 去重测试及真实 Chromium 组件呈现检查。纯图片提示进一步要求先描述可见内容，不为识图读取目标 / 计划，也不估算没有标示的角度、像素或增幅。
 
 验证：完整 Go、前端生产构建、55 项前端测试通过；Worker 正常、合法 token 轮换、新 generation fencing、未知 stop reason 和取消状态五种路径通过；相关组三轮 race 通过。服务端恢复范围的真实浏览器呈现通过。
+
+第十三批：真实评测交付与最终 QA 记录。
+
+交付可复跑的 regression / live runner、隔离 SQLite 的实际应用服务 fixture、真实 Node / WASM host、fail-closed 结果 verifier、仅恢复无效评审的工具及其测试。真实浏览器 owner 交接与停止反馈回归一并纳入。DeepSeek 配置确认为 api.deepseek.com / deepseek-flash，没有 Provider 数据库覆盖。
+
+首轮 37/60 通过，保留失败；完整复跑和修复后定向复测汇总的最新每例三次为 60/60，评分 3 分 48 次、2 分 12 次，硬不变量违反 0 次。其中真实模型任务 57 次，取消故障试验 3 次。来源及证据 SHA256 在 evaluation-results.json，不能解释成首次或单次 60 项全通过。E06 明确 60 分钟调整请求，E13 种子语义消歧，旧报告保留。无效评审仅在原证据上恢复，不重抽有效低分。
+
+最终 Go、harness / SQLite race 三轮、55 项前端测试（真实 Chromium 无 skip）、生产前端和 sidecar 构建通过。完整 86 项设计和 QA01–QA18 的所有人工 / 版本 / 网络组合尚未逐项签收；verification-report.md 明确覆盖范围及剩余人工条件，未伪造通过记录。

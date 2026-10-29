@@ -1,0 +1,653 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-30",
+  "provider": "DeepSeek",
+  "host": "api.deepseek.com",
+  "model": "deepseek-flash",
+  "aggregation": "Latest three trials per case, selected from full run and targeted reruns after fixes; not one clean 60-trial run. Original failures retained in private artifacts.",
+  "passed": 60,
+  "failed": 0,
+  "hard_invariant_violations": 0,
+  "subject_real_model_trials": 57,
+  "cancellation_fault_trials": 3,
+  "quality_histogram": {
+    "3": 48,
+    "2": 12
+  },
+  "initial_full_run": {
+    "passed": 37,
+    "failed": 23
+  },
+  "sources": [
+    {
+      "label": "full",
+      "private_directory": "fasttask-agent-deepseek-final",
+      "report_sha256": "4ca111eb0fc396e3977c61a6aac6aaa10f3433127c77ea7907d1b0386ec0e88e",
+      "trials": 60,
+      "failed": 9
+    },
+    {
+      "label": "conflict_rejection",
+      "private_directory": "fasttask-agent-deepseek-retry",
+      "report_sha256": "246626e2cc9d49697e64071c1ddea3a2e6581d4ecac64bc1b4124fa7f9aeac92",
+      "trials": 6,
+      "failed": 0
+    },
+    {
+      "label": "final_targeted",
+      "private_directory": "fasttask-agent-deepseek-verified",
+      "report_sha256": "e913857e6ac07db8384d87cb175613812b225edd8e9e35b90ddd5c576095c484",
+      "trials": 18,
+      "failed": 0
+    }
+  ],
+  "cases": [
+    {
+      "case": "E01",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "10eadc990bd2b51e2db56859ca997eeac637f90a8126cd9197704f7b16668730",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E01",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "4974d6317ac100aeb17cfdfeb59e5d4ae22178a4d1bc690f9e6d73fbab5f8105",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E01",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "b595f8523232812372801ffa810e1da36fc17db8730c1df0ae04d9ebaaa5b614",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E02",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 2,
+      "source": "full",
+      "evidence_sha256": "cd77911ae77bbc7081a20b3a08d3048e70ff202d0c0ec99a9963d5a9b56e61ce",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E02",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "bbbad36e3bd73245eba28707a2bfb4f7f2590cf5fe83b74f6892d33ee6089ccf",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E02",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "7e8256312fe16291add65c884f469b678160ad183d2d755a0ab203c8db371603",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E03",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 2,
+      "source": "conflict_rejection",
+      "evidence_sha256": "db0a2e3354aed32e28d4519b3544fbe3a13b847f86c04a77e3b9a6c9f22c868e",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E03",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 2,
+      "source": "conflict_rejection",
+      "evidence_sha256": "2c8f6500ac7c7a434bdee178a167f22c308fa5e1bd794912fce09ed1f794f7f8",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E03",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 2,
+      "source": "conflict_rejection",
+      "evidence_sha256": "70fdce905ddc241d986454543511218213ffd6400669b006489dff420d50ce12",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E04",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "69940f4231ef38773db6ce089843d63a5c2a268a20c6c6afdd4fdb6adb82457f",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E04",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "06bc9b4228543cb4ed837e3b1aa9ad8db1bc41992288b2af5f291e8ebd481dbd",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E04",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "30dbc6ac526d7ef921a484cf2b00a9a3aa78f1749defc5a5c61329afd7d2a499",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E05",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "4c57ce2a823c49af9b313903603c6981700aea3d77ef3462dc72984cb5b5846e",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E05",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "f6c44323856463a4113389130691ded6cbe49916ca795ad84a634ec6c45184ca",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E05",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "4354c0aa1e11855ba00b36883be27345fe5e2e464ac8ea35dad924d627a91972",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E06",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "conflict_rejection",
+      "evidence_sha256": "07f3f2ec3d5b3fcffc59dac5ec98b513bb0ea46b9e562cd3c9740b206b6c228e",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E06",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "conflict_rejection",
+      "evidence_sha256": "6a6af95b6793f0bc2b68f9fd6d5cf9ab9fdb88fe01763dd9b54e0fe2e64ef440",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E06",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "conflict_rejection",
+      "evidence_sha256": "abce57912abcb78928daa75640eac873910dd6d6b099bce0507a4dafb79d2bc0",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E07",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "fffb84080d573e0e6ae7fd8e9056c731412313286d6eec476990ebd0f363e1b9",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E07",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "8c5cbef3ad0433ab20eae3499bba37d16ffe83fe42b65f6c38e33373af87df48",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E07",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "77da375bb990918b09dfe6e2f0b7f4c8255a619775cf91a46d2fe75828bdb7b1",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E08",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "60524bbf9148ea8b876f64c609e605dfea7763c1671735cd3375f64cab2a9a61",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E08",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 2,
+      "source": "full",
+      "evidence_sha256": "01bbc72a8fc46f134108188964db9292b2546fb91ca9d397ee690dfea5b15b54",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": true
+    },
+    {
+      "case": "E08",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "78c35d8e43c156cff89b8ea76550401158ef6261e5c0622c282b1397b0bb1b40",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E09",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "cb34e6f449238240d3c68feb595e3a88d214429e26ece6861371ef96b3aec179",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E09",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "5bce1077401e0e74af38e4218003bd3b92594b6be818ef4f89917ae68f74957f",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E09",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "15473d80e3709e478815dbb050e8471b3006d320db32e696fed0a9fef7be6e1c",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E10",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "f1182ecae9818d24b055a9bcfffbfe718695d1bf1e55a79d39160f8989fb7696",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E10",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 2,
+      "source": "full",
+      "evidence_sha256": "ceecabc48d7315c476c9ddbcd28876607a3c87f72d7aa556ab84076f221fee9f",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E10",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "0b76fb64b6f8e1bfc3333c892375922214a4ae021d5472839be7dc34a8344e2b",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E11",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "b80d9bfa1a5b55c5bb384c8008ea062ea7c48947674f550912a0ba7228bf8ae1",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E11",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "f88cd1ff5cb44486c66dbf0d833ebba2b3139b3cf8215ff3c367da3fcdad5606",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E11",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "9da3994ed1311890113312161c7f1df60c9ec618ae6e6330ac38bc96fa7cb73d",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E12",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "b0cbd5073492483f0cba07c42f553d9e7d2f47ca510ab21f9fce907660000743",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E12",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "fb373eed6d8738db59c9a9231baaba7676242ad30a746d139bd9b6437b3ed172",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E12",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "dcdce1ae18c38c22cc11704f0a45dd4f2899749549c794437a46d1b0055fef47",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E13",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "58fe559d6709e2b4fac894cfae391f6e9699a38b0a46857c90534717b44f8466",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": true
+    },
+    {
+      "case": "E13",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "7990fc9de7c3ed9899a6be34d3230ae56f9d760e3ee6e73b6e16df1a2085eadc",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": true
+    },
+    {
+      "case": "E13",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "4002d3ba2e4b84eb314c045437695c8a07edb2df039bdaf5adf2fbc088634932",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": true
+    },
+    {
+      "case": "E14",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "d9b677221774968a72d78ed93dfa93ac6d2599fcffdb615a8f996c2b472a325b",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E14",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "47b94b90cec2b6b29e4045ef04fd2b30e0bbae9ceb2db6afb5fe1c86151ca19f",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E14",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "95dcd62320c24fbdb98ccef31337f5866ace90f03ea44bdeec6d1100aef33770",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E15",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 2,
+      "source": "final_targeted",
+      "evidence_sha256": "98adc33f78122434c6233aa4a8a4e1523e59e32ae34b766db4db464a871138eb",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E15",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 2,
+      "source": "final_targeted",
+      "evidence_sha256": "2ab1d0a857341620394d00518d7e5399f4ca9363745b9b984bb745c1cd4ae468",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E15",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "e897ea0303d7755c1198ff1d4e2008bd2bd29cd6831d7b07554f3866a4544b63",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E16",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "362810c7cea3583f29e55c6954b9e7e3ad3d0e7c24709e98055b7b993fd9561d",
+      "reviewer": "deterministic_fault_contract",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E16",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "d5d94615802cac28a0e5023b6646fd8dda7dda6b0e1cd24f797bbebee2a0e45b",
+      "reviewer": "deterministic_fault_contract",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E16",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "e8bd5286ac9cc8c88541b409e50dd4751f0d95e560ef2f8caef927e0d637faaf",
+      "reviewer": "deterministic_fault_contract",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E17",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "d58f02414fde09b5c241cff93c9c7e847bb0828f93a75f3d3ce1032966da358b",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E17",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 2,
+      "source": "full",
+      "evidence_sha256": "e49455bebe34d9ec74bc4992c47bf6b6f931a2817cc0e6b778fc36f888c7a0c6",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E17",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "full",
+      "evidence_sha256": "583d608257e67e47611f70643657e3ecc6c7902948e64b8f941c3b0eb085a3f7",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E18",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 2,
+      "source": "final_targeted",
+      "evidence_sha256": "e31aa22cec8fe7b2e96b593da44e13b1d0d032123ce264dd3b9a5a19e5948498",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": true
+    },
+    {
+      "case": "E18",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 2,
+      "source": "final_targeted",
+      "evidence_sha256": "12580ba6da2b103ff1bc9ce5fe47f25fb74e8e05c6dd354750f57198149668fd",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E18",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "486c7aff97a2f723d951156cf6416251aa0ca5f494673e876717ed6a8aac483e",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E19",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "d4bd4e39429a22bdc9af05bb4a4177af18c3980f8f9e1fe6019aec5096411807",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E19",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "e999b24171ee3f0bb956c18deef0cefefbd4a404e0b90fe9969efaf9ca4ab75f",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E19",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 2,
+      "source": "final_targeted",
+      "evidence_sha256": "e530cbb29b60bb0c0b6bf89599acf604bd2848c7abd02348772298aa4cc78c13",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E20",
+      "trial": 1,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "8cea275187f930694b6c2466d95f011487bcb31491a4b4e5857f356349d0011b",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E20",
+      "trial": 2,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "b1d8e6746d4b0281f86a1f28747facd9dc931710144f248d4f25110a0b09f30b",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    },
+    {
+      "case": "E20",
+      "trial": 3,
+      "passed": true,
+      "quality_score": 3,
+      "source": "final_targeted",
+      "evidence_sha256": "1f1c16389ee89adbdf95a78c88a772e6a5af411649c868605b88dc6fb6f27183",
+      "reviewer": "deepseek-independent-review",
+      "invalid_grader_recovered": false
+    }
+  ],
+  "limitations": [
+    "Full QA01-QA18 React UI / browser / version / deployment matrix not executed.",
+    "CDP fetch bridge does not validate native browser networking.",
+    "E06 clarified to explicit 60-minute adjustment request; E13 seed disambiguated.",
+    "E16 graded by deterministic cancellation contract, not ordinary model-answer quality.",
+    "Programmatic state facts and actual browser assertions override model guesses about those facts; valid low scores are never resampled."
+  ]
+}

@@ -103,6 +103,10 @@ CGO_ENABLED=1 go build -trimpath -o bin/fasttask ./cmd/fasttask
 | `FASTTASK_FASTRESEARCH_SSO_SECRET` | 与 FastResearch `FASTRESEARCH_FASTTASK_SSO_SECRET` 相同的共享密钥，至少 32 字符 |
 | `FASTTASK_FASTRESEARCH_INGEST_KEY` | FastResearch 服务端读取当日任务的共享密钥；需与 FastResearch 的 `FASTTASK_API_KEY` 一致 |
 | `FASTTASK_FASTRESEARCH_LOOPBACK_HTTP` | 生产环境允许回环地址使用明文 HTTP；仅本机开发 |
+| `FASTTASK_AGENT_MAX_TURNS` / `FASTTASK_AGENT_MAX_ATTEMPTS` | `8` / `10`；流响应轮次与包含失败建连的总尝试分别计数 |
+| `FASTTASK_AGENT_MAX_OUTPUT_TOKENS` / `FASTTASK_AGENT_CONTEXT_BYTES` | `4096` / `131072`；上游输出 cap 与历史文本字节预算 |
+| `FASTTASK_AGENT_WALL_CLOCK_MS` | `180000`；人工审批等待区间不计入主动预算 |
+| `FASTTASK_AGENT_HEADER_TIMEOUT_MS` / `FASTTASK_AGENT_IDLE_TIMEOUT_MS` | `30000` / `30000`；响应头与流空闲上限 |
 | `FASTTASK_NOTIFICATION_ENABLED` | 默认 `true`；通道和接收端由后台配置 |
 
 管理员也可在“后台 → 模型管理”配置默认 OpenAI-compatible Provider。服务端保存加密凭据，浏览器和 sidecar 通过 FastTask 代理调用模型，不接收模型 API Key。
@@ -214,7 +218,7 @@ Content-Type: application/json
 
 撤销调用上表的 `/reopenings` 接口，提交 `{"summary":"纠正误标记"}`，并使用最新条目 ETag。一次新命令使用新幂等键；结果未知的重试沿用原键和原请求内容。计时完成还需引用有效 `work_session_ids`。若明确联合确认整项任务，提交 `complete_task:true` 和当前 `task_if_match`；撤销今日推进仍保留独立的整项任务成果。
 
-今日任务支持“删除今日任务”后任选一至三项删除，包括已完成、进行中和已跳过项。只移除当天的安排，目标任务、专注和推进证据保留；当天不自动补回被删除的位置，需要时明确点击“重新安排今天”。接口为 `POST /api/v1/daily-plans/{plan_id}/item-deletions`，使用计划 `If-Match`、`Idempotency-Key`，请求体为 `{"items":[{"id":"条目ID","if_match":"条目ETag"}]}`。批量操作在同一事务完成；任一条目过期时整体拒绝。数据库自动迁移至版本 21。
+今日任务支持“删除今日任务”后任选一至三项删除，包括已完成、进行中和已跳过项。只移除当天的安排，目标任务、专注和推进证据保留；当天不自动补回被删除的位置，需要时明确点击“重新安排今天”。接口为 `POST /api/v1/daily-plans/{plan_id}/item-deletions`，使用计划 `If-Match`、`Idempotency-Key`，请求体为 `{"items":[{"id":"条目ID","if_match":"条目ETag"}]}`。批量操作在同一事务完成；任一条目过期时整体拒绝。数据库自动迁移至版本 23。
 
 Windows 笔记本的蓝牙墨水屏入口为“工牌更新”，使用控制台图标，自动读取当前登录用户的当日任务和状态，不在此页标记完成。既有 HTTP 设备接口使用独立 `X-Device-Token`，可通过设备 API 管理；Panel HTTP 接口使用用户认证，或代表相应用户且带 `panel:summary:read` / `panel:tasks:read` 范围的服务令牌。设备和 Panel 的只读权限不授予完成或撤销权限；需要写入时使用用户接口和用户授权。
 

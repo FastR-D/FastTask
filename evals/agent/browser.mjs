@@ -1,0 +1,26 @@
+import { spawn } from 'node:child_process'
+import { mkdtemp,readFile,rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { build } from '../../web/node_modules/vite/dist/node/index.js'
+let raw='';for await(const b of process.stdin)raw+=b
+const input=JSON.parse(raw),root=fileURLToPath(new URL('../../',import.meta.url)),work=await mkdtemp(path.join(tmpdir(),'fasttask-live-browser-'))
+let browser,ws;const pending=new Map(),requests=new Map()
+try{
+ await build({configFile:false,root,define:{'process.env.NODE_ENV':'"production"'},logLevel:'silent',build:{outDir:path.join(work,'dist'),minify:false,lib:{entry:path.join(root,'evals/agent/browser-entry.ts'),formats:['iife'],name:'AgentEval',fileName:()=> 'eval.js'}}})
+ const js=await readFile(path.join(work,'dist/eval.js'),'utf8'),wasm=await readFile(path.join(root,'web/node_modules/libfx/fx-core.wasm'))
+ browser=spawn(process.env.CHROME_BIN??'/usr/bin/chromium',['--headless','--no-sandbox','--disable-gpu','--disable-background-networking','--disable-extensions','--disable-dev-shm-usage','--remote-debugging-port=0',`--user-data-dir=${path.join(work,'profile')}`,'about:blank'],{stdio:['ignore','ignore','pipe']})
+ const endpoint=await new Promise((resolve,reject)=>{let log='';const timer=setTimeout(()=>reject(new Error('browser startup timed out')),10000);browser.stderr.on('data',b=>{log=(log+b).slice(-16000);const m=log.match(/DevTools listening on (ws:\/\/\S+)/);if(m){clearTimeout(timer);resolve(m[1])}});browser.once('error',reject)})
+ const origin=new URL(endpoint).origin.replace('ws:','http:');const targets=await(await fetch(origin+'/json/list')).json();const page=targets.find(t=>t.type==='page')
+ ws=new WebSocket(page.webSocketDebuggerUrl);await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true})})
+ let seq=0
+ const command=(method,params={},timeout=240000)=>new Promise((resolve,reject)=>{const id=++seq;const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`${method} timed out`))},timeout);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}))})
+ const evaluate=async expression=>{const reply=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(reply.exceptionDetails)throw new Error(reply.exceptionDetails.exception?.description??'browser evaluation failed');return reply.result?.value}
+ ws.addEventListener('message',event=>{const msg=JSON.parse(event.data);if(msg.id&&pending.has(msg.id)){const job=pending.get(msg.id);pending.delete(msg.id);clearTimeout(job.timer);msg.error?job.reject(new Error(JSON.stringify(msg.error))):job.resolve(msg.result)}
+  if(msg.method==='Runtime.bindingCalled')void(async()=>{const job=JSON.parse(msg.params.payload);if(job.abort){requests.get(job.id)?.abort();return}const controller=new AbortController();requests.set(job.id,controller);let result;try{const response=await fetch(job.url,{method:job.method,headers:job.headers,body:job.body??undefined,signal:controller.signal});result={status:response.status,headers:Object.fromEntries(response.headers),body:await response.text()}}catch(error){result={error:String(error)}}finally{requests.delete(job.id)}await evaluate(`globalThis.fixtureResolve(${job.id},${JSON.stringify(result)})`)})().catch(error=>process.stderr.write(String(error)+'\n'))
+ })
+ await command('Runtime.enable');await command('Runtime.addBinding',{name:'fixtureFetchBridge'})
+ await evaluate(`globalThis.fixtureInput=${JSON.stringify(input)};globalThis.fixtureWasm=Uint8Array.from(atob(${JSON.stringify(wasm.toString('base64'))}),c=>c.charCodeAt(0));globalThis.fixtureJobs=new Map();globalThis.fixtureSequence=0;globalThis.fixtureResolve=(id,data)=>{const job=globalThis.fixtureJobs.get(id);if(!job)return;globalThis.fixtureJobs.delete(id);data.error?job.reject(new Error(data.error)):job.resolve(new Response(data.body,{status:data.status,headers:data.headers}));};globalThis.fetch=async(input,options)=>{const request=new Request(input,options);if(request.url.endsWith('/fx-core.wasm'))return new Response(globalThis.fixtureWasm,{headers:{'Content-Type':'application/wasm'}});const body=['GET','HEAD'].includes(request.method)?undefined:await request.text();return new Promise((resolve,reject)=>{const id=++globalThis.fixtureSequence;globalThis.fixtureJobs.set(id,{resolve,reject});request.signal.addEventListener('abort',()=>{globalThis.fixtureFetchBridge(JSON.stringify({id,abort:true}));reject(new Error('aborted'));},{once:true});globalThis.fixtureFetchBridge(JSON.stringify({id,url:request.url,method:request.method,headers:Object.fromEntries(request.headers),body}));});};true`)
+ await evaluate(js+'\n;true');const result=await evaluate('globalThis.fixtureRun');process.stdout.write(JSON.stringify(result))
+}finally{for(const request of requests.values())request.abort();for(const job of pending.values())clearTimeout(job.timer);ws?.close();if(browser){browser.kill('SIGTERM');await new Promise(resolve=>{if(browser.exitCode!==null)resolve();else{const timer=setTimeout(()=>{browser.kill('SIGKILL');resolve()},2000);browser.once('exit',()=>{clearTimeout(timer);resolve()})}})}await rm(work,{recursive:true,force:true,maxRetries:5})}

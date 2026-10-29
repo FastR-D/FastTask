@@ -1,0 +1,69 @@
+{
+  "E01": [
+    "TestHarnessApprovalReceipts"
+  ],
+  "E02": [
+    "TestPlanningContextPagesAndObservedProposalBasis",
+    "TestHarnessApprovalReceipts"
+  ],
+  "E03": [
+    "TestPlanningContextPagesAndObservedProposalBasis",
+    "TestHarnessApprovalReceipts"
+  ],
+  "E04": [
+    "TestHarnessApprovalReceipts"
+  ],
+  "E05": [
+    "TestDeletePlanItemsPreservesEvidenceAndDoesNotRefill"
+  ],
+  "E06": [
+    "TestHarnessApprovalReceipts"
+  ],
+  "E07": [
+    "TestDeletePlanItemsValidatesEntireBatchAtomically"
+  ],
+  "E08": [
+    "TestHarnessApprovalReceipts"
+  ],
+  "E09": [
+    "TestWorkspaceNavigationUsesPublishedPortalAndKeepsCustomSites"
+  ],
+  "E10": [
+    "TestDeletePlanItemsPreservesEvidenceAndDoesNotRefill"
+  ],
+  "E11": [
+    "TestWorkspaceNavigationUsesPublishedPortalAndKeepsCustomSites"
+  ],
+  "E12": [
+    "TestContextBudgetRetainsConstraintsAndSignalsTruncation"
+  ],
+  "E13": [
+    "TestPlanningContextPagesAndObservedProposalBasis"
+  ],
+  "E14": [
+    "TestCanonicalContextSurvivesStaleCheckpointAndLateDecisions",
+    "TestHarnessApprovalReceipts"
+  ],
+  "E15": [
+    "TestCanonicalContextSurvivesStaleCheckpointAndLateDecisions"
+  ],
+  "E16": [
+    "TestHarnessCancellationWithoutProviderBytes",
+    "TestHarnessDeadlines"
+  ],
+  "E17": [
+    "TestHarnessVerifiedToolIdentityAndReplay",
+    "TestHarnessUnknownClaimAndCancelledClaim"
+  ],
+  "E18": [
+    "TestHarnessCanonicalTextAndOutputCap",
+    "TestHarnessGrantRaceAndStalePrincipal"
+  ],
+  "E19": [
+    "TestHarnessCanonicalImageInput"
+  ],
+  "E20": [
+    "TestContextBudgetRetainsConstraintsAndSignalsTruncation",
+    "TestPlanningContextPagesAndObservedProposalBasis"
+  ]
+}
