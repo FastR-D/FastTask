@@ -49,3 +49,9 @@ browser / sidecar 现在共用 run-driver，统一 heartbeat（等待上一次�
 并发 grant 的撤销 / 创建同事务，旧 principal 在模型 attempt 与工具 claim 时再次校验。轮换令牌的后继值使用 AES-GCM 加密保存，30 秒同 generation 宽限可重取相同后继令牌，解决轮换响应丢失；新 grant 仍立即封禁旧 generation。审批在业务写事务内再次检查取消与 pending 状态，业务写入与最小 applied 回执同事务；详细卡片字段随后补充。拒绝及结果状态合并写入，重复回执不能把已批准结果改为冲突。模型完成必须有服务端确认的最终 stop，不能只凭 host 声明或某次已完成工具调用判成功。工具完成后的结果清理使用独立限时 context。
 
 验证：完整 Go 回归通过；新增并发 20 次 grant、旧 principal、轮换响应丢失 / grace 到期 / 新 generation 封禁、approve / reject / revision conflict / cancel / cross-user、两 service 重复审批及回执失败回滚业务测试。真实浏览器合约单独交付并记录容器网络适配方式。
+
+第七批：工具身份回归、结果事务和错误脱敏。
+
+新增完整代理 SSE → finalized call → 真实 registry 执行 → SQLite result 的服务集成测试。覆盖缺失 / 伪造 ID、工具名 / 参数变化、20 路并发、响应丢失后的原结果重放、claimed unknown、取消 / 旧轮次 / 旧 generation 拒绝，以及 host 跳过工具伪报成功和重复终态。工具结果与对应事件 / snapshot 同事务提交，持久化失败返回明确未确认结果。Provider 非成功 body 仅用于能力分类，客户端错误与终态不再保存任意上游 body；避免截断后只剩半个密钥而脱敏失败。host 错误上报同样使用服务端固定说明。
+
+验证：application / persistence 全量通过；新增真实工具身份 / 完成与错误 body 脱敏测试通过。行为评测 runner 与验收报告单独交付，相关底层回归不能替代真实模型质量验收。

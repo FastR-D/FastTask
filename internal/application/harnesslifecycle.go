@@ -89,10 +89,7 @@ func (s *harnessLifecycle) CompleteRun(ctx context.Context, p HarnessPrincipal, 
 		return s.finishRun(ctx, run, persistence.RunCancelled, "CANCELLED", "cancelled by user", protocol.ReasonCancelled)
 	case strings.EqualFold(in.StopReason, "error"):
 		code := "PROVIDER_ERROR"
-		message := in.ErrorMessage
-		if message == "" {
-			message = "the harness reported a failed turn"
-		}
+		message := "the harness reported a failed turn"
 		return s.finishRun(ctx, run, persistence.RunFailed, code, message, protocol.ReasonError)
 	case strings.EqualFold(in.StopReason, "stop"), strings.EqualFold(in.StopReason, "end_turn"):
 		if run.ModelCalls == 0 || run.ModelVerifiedStop != "stop" || run.ModelInflight != "" {

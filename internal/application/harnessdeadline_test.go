@@ -191,3 +191,19 @@ func TestHarnessBatchesTextAndPersistsProviderUsage(t *testing.T) {
 		t.Fatal("batching lost text")
 	}
 }
+
+func TestHarnessProviderErrorDoesNotLeakBody(t *testing.T) {
+	svc, p := providerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		io.WriteString(w, "fixture-private-key Bearer fixture-cap data:image/png;base64,c2VjcmV0 private-model")
+	}, LoopLimits{})
+	_, err := svc.OpenModelProxy(context.Background(), p, []byte(`{}`))
+	if err == nil {
+		t.Fatal("provider rejection accepted")
+	}
+	for _, secret := range []string{"fixture-private-key", "fixture-cap", "c2VjcmV0", "private-model"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("provider body leaked %q", secret)
+		}
+	}
+}

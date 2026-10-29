@@ -10,6 +10,7 @@ import (
 
 	"github.com/FastR-D/FastTask/internal/agent/protocol"
 	"github.com/FastR-D/FastTask/internal/persistence"
+	"gorm.io/gorm"
 )
 
 // The host-facing tool surface (doc/harness.md §5, §7).
@@ -294,11 +295,28 @@ func (s *harnessTools) recordToolResult(ctx context.Context, sess *runSession, p
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
 	resultJSON, isError := resultPayload(result)
-	if err := s.repo().UpdatePartResult(ctx, part.UserID, part.ID, resultJSON, isError); err != nil {
-		return HarnessToolOutcome{Status: "error", IsError: true, Error: "failed to record the tool result"}
-	}
 	part.ResultJSON, part.IsError = resultJSON, isError
-	s.emitPartResult(sess, part, result, "")
+	updated := partFromRow(part)
+	op, err := protocol.Set(protocol.PartPath(sess.assistantIdx, part.Idx), updated)
+	if err != nil {
+		return identityFailure("failed to encode the tool result")
+	}
+	chunk, err := json.Marshal(protocol.UpdateState(op))
+	if err != nil {
+		return identityFailure("failed to encode the tool result")
+	}
+	err = s.svc.store.Transaction(ctx, func(tx *gorm.DB) error {
+		repo := s.repo().WithTx(tx)
+		if err := repo.UpdatePartResult(ctx, part.UserID, part.ID, resultJSON, isError); err != nil {
+			return err
+		}
+		_, err := repo.AppendChunk(ctx, part.UserID, sess.run.ID, string(chunk))
+		return err
+	})
+	if err != nil {
+		return identityFailure("failed to record the tool result; execution remains claimed and must be reconciled")
+	}
+	s.syncPartIntoState(sess, part)
 	if isError {
 		message := strings.TrimSpace(result.Text)
 		if message == "" {

@@ -118,8 +118,9 @@ func (s *harnessProxy) openModelProxy(ctx context.Context, p HarnessPrincipal, b
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		defer response.Body.Close()
 		raw, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
-		detail := s.sanitize(agent.Truncate(string(raw), 300), creds)
-		if agent.LooksLikeNoToolSupport(response.StatusCode, detail) {
+		detail := fmt.Sprintf("model provider rejected request (HTTP %d)", response.StatusCode)
+		if agent.LooksLikeNoToolSupport(response.StatusCode, string(raw)) {
+			detail = "the selected model does not support tools"
 			// Permanent: a model that cannot take tools can never run this agent, and
 			// degrading to a single-turn reply would mislead the user (§5.1.1).
 			_ = s.lifecycle().finishRun(ctx, run, persistence.RunFailed, "PROVIDER_NO_TOOL_SUPPORT", detail, protocol.ReasonError)
