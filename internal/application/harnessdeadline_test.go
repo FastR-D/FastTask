@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -157,5 +158,36 @@ func TestHarnessIncompleteStreamNeverFinalizesTool(t *testing.T) {
 		if err == nil {
 			t.Fatal("incomplete stream accepted")
 		}
+	}
+}
+
+func TestHarnessBatchesTextAndPersistsProviderUsage(t *testing.T) {
+	svc, p := providerHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"字\"}}]}\n\n")
+		for i := 1; i < 1000; i++ {
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"字\"}}]}\n\n")
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":1000,\"total_tokens\":1020,\"private\":\"must-not-store\"}}\n\ndata: [DONE]\n\n")
+	}, LoopLimits{})
+	stream, err := svc.OpenModelProxy(context.Background(), p, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = io.Copy(io.Discard, stream.Body); err != nil {
+		t.Fatal(err)
+	}
+	stream.Body.Close()
+	run, _ := svc.repo.GetRun(context.Background(), p.UserID, p.RunID)
+	if !strings.Contains(run.UsageJSON, "prompt_tokens") || strings.Contains(run.UsageJSON, "must-not-store") {
+		t.Fatalf("invalid usage: %s", run.UsageJSON)
+	}
+	count, err := svc.repo.CountChunks(context.Background(), p.UserID, p.RunID)
+	if err != nil || count > 100 {
+		t.Fatalf("deltas not batched: %d %v", count, err)
+	}
+	messages, _ := svc.repo.ListThreadMessages(context.Background(), p.UserID, p.ThreadID)
+	parts, _ := svc.repo.ListMessageParts(context.Background(), p.UserID, messages[len(messages)-1].ID)
+	if len(parts) != 1 || len([]rune(parts[0].Text)) != 1000 {
+		t.Fatal("batching lost text")
 	}
 }

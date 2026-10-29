@@ -194,6 +194,15 @@ func (p *StreamParser) line(ctx context.Context, raw string) error {
 		return nil
 	}
 	p.sawData = true
+	if chunk.Usage != nil {
+		if sink, ok := p.sink.(interface {
+			Usage(context.Context, map[string]any) error
+		}); ok {
+			if err := sink.Usage(ctx, chunk.Usage); err != nil {
+				return err
+			}
+		}
+	}
 	for _, choice := range chunk.Choices {
 		if choice.Delta.ReasoningContent != "" {
 			p.reasoning.WriteString(choice.Delta.ReasoningContent)
@@ -297,6 +306,7 @@ func ParseChatStream(ctx context.Context, body io.Reader, sink StreamSink) (Chat
 // streamChunk mirrors the OpenAI streaming choice/delta shape, including the
 // reasoning_content extension qwen providers use (doc/chat-features.md §3.1).
 type streamChunk struct {
+	Usage   map[string]any `json:"usage"`
 	Choices []struct {
 		Index int `json:"index"`
 		Delta struct {

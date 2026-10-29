@@ -1,10 +1,8 @@
-import { createFxAgent, type FxAgent, type FxTurn, type FxTurnEvent } from './runtime'
+import { createFxAgent, type FxAgent, type FxTurn } from './runtime'
 import { ensureFreshAccessToken, request } from '../api'
 import { absoluteAssetURL, cachedMode, selectMode, WASM_ASSET_PATH, type HarnessMode } from './backend'
-import { createGatewayFetch } from './shim'
-import { buildHostTools, type ToolCallResult, type ToolDef } from './tools'
-import { ToolCallBindings } from './tool-identity'
-import { retryToolNetworkRequest } from './tool-request'
+import type { ToolDef } from './tools'
+import { driveSharedRun } from './run-driver'
 import { requestRunCancellation } from './cancellation'
 
 // The browser harness host (doc/harness.md §3, §5, §6, §7, §10).
@@ -130,44 +128,24 @@ export async function driveRun(options: DriveRunOptions): Promise<void> {
     publish({ contextDegraded: grant.context_degraded || undefined })
 
     const checkpoint = await readCheckpoint(run)
-    const interval = Math.max(1, grant.heartbeat_interval_s || 10) * 1000
-    // Beat once immediately, then on the interval the server asked for. The first beat is what tells
-    // the server a host really arrived, so the loss detector's window starts from a known point
-    // (§10.4) — and it is where a cancellation of an already-doomed run surfaces soonest (§5.2).
-    void beat(run).catch(() => undefined)
-    run.heartbeat = setInterval(() => { void beat(run).catch(() => undefined) }, interval)
-
-    const bindings = new ToolCallBindings()
-    run.agent = await createFxAgent({
-      apiKey: grant.harness_token,
-      model: grant.model,
-      wasm: absoluteAssetURL(WASM_ASSET_PATH),
-      fetch: createGatewayFetch({
-        bindings,
-        runId: options.runId,
-        harnessToken: () => run.token,
-        model: grant.model,
-        onEvent: diagnostics,
-      }),
-      instructions: grant.instructions,
-      tools: buildHostTools(manifest.tools, (name, input, signal, toolCallId) => callTool(run, name, input, signal, toolCallId), {
-        bindings,
-        onWarn: message => diagnostics({ type: 'harness.warning', message }),
-      }),
-      ...(checkpoint ? { checkpoint } : {}),
+    const report = await driveSharedRun({
+      serverOrigin: globalThis.location.origin,
+      createAgent: settings => createFxAgent({ ...settings, wasm: absoluteAssetURL(WASM_ASSET_PATH) }),
+      call: (method, path, token, body, signal) => hostFetch({ ...run, token }, method, path, body, signal),
+      signal: controller.signal,
+      onToken: token => { run.token = token },
       onEvent: diagnostics,
+    }, {
+      run_id: run.runId, thread_id: run.threadId, harness_token: run.token,
+      prompt: grant.prompt ?? options.text,
+      model: grant.model, instructions: grant.instructions,
+      libfx_version: grant.libfx_version, heartbeat_interval_s: grant.heartbeat_interval_s,
+      checkpoint: checkpoint ? bytesToBase64(checkpoint) : undefined,
     })
-
-    const turn = run.agent.prompt(promptBlocks(grant.prompt ?? options.text), { signal: controller.signal })
-    run.turn = turn
-    // A turn has exactly one consumer and it must consume (§3.6); the events drive nothing but
-    // diagnostics and cancellation, because the UI renders from the server's stream.
-    for await (const event of turn as AsyncIterable<FxTurnEvent>) {
-      if (event.type === 'tool_start') diagnostics({ type: 'harness.tool_start', name: event.name })
-      if (controller.signal.aborted) break
-    }
-    const result = await turn.result
-    await reportCompletion(run, result.stopReason)
+    await hostFetch(run, 'PUT', `/agent/threads/${encodeURIComponent(run.threadId)}/checkpoint`, {
+      ...report, checkpoint: report.checkpoint ?? '',
+    })
+    if (report.error_message) publish({ error: report.error_message })
     options.onDone?.()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -177,12 +155,6 @@ export async function driveRun(options: DriveRunOptions): Promise<void> {
   } finally {
     await closeRun(run)
   }
-}
-
-/** promptBlocks carries the text, and any attachment the composer collected as a resource URI so the
- *  server can expand it after an ownership check (doc/chat-features.md §4.4). */
-function promptBlocks(text: string): string {
-  return text
 }
 
 /** cancelActiveRun is the user's stop button: it tells the server first — cancelling is the user's
@@ -318,72 +290,13 @@ async function reportCompletion(run: ActiveRun, stopReason: string, errorMessage
   }
 }
 
-/** beat is the liveness channel. It also carries a cancellation to an idle host and hands back a
- *  rotated token (§5.2 channel 1, §10.4). */
-async function beat(run: ActiveRun): Promise<void> {
-  const body = await hostFetch(run, 'POST', `/agent/runs/${encodeURIComponent(run.runId)}/heartbeat`, {})
-  if (typeof body.harness_token === 'string' && body.harness_token) run.token = body.harness_token
-  if (body.cancel_requested === true) {
-    run.turn?.cancel()
-    run.controller.abort()
-  }
-}
-
-/** callTool executes one tool through the server's surface, waiting out an approval inline so the same
- *  turn continues (§5, §7). */
-async function callTool(run: ActiveRun, name: string, input: unknown, signal: AbortSignal, toolCallId: string): Promise<ToolCallResult> {
-  let outcome
-  try {
-    outcome = await retryToolNetworkRequest(() => hostFetch(run, 'POST', `/agent/runs/${encodeURIComponent(run.runId)}/tools/${encodeURIComponent(name)}`, {
-      tool_call_id: toolCallId,
-      input,
-    }), signal)
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) }
-  }
-  if (outcome.status === 'pending' && typeof outcome.proposal_id === 'string') {
-    return waitForDecision(run, outcome.proposal_id, signal)
-  }
-  if (outcome.status === 'error' || outcome.is_error === true) {
-    return { ok: false, message: String(outcome.error ?? 'the tool reported an error') }
-  }
-  return { ok: true, value: outcome.result ?? { status: 'ok' } }
-}
-
-/** waitForDecision holds the tool call open while the user decides. Each segment is at most 30 seconds,
- *  so an intermediate proxy cannot cut the wait, and the total is capped by the server (§7). */
-async function waitForDecision(run: ActiveRun, proposalId: string, signal: AbortSignal): Promise<ToolCallResult> {
-  for (;;) {
-    if (signal.aborted) return { ok: false, message: 'cancelled' }
-    let wait
-    try {
-      wait = await hostFetch(run, 'GET', `/agent/runs/${encodeURIComponent(run.runId)}/approvals/${encodeURIComponent(proposalId)}`)
-    } catch (error) {
-      return { ok: false, message: error instanceof Error ? error.message : String(error) }
-    }
-    switch (wait.status) {
-      case 'pending':
-        continue
-      case 'approved':
-      case 'rejected':
-        return { ok: true, value: wait.result ?? { decision: wait.status } }
-      case 'conflict':
-      case 'timeout':
-        return { ok: false, message: JSON.stringify(wait.result ?? { error: wait.status }) }
-      case 'cancelled':
-        return { ok: false, message: 'cancelled' }
-      default:
-        return { ok: false, message: `the run ended (${String(wait.status)}) before the decision arrived` }
-    }
-  }
-}
-
 /** hostFetch calls an endpoint with the run capability token. A user JWT would be refused here, and a
  *  harness token would be refused on the user endpoints — the two are deliberately not interchangeable
  *  (§10.2). */
-async function hostFetch(run: ActiveRun, method: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
+async function hostFetch(run: ActiveRun, method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const response = await fetch(`/api/v1${path}`, {
     method,
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(35_000)]) : AbortSignal.timeout(15_000),
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${run.token}`,

@@ -37,3 +37,9 @@
 系统提示改为按需读取，网页入口不再建议先读全部业务；不声称默认存在未注册材料工具。历史上下文有明确文本字节预算，长工具结果带截断标识和关键版本 / 审批字段；用户约束与审批事实保留，超出不可安全裁剪范围时明确失败，不悄悄丢约束。图像传输 bytes 与文本预算分开计算。
 
 验证：application / httpapi 回归通过；新增分页单一表示、规划快照、未观察 / 已观察 / 显式零版本及约束保留 / 截断标记测试通过。此实现采用确定性裁剪与重读，没有引入额外摘要模型调用。
+
+第五批：共用 driver、网络取消、配置和观测。
+
+browser / sidecar 现在共用 run-driver，统一 heartbeat（等待上一次结束后再排下一次）、manifest、工具执行、审批长轮询、turn 消费、checkpoint 采集及 agent.close；各 adapter 负责最后的服务端完成信号。普通 / 审批网络操作有明确 deadline 并传 signal，cleanup 请求独立于主 signal。新增环境预算配置，reasoning 使用兼容 SDK 实际采用的 reasoning_effort，provider-default 不发送参数。供应商 usage 按 attempt 保存白名单计数，未知保留 known=false，host report 不重复累计。小文本 delta 合并后提交，最终 flush 保留收到的文本。
+
+验证：完整 `go test ./...` 通过；前端 49 项通过；生产前端与 sidecar 构建通过。新增真实 libfx/node + 真实 shim 的工具身份执行、事件消费、checkpoint 保存 / 恢复合约通过（非 fake createAgent）；共用 driver 的输入、token 更新、usage、失败和已取消启动测试通过。1000 个文本 delta 的最终文本 / usage 正确且持久化事件低于 100 条。真实 WASM 浏览器与完整验收矩阵继续执行。

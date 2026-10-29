@@ -49,6 +49,13 @@ type Config struct {
 	// (doc/chat-features.md §3.4). Off means the proxy drops reasoning deltas instead of
 	// persisting or streaming them.
 	AgentReasoningPersist bool
+	AgentMaxTurns         int
+	AgentMaxAttempts      int
+	AgentMaxOutputTokens  int
+	AgentContextBytes     int
+	AgentWallClock        time.Duration
+	AgentHeaderTimeout    time.Duration
+	AgentIdleTimeout      time.Duration
 
 	// Sidecar configures the optional Node host (doc/harness.md §8.4). It is off by
 	// default: the sidecar is a fallback for browsers without JSPI, not a dependency.
@@ -118,6 +125,17 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	limits := map[string]int{}
+	for name, fallback := range map[string]int{"FASTTASK_AGENT_MAX_TURNS": 8, "FASTTASK_AGENT_MAX_ATTEMPTS": 10, "FASTTASK_AGENT_MAX_OUTPUT_TOKENS": 4096, "FASTTASK_AGENT_CONTEXT_BYTES": 131072, "FASTTASK_AGENT_WALL_CLOCK_MS": 180000, "FASTTASK_AGENT_HEADER_TIMEOUT_MS": 30000, "FASTTASK_AGENT_IDLE_TIMEOUT_MS": 30000} {
+		value, err := envInt(name, fallback)
+		if err != nil {
+			return Config{}, err
+		}
+		if value <= 0 {
+			return Config{}, fmt.Errorf("%s must be positive", name)
+		}
+		limits[name] = value
+	}
 	c := Config{
 		Listen:                env("FASTTASK_LISTEN", "127.0.0.1"),
 		Port:                  port,
@@ -147,6 +165,8 @@ func Load() (Config, error) {
 
 		AgentReasoning:        env("FASTTASK_AGENT_REASONING", "provider-default"),
 		AgentReasoningPersist: envBool("FASTTASK_AGENT_REASONING_PERSIST", true),
+		AgentMaxTurns:         limits["FASTTASK_AGENT_MAX_TURNS"], AgentMaxAttempts: limits["FASTTASK_AGENT_MAX_ATTEMPTS"], AgentMaxOutputTokens: limits["FASTTASK_AGENT_MAX_OUTPUT_TOKENS"], AgentContextBytes: limits["FASTTASK_AGENT_CONTEXT_BYTES"],
+		AgentWallClock: time.Duration(limits["FASTTASK_AGENT_WALL_CLOCK_MS"]) * time.Millisecond, AgentHeaderTimeout: time.Duration(limits["FASTTASK_AGENT_HEADER_TIMEOUT_MS"]) * time.Millisecond, AgentIdleTimeout: time.Duration(limits["FASTTASK_AGENT_IDLE_TIMEOUT_MS"]) * time.Millisecond,
 
 		SidecarEnabled:           envBool("FASTTASK_SIDECAR_ENABLED", false),
 		SidecarPreferred:         envBool("FASTTASK_SIDECAR_PREFERRED", false),

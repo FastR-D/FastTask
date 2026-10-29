@@ -107,7 +107,7 @@ export type SidecarServerOptions = {
   createAgent: SidecarAgentFactory
   nativeAddon: boolean
   /** Injected in tests so a fake call function can stand in for the FastTask API. */
-  call?: (method: string, path: string, token: string, body?: unknown) => Promise<Json>
+  call?: (method: string, path: string, token: string, body?: unknown, signal?: AbortSignal) => Promise<Json>
   onEvent?: (event: { type: string; [key: string]: unknown }) => void
 }
 
@@ -117,9 +117,10 @@ export function createSidecarServer(options: SidecarServerOptions) {
   const running = new Map<string, AbortController>()
 
   const call = options.call ??
-    (async (method: string, path: string, token: string, body?: unknown): Promise<Json> => {
+    (async (method: string, path: string, token: string, body?: unknown, signal?: AbortSignal): Promise<Json> => {
       const response = await fetch(`${options.config.serverOrigin.replace(/\/+$/, '')}/api/v1${path}`, {
         method,
+        signal,
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       })

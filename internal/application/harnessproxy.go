@@ -221,10 +221,17 @@ func (s *harnessProxy) rewriteRequest(ctx context.Context, body []byte, creds *M
 	payload["tools"] = agent.WireTools(s.svc.tools.Definitions(ToolReadonly, ToolProposal, ToolWrite))
 	payload["tool_choice"] = "auto"
 
-	// 3. The reasoning level is the host's choice but must stay inside the enum
-	//    (doc/chat-features.md §3.2).
-	if raw, ok := payload["reasoning"]; ok {
-		payload["reasoning"] = normalizeReasoningLevel(fmt.Sprint(raw))
+	// OpenAI-compatible providers consume reasoning_effort, not a string
+	// reasoning object. provider-default means omit the option entirely.
+	level := s.svc.reasoningLevel
+	if raw, ok := payload["reasoning_effort"]; ok {
+		level = normalizeReasoningLevel(fmt.Sprint(raw))
+	}
+	delete(payload, "reasoning")
+	if level == "" || level == "provider-default" {
+		delete(payload, "reasoning_effort")
+	} else {
+		payload["reasoning_effort"] = level
 	}
 
 	encoded, err := json.Marshal(payload)
@@ -440,9 +447,12 @@ type harnessTranscript struct {
 	sess *runSession
 	run  *persistence.AgentRun
 
-	textID  string
-	textIdx int
-	text    strings.Builder
+	pendingText      strings.Builder
+	pendingReasoning strings.Builder
+	lastFlush        time.Time
+	textID           string
+	textIdx          int
+	text             strings.Builder
 
 	reasoningID  string
 	reasoningIdx int
@@ -454,6 +464,7 @@ type harnessTranscript struct {
 
 	done       bool
 	failed     bool
+	usage      map[string]any
 	persistErr error
 	finishRS   string
 }
@@ -487,12 +498,11 @@ func (t *harnessTranscript) TextDelta(ctx context.Context, delta string) error {
 		t.textID, t.textIdx = part.ID, idx
 	}
 	t.text.WriteString(delta)
-	t.sess.state.Messages[t.sess.assistantIdx].Parts[t.textIdx].Text += delta
-	op, err := protocol.AppendText(protocol.PartTextPath(t.sess.assistantIdx, t.textIdx), delta)
-	if err != nil {
-		return err
+	t.pendingText.WriteString(delta)
+	if t.pendingText.Len()+t.pendingReasoning.Len() >= 1024 || time.Since(t.lastFlush) >= 30*time.Millisecond {
+		return t.flushDeltas(ctx)
 	}
-	return t.sess.sink.Emit(ctx, protocol.UpdateState(op))
+	return nil
 }
 
 // ReasoningDelta streams a chain of thought into a reasoning part. When persistence is off the
@@ -511,13 +521,41 @@ func (t *harnessTranscript) ReasoningDelta(ctx context.Context, delta string) er
 		t.reasoningID, t.reasoningIdx = part.ID, idx
 	}
 	t.reasoning.WriteString(delta)
-	part := &t.sess.state.Messages[t.sess.assistantIdx].Parts[t.reasoningIdx]
-	part.Text += delta
-	op, err := protocol.AppendText(protocol.PartTextPath(t.sess.assistantIdx, t.reasoningIdx), delta)
-	if err != nil {
+	t.pendingReasoning.WriteString(delta)
+	if t.pendingText.Len()+t.pendingReasoning.Len() >= 1024 || time.Since(t.lastFlush) >= 30*time.Millisecond {
+		return t.flushDeltas(ctx)
+	}
+	return nil
+}
+
+// flushDeltas combines small deltas into a bounded event batch. The final flush
+// uses an independent context so request cancellation does not discard received text.
+func (t *harnessTranscript) flushDeltas(ctx context.Context) error {
+	if t.pendingText.Len() == 0 && t.pendingReasoning.Len() == 0 {
+		return nil
+	}
+	var ops []protocol.Operation
+	if t.pendingText.Len() > 0 {
+		op, err := protocol.AppendText(protocol.PartTextPath(t.sess.assistantIdx, t.textIdx), t.pendingText.String())
+		if err != nil {
+			return err
+		}
+		ops = append(ops, op)
+	}
+	if t.pendingReasoning.Len() > 0 {
+		op, err := protocol.AppendText(protocol.PartTextPath(t.sess.assistantIdx, t.reasoningIdx), t.pendingReasoning.String())
+		if err != nil {
+			return err
+		}
+		ops = append(ops, op)
+	}
+	if err := t.sess.sink.Emit(ctx, protocol.UpdateState(ops...)); err != nil {
 		return err
 	}
-	return t.sess.sink.Emit(ctx, protocol.UpdateState(op))
+	t.pendingText.Reset()
+	t.pendingReasoning.Reset()
+	t.lastFlush = time.Now()
+	return nil
 }
 
 // reasoningPartID names a chain-of-thought part.
@@ -535,6 +573,9 @@ func (t *harnessTranscript) reasoningPartID(seq int) string {
 // named, with empty arguments, because the host may reach the tool endpoint before this stream
 // ends and the result has to land on an existing row (§4.4.1).
 func (t *harnessTranscript) ToolCallDelta(ctx context.Context, delta agent.ToolCallDelta) error {
+	if err := t.flushDeltas(ctx); err != nil {
+		return err
+	}
 	slot := t.calls[delta.Index]
 	if slot == nil {
 		slot = &pendingToolPart{}
@@ -562,6 +603,17 @@ func (t *harnessTranscript) ToolCallDelta(ctx context.Context, delta agent.ToolC
 		slot.partID, slot.idx = part.ID, idx
 		if slot.id == "" {
 			slot.id = part.ID
+		}
+	}
+	return nil
+}
+
+// Usage accepts only documented non-negative token counters from the provider.
+func (t *harnessTranscript) Usage(_ context.Context, raw map[string]any) error {
+	t.usage = map[string]any{}
+	for _, key := range []string{"prompt_tokens", "completion_tokens", "total_tokens"} {
+		if value, ok := raw[key].(float64); ok && value >= 0 && value <= 1e10 {
+			t.usage[key] = value
 		}
 	}
 	return nil
@@ -656,6 +708,10 @@ func (t *harnessTranscript) finish(parser *agent.StreamParser) {
 	t.done = true
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.ctx), 3*time.Second)
 	defer cancel()
+	if err := t.flushDeltas(ctx); err != nil {
+		t.persistErr = err
+		return
+	}
 	t.persistErr = t.svc.svc.store.Transaction(ctx, func(tx *gorm.DB) error {
 		repo := t.svc.repo().WithTx(tx)
 		if t.textID != "" {
@@ -667,6 +723,28 @@ func (t *harnessTranscript) finish(parser *agent.StreamParser) {
 			if err := repo.UpdatePartText(ctx, t.run.UserID, t.reasoningID, t.reasoning.String()); err != nil {
 				return err
 			}
+		}
+		current, err := repo.GetRun(ctx, t.run.UserID, t.run.ID)
+		if err != nil {
+			return err
+		}
+		ledger := map[string]any{}
+		if current.UsageJSON != "" {
+			if err := json.Unmarshal([]byte(current.UsageJSON), &ledger); err != nil {
+				return err
+			}
+		}
+		key := t.run.ModelInflight
+		if key == "" {
+			key = fmt.Sprintf("stream_%d", t.run.ModelCalls+1)
+		}
+		ledger[key] = map[string]any{"known": t.usage != nil, "source": "provider", "usage": t.usage}
+		usageJSON, err := json.Marshal(ledger)
+		if err != nil {
+			return err
+		}
+		if err := repo.UpdateRun(ctx, t.run.UserID, t.run.ID, map[string]any{"usage_json": string(usageJSON)}); err != nil {
+			return err
 		}
 		turn, err := repo.CountModelCall(ctx, t.run.UserID, t.run.ID)
 		if err != nil {

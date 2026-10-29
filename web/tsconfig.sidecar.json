@@ -20,6 +20,7 @@
   "include": [
     "../sidecar/src/**/*.ts",
     "src/harness/sidecar-driver.ts",
+    "src/harness/run-driver.ts",
     "src/harness/shim.ts",
     "src/harness/tools.ts",
     "src/harness/tool-identity.ts",

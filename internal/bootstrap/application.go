@@ -64,6 +64,9 @@ func NewAgentService(app *application.App, cfg config.Config, sidecar *SidecarSu
 		application.WithReasoningPersistence(cfg.AgentReasoningPersist),
 		application.WithAttachmentDir(cfg.AttachmentDir),
 	}
+	if cfg.AgentMaxTurns > 0 {
+		options = append(options, application.WithLoopLimits(application.LoopLimits{MaxTurns: cfg.AgentMaxTurns, MaxAttempts: cfg.AgentMaxAttempts, MaxOutputTokens: cfg.AgentMaxOutputTokens, ContextBytes: cfg.AgentContextBytes, WallClock: cfg.AgentWallClock, HeaderTimeout: cfg.AgentHeaderTimeout, IdleTimeout: cfg.AgentIdleTimeout}))
+	}
 	// A sidecar that is not configured leaves the driver nil, and SubmitCommands then refuses sidecar mode
 	// with HARNESS_UNAVAILABLE instead of queueing a job nobody will run (§1.2).
 	if driver := sidecar.Driver(); driver != nil {
