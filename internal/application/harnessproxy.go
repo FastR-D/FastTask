@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -210,11 +211,16 @@ func (s *harnessProxy) rewriteRequest(ctx context.Context, body []byte, creds *M
 	// 2. System prompt and tools are the server's, not the host's (§4.3, agent-impl.md §6). Images are
 	//    expanded here rather than in the host, so every one of them passes an ownership check
 	//    (doc/chat-features.md §4.4).
-	messages, err := s.modelContext(ctx, run, instructions)
+	upstreamURL, _ := url.Parse(creds.BaseURL)
+	deepSeek := upstreamURL != nil && (upstreamURL.Hostname() == "api.deepseek.com" || strings.HasPrefix(strings.ToLower(creds.Model), "deepseek-"))
+	messages, err := s.modelContext(ctx, run, instructions, deepSeek)
 	if err != nil {
 		return nil, &ProxyError{Code: "INPUT_UNAVAILABLE", Status: http.StatusUnprocessableEntity, Detail: err.Error()}
 	}
 	payload["messages"] = messages
+	if deepSeek && (!s.svc.reasoningPersisted || s.svc.reasoningLevel == "none") {
+		payload["thinking"] = map[string]any{"type": "disabled"}
+	}
 	if cap := s.svc.limits.MaxOutputTokens; cap > 0 {
 		delete(payload, "max_completion_tokens")
 		payload["max_tokens"] = cap

@@ -74,13 +74,16 @@ func boundModelContext(messages []any, budget int) ([]any, error) {
 		}
 		end := i + 1
 		protected := false
-		if _, ok := m["tool_calls"]; ok {
-			if end >= len(messages) || messages[end].(map[string]any)["role"] != "tool" {
-				return nil, fmt.Errorf("unpaired tool history")
+		if calls, ok := m["tool_calls"].([]any); ok {
+			expected := len(calls)
+			for count := 0; count < expected; count++ {
+				if end >= len(messages) || messages[end].(map[string]any)["role"] != "tool" {
+					return nil, fmt.Errorf("unpaired tool history")
+				}
+				text, _ := messages[end].(map[string]any)["content"].(string)
+				protected = protected || strings.Contains(text, "applied") || strings.Contains(text, "decision") || strings.Contains(text, "pending") || strings.Contains(text, "unknown")
+				end++
 			}
-			text, _ := messages[end].(map[string]any)["content"].(string)
-			protected = strings.Contains(text, "applied") || strings.Contains(text, "decision") || strings.Contains(text, "pending") || strings.Contains(text, "unknown")
-			end++
 		}
 		if protected {
 			i = end

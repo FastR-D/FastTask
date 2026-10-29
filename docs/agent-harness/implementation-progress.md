@@ -63,3 +63,11 @@ browser / sidecar 现在共用 run-driver，统一 heartbeat（等待上一次�
 新增 HTTP 的 JWT / capability 双向隔离及 run / thread scope、取消后工具拒绝；多个 pending 提案、detached 审批、审批超时 reaper、取消后保存已提交成果、20 路终态争抢；SQLite trigger 注入结果 / 终态事件失败并验证整体回滚、claim 不释放重做。reaper 不再吞掉数据库写失败。旧版本 21 schema 真实升级到 23、checkpoint 保留与迁移幂等测试通过；新迁移 22 / 23 两份 SQL 字节一致（历史版本 1 的两份文件已有排版差异，本批不改旧迁移）。
 
 前端 52 项测试全部通过，其中真实 Chromium 合约实际运行、无 skip；生产前端与 sidecar 构建通过。底层 race 组与最终完整 Go 回归在最后交付记录再次汇总。用户已授权使用当前 DeepSeek 配置运行完整真实模型评测；具体行为结果另行报告，不能从这些底层回归推定模型质量。
+
+第九批：真实 DeepSeek 评测发现并修复的 thinking 工具兼容性。
+
+真实 deepseek-flash 首轮可调用工具，第二轮曾返回 HTTP 400，供应商明确要求回传 reasoning_content。权威上下文现在为 DeepSeek 回传原始已持久化 reasoning；同一模型响应的并行工具调用保持在一个 assistant 消息，再按顺序配对所有结果。普通 Provider 不增加 DeepSeek 字段；关闭 reasoning 持久化或显式 none 时关闭 DeepSeek thinking，避免依赖未保存的 chain。裁剪一次移除整组调用和结果，避免多工具结果悬空。
+
+依据：[DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode)，tools 模式要求回传前序 reasoning_content。网页核对与实际 HTTP 400 诊断一致。仅上游请求使用这些已有 reasoning 记录，密钥仍不下发。
+
+验证：新增精确 reasoning、并行调用分组、普通 Provider 字段隔离、关闭持久化与整组裁剪测试；完整 Go 回归和相关 `-race -count=3` 通过。修复后真实 DeepSeek 无目标整批提案烟测以 4 次调用 / 4 次 attempt 正常结束并完成一次批准，独立评审 3/3；工作区入口烟测同为 3/3。完整 60 次评测重跑，原失败证据保留，不能把两项烟测作为全套通过。
