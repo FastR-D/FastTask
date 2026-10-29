@@ -105,9 +105,7 @@ func (s *threadStateService) LatestThreadState(ctx context.Context, userID strin
 	// the client's next command continue this thread instead of opening one (§2.2).
 	state.FastTask.ThreadID = run.ThreadID
 	state.FastTask.HarnessMode = run.HarnessMode
-	if run.HarnessMode != HarnessModeWASM {
-		state.FastTask.RunID = ""
-	}
+	state.FastTask.RunID = run.ID
 	state.IsRunning = run.Status == persistence.RunQueued || run.Status == persistence.RunRunning
 	return state, true, nil
 }
@@ -137,7 +135,7 @@ func (s *threadStateService) ThreadState(ctx context.Context, userID, threadID s
 	}
 	if runErr == nil {
 		state.FastTask.HarnessMode = run.HarnessMode
-		if run.HarnessMode == HarnessModeWASM {
+		if run.HarnessMode != "" {
 			state.FastTask.RunID = run.ID
 		}
 		state.IsRunning = run.Status == persistence.RunQueued || run.Status == persistence.RunRunning ||

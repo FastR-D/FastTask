@@ -472,7 +472,7 @@ func (s *AgentService) SubmitCommands(ctx context.Context, userID string, req Co
 		// One active run per user (§9.3). The per-thread DB index is a backstop.
 		var active int64
 		if err := tx.WithContext(ctx).Model(&persistence.AgentRun{}).
-			Where("user_id = ? AND status IN ?", userID, []string{persistence.RunQueued, persistence.RunRunning, persistence.RunAwaitingApproval}).
+			Where("user_id = ? AND status IN ?", userID, []string{persistence.RunQueued, persistence.RunRunning, persistence.RunAwaitingApproval, persistence.RunCancelling}).
 			Count(&active).Error; err != nil {
 			return err
 		}
@@ -796,7 +796,15 @@ func (s *AgentService) runPromptText(ctx context.Context, run *persistence.Agent
 			builder.WriteString(part.Text)
 		}
 	}
-	return strings.TrimSpace(builder.String()), nil
+	text := builder.String()
+	if strings.TrimSpace(text) == "" {
+		for _, part := range parts {
+			if part.Type == "image" {
+				return "请分析本条消息中的图片。", nil
+			}
+		}
+	}
+	return text, nil
 }
 
 // decodeArgsMap parses persisted tool-call args back into a map for the wire part.

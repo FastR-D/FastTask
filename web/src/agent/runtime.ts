@@ -184,7 +184,7 @@ export function extractUserText(commands: unknown): string {
 export async function prepareAgentCommand(body: { state?: unknown; commands?: unknown; [key: string]: unknown }) {
   const state = body.state as ServerAgentState | undefined
   const text = extractUserText(body.commands)
-  if (text) lastUserText = text
+  lastUserText = text
   // A user who picked a host in settings beats the probe (§3.2); 'auto' means probe.
   const selection = await selectMode(forcedModeOf(readModePreference()))
   const mode = selection.mode === 'unavailable' ? undefined : selection.mode
@@ -273,7 +273,10 @@ export function useAgentRuntime(
     // explicit stop (without an error) requests cancellation on the server.
     onCancel: ({ error }) => {
       if (error) return
-      void cancelActiveRun().catch(() => undefined)
+      const state = runtime.thread.getState().state as ServerAgentState | undefined
+      void cancelActiveRun(state?.fasttask?.runId).catch(error => {
+        noticeRef.current(`停止请求未送达：${agentErrorText(error)}`)
+      })
     },
     onError: async (error, { commands }) => {
       const unsent = commands.find(command => command.type === 'add-message')

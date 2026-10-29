@@ -18,8 +18,8 @@ import (
 // identity, the replayed history and the empty assistant message the run streams into
 // (§2.7.1). For a WASM run the runId is part of the emitted state on purpose — assistant-ui
 // owns the fetch that creates the run, so the browser cannot read the X-Harness-Run response
-// header and learns which run to drive from the stream instead. A sidecar run is already
-// driven by the Worker, so its runId is deliberately not exposed to the browser.
+// header and learns which run to drive from the stream instead. Sidecar run IDs are
+// also exposed for cancellation; only harnessMode=wasm authorizes browser driving.
 func (s *AgentService) BeginHarnessRun(ctx context.Context, userID, runID string) error {
 	run, err := s.repo.GetRun(ctx, userID, runID)
 	if err != nil {
@@ -29,7 +29,7 @@ func (s *AgentService) BeginHarnessRun(ctx context.Context, userID, runID string
 	if err != nil {
 		return err
 	}
-	if run.HarnessMode == HarnessModeWASM {
+	if run.HarnessMode != "" {
 		sess.state.FastTask.RunID = run.ID
 		if err := sess.emitSet(protocol.FastTaskRunIDPath(), run.ID); err != nil {
 			return err
@@ -56,7 +56,7 @@ func (s *harnessLifecycle) loadRunSession(ctx context.Context, run *persistence.
 	sess.state.IsRunning = true
 	sess.state.FastTask.ThreadID = run.ThreadID
 	sess.state.FastTask.HarnessMode = run.HarnessMode
-	if run.HarnessMode == HarnessModeWASM {
+	if run.HarnessMode != "" {
 		sess.state.FastTask.RunID = run.ID
 	}
 

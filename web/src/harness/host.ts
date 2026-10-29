@@ -5,6 +5,7 @@ import { createGatewayFetch } from './shim'
 import { buildHostTools, type ToolCallResult, type ToolDef } from './tools'
 import { ToolCallBindings } from './tool-identity'
 import { retryToolNetworkRequest } from './tool-request'
+import { requestRunCancellation } from './cancellation'
 
 // The browser harness host (doc/harness.md §3, §5, §6, §7, §10).
 //
@@ -157,7 +158,7 @@ export async function driveRun(options: DriveRunOptions): Promise<void> {
       onEvent: diagnostics,
     })
 
-    const turn = run.agent.prompt(promptBlocks(options.text), { signal: controller.signal })
+    const turn = run.agent.prompt(promptBlocks(grant.prompt ?? options.text), { signal: controller.signal })
     run.turn = turn
     // A turn has exactly one consumer and it must consume (§3.6); the events drive nothing but
     // diagnostics and cancellation, because the UI renders from the server's stream.
@@ -186,16 +187,14 @@ function promptBlocks(text: string): string {
 
 /** cancelActiveRun is the user's stop button: it tells the server first — cancelling is the user's
  *  power, and a host may not cancel its own run (§5.2, §10.2) — then breaks the turn. */
-export async function cancelActiveRun(): Promise<void> {
-  const run = active
-  if (!run) return
-  try {
-    await request(`/agent/runs/${run.runId}/cancellation`, { method: 'POST', body: JSON.stringify({}) })
-  } catch {
-    // The server may already have finished the run; the local cancel below still applies.
-  }
-  run.turn?.cancel()
-  run.controller.abort()
+export async function cancelActiveRun(runId = active?.runId): Promise<void> {
+  const run = active?.runId === runId ? active : null
+  await requestRunCancellation(runId, id => request(`/agent/runs/${encodeURIComponent(id)}/cancellation`, {
+    method: 'POST', body: JSON.stringify({}),
+  }), () => {
+    run?.turn?.cancel()
+    run?.controller.abort()
+  })
 }
 
 /** teardownActive cancels and closes whatever is running, so at most one agent instance exists (§3.7). */
@@ -227,6 +226,7 @@ async function closeRun(run: ActiveRun): Promise<void> {
 
 type RunGrant = {
   harness_token: string
+  prompt?: string
   run_id: string
   thread_id: string
   model: string

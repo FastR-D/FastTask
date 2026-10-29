@@ -252,3 +252,5 @@ npm --prefix web run test:panel
 ```
 
 测试覆盖参考项目的 AES 向量、位平面、分块解压、分包、设备 ID 筛选、完成通知以及取消/断开；模拟 GATT 测试不能代替真实 Windows 蓝牙适配器和墨水屏联调。
+
+Agent / Harness 的待实施优化、接口约束、任务拆分、自动化测试样例及人工 QA 验收见 [实施交接文档](docs/agent-harness/README.md)。该文档描述设计与验收条件，不代表相关改造已经完成。

@@ -115,6 +115,7 @@ type HarnessPrincipal struct {
 // from the server; a host must not carry defaults of its own (§3.3).
 type RunGrant struct {
 	HarnessToken string `json:"harness_token"`
+	Prompt       string `json:"prompt"`
 	// RunID and ThreadID name what the capability is bound to. A host needs the thread to read and
 	// write its checkpoint (§6.1), and taking it from here rather than from the UI's own state keeps
 	// one source of truth: the token, not the client, decides the scope.
@@ -330,7 +331,12 @@ func (s *harnessTokens) issueRunGrant(ctx context.Context, userID, runID, toolsE
 	if err != nil {
 		return RunGrant{}, err
 	}
+	prompt, err := s.svc.runPromptText(ctx, run)
+	if err != nil {
+		return RunGrant{}, err
+	}
 	return RunGrant{
+		Prompt:       prompt,
 		HarnessToken: plaintext, RunID: run.ID, ThreadID: run.ThreadID,
 		Model: creds.Model, Instructions: instructions,
 		ToolsETag: current, ExpiresAt: expires,
