@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -71,6 +72,21 @@ func TestHarnessApprovalReceipts(t *testing.T) {
 				}
 			} else if err == nil {
 				t.Fatal("invalid receipt succeeded")
+			}
+			if decision == "conflict" {
+				messages, _ := svc.repo.ListThreadMessages(ctx, p.UserID, p.ThreadID)
+				visible := false
+				for _, message := range messages {
+					parts, _ := svc.repo.ListMessageParts(ctx, p.UserID, message.ID)
+					for _, part := range parts {
+						if part.Type == "text" && strings.Contains(part.Text, "提案未生效") {
+							visible = true
+						}
+					}
+				}
+				if !visible {
+					t.Fatal("conflict has no visible explanation")
+				}
 			}
 			var actual persistence.Goal
 			svc.store.DB.First(&actual, "id = ?", goal.ID)

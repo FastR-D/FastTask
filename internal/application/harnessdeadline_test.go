@@ -207,3 +207,19 @@ func TestHarnessProviderErrorDoesNotLeakBody(t *testing.T) {
 		}
 	}
 }
+
+func TestHarnessTurnBudgetEndsExplicitlyWithoutSuccess(t *testing.T) {
+	svc, p := providerHarness(t, func(w http.ResponseWriter, r *http.Request) { t.Error("exhausted budget reached provider") }, LoopLimits{MaxTurns: 1})
+	if err := svc.repo.UpdateRun(context.Background(), p.UserID, p.RunID, map[string]any{"model_calls": 1}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.OpenModelProxy(context.Background(), p, []byte(`{}`))
+	var proxy *ProxyError
+	if !errors.As(err, &proxy) || proxy.Code != "MAX_TURNS" {
+		t.Fatalf("budget response: %v", err)
+	}
+	run, _ := svc.repo.GetRun(context.Background(), p.UserID, p.RunID)
+	if run.Status != persistence.RunFailed || run.ErrorCode != "MAX_TURNS" {
+		t.Fatalf("budget falsely succeeded: %+v", run)
+	}
+}

@@ -345,7 +345,7 @@ func (s *harnessProxy) emitTurnLimitNotice(ctx context.Context, run *persistence
 		return err
 	}
 	if sess == nil {
-		return s.lifecycle().finishRun(ctx, run, persistence.RunSucceeded, "", "", protocol.ReasonMaxTurns)
+		return s.lifecycle().finishRun(ctx, run, persistence.RunFailed, "MAX_TURNS", "model turn budget exhausted", protocol.ReasonMaxTurns)
 	}
 	notice := "（已达到单次运行的工具调用轮次上限，先在此收尾。如需继续，请再发一条消息。）"
 	idx, err := sess.addTextPart()
@@ -358,12 +358,7 @@ func (s *harnessProxy) emitTurnLimitNotice(ctx context.Context, run *persistence
 	if err := sess.persistTextPart(idx, notice); err != nil {
 		return err
 	}
-	sess.turns = run.ModelCalls
-	if _, err := sess.succeed(); err != nil {
-		return err
-	}
-	_, _ = s.repo().RevokeHarnessTokensForRun(ctx, run.ID)
-	return nil
+	return s.lifecycle().finishRun(ctx, run, persistence.RunFailed, "MAX_TURNS", "model turn budget exhausted", protocol.ReasonMaxTurns)
 }
 
 // --- the transcribing reader (§4.4) ---

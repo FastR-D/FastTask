@@ -152,7 +152,7 @@ func (s *harnessLifecycle) PutThreadCheckpoint(ctx context.Context, p HarnessPri
 // A run without a session — one that never got as far as an assistant message — still
 // has to reach its terminal status, so the status write is the fallback rather than an
 // error path.
-func (s *harnessLifecycle) finishRun(ctx context.Context, run *persistence.AgentRun, status, code, message, _ string) error {
+func (s *harnessLifecycle) finishRun(ctx context.Context, run *persistence.AgentRun, status, code, message, reason string) error {
 	sess, err := s.loadRunSession(ctx, run)
 	if err != nil {
 		return err
@@ -176,7 +176,10 @@ func (s *harnessLifecycle) finishRun(ctx context.Context, run *persistence.Agent
 			svc.repo = repo
 			sess.svc = &svc
 			sess.sink.repo = repo
-			terminal := protocol.IncompleteStatus(protocol.ReasonError)
+			if reason == "" {
+				reason = protocol.ReasonError
+			}
+			terminal := protocol.IncompleteStatus(reason)
 			if status == persistence.RunSucceeded {
 				terminal = protocol.CompleteStatus(protocol.ReasonStop)
 			}

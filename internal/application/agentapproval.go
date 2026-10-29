@@ -150,8 +150,9 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 				if errors.Is(applyErr, ErrApprovalNotAwaiting) || errors.Is(applyErr, ErrApprovalDuplicate) {
 					return SubmitResult{}, applyErr
 				}
-				s.markProposalConflict(ctx, proposal.ID)
-				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
+				if conflictErr := s.recordConflict(ctx, userID, part.ID, applyErr.Error()); conflictErr != nil {
+					return SubmitResult{}, conflictErr
+				}
 				s.releaseHarnessRun(ctx, userID, run, part.ID)
 				return SubmitResult{}, applyErr
 			}
@@ -165,8 +166,9 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 				if errors.Is(applyErr, ErrApprovalNotAwaiting) || errors.Is(applyErr, ErrApprovalDuplicate) {
 					return SubmitResult{}, applyErr
 				}
-				s.markProposalConflict(ctx, proposal.ID)
-				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
+				if conflictErr := s.recordConflict(ctx, userID, part.ID, applyErr.Error()); conflictErr != nil {
+					return SubmitResult{}, conflictErr
+				}
 				s.releaseHarnessRun(ctx, userID, run, part.ID)
 				return SubmitResult{}, applyErr
 			}
@@ -177,8 +179,9 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 			}
 			var payload dailyPlanPayload
 			if err := json.Unmarshal([]byte(proposal.PatchJSON), &payload); err != nil {
-				s.markProposalConflict(ctx, proposal.ID)
-				s.recordConflict(ctx, userID, part.ID, "the daily plan proposal could not be read")
+				if conflictErr := s.recordConflict(ctx, userID, part.ID, "the daily plan proposal could not be read"); conflictErr != nil {
+					return SubmitResult{}, conflictErr
+				}
 				s.releaseHarnessRun(ctx, userID, run, part.ID)
 				return SubmitResult{}, fmt.Errorf("%w: malformed daily plan proposal", ErrValidation)
 			}
@@ -187,8 +190,9 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 				if errors.Is(applyErr, ErrApprovalNotAwaiting) || errors.Is(applyErr, ErrApprovalDuplicate) {
 					return SubmitResult{}, applyErr
 				}
-				s.markProposalConflict(ctx, proposal.ID)
-				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
+				if conflictErr := s.recordConflict(ctx, userID, part.ID, applyErr.Error()); conflictErr != nil {
+					return SubmitResult{}, conflictErr
+				}
 				s.releaseHarnessRun(ctx, userID, run, part.ID)
 				if errors.Is(applyErr, ErrRevision) {
 					return SubmitResult{}, ErrRevision
@@ -206,8 +210,9 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 			}
 			var patches []map[string]any
 			if err := json.Unmarshal([]byte(proposal.PatchJSON), &patches); err != nil {
-				s.markProposalConflict(ctx, proposal.ID)
-				s.recordConflict(ctx, userID, part.ID, "the task tree proposal could not be read; read the current tree and submit a corrected proposal")
+				if conflictErr := s.recordConflict(ctx, userID, part.ID, "the task tree proposal could not be read; read the current tree and submit a corrected proposal"); conflictErr != nil {
+					return SubmitResult{}, conflictErr
+				}
 				s.releaseHarnessRun(ctx, userID, run, part.ID)
 				return SubmitResult{}, fmt.Errorf("%w: malformed task tree proposal", ErrValidation)
 			}
@@ -219,8 +224,9 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 				if errors.Is(applyErr, ErrApprovalNotAwaiting) || errors.Is(applyErr, ErrApprovalDuplicate) {
 					return SubmitResult{}, applyErr
 				}
-				s.markProposalConflict(ctx, proposal.ID)
-				s.recordConflict(ctx, userID, part.ID, applyErr.Error())
+				if conflictErr := s.recordConflict(ctx, userID, part.ID, applyErr.Error()); conflictErr != nil {
+					return SubmitResult{}, conflictErr
+				}
 				// A host is waiting on this decision, so the run has to go back to running even
 				// though the apply failed: the model gets the conflict as its tool result and can
 				// re-propose in the same turn (doc/harness.md §7). The user still sees 412.
@@ -364,13 +370,49 @@ func (s *approvalService) continueHarnessRun(ctx context.Context, userID string,
 // recordConflict writes a failed apply onto the part as a structured error, so a host waiting
 // on the long poll learns the proposal basis moved instead of waiting for a decision that will never
 // come (§7.4). For a server-driven run it is a no-op: nothing is waiting.
-func (s *approvalService) recordConflict(ctx context.Context, userID, partID, reason string) {
-	payload, _ := json.Marshal(map[string]any{
-		"decision": "conflict", "applied": false,
-		"error":  "the approved change could not be applied; the proposal was marked conflict. Read the detail and current state, then propose a corrected change without claiming success",
-		"detail": reason,
+func (s *approvalService) recordConflict(ctx context.Context, userID, partID, reason string) error {
+	payload, _ := json.Marshal(map[string]any{"decision": "conflict", "applied": false, "error": "the approved change could not be applied; read the current state before proposing a corrected change", "detail": reason})
+	return s.store.Transaction(ctx, func(tx *gorm.DB) error {
+		repo := s.repo.WithTx(tx)
+		part, err := repo.GetPart(ctx, userID, partID)
+		if err != nil {
+			return err
+		}
+		result := tx.Model(&persistence.AgentMessagePart{}).Where("id = ? AND user_id = ? AND approval_status = 'pending'", partID, userID).Updates(map[string]any{"result_json": string(payload), "is_error": true, "approval_status": "conflict", "updated_at": persistence.Now()})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+		if part.ProposalID != nil {
+			if err := tx.Model(&persistence.Proposal{}).Where("id = ? AND user_id = ? AND status = 'pending'", *part.ProposalID, userID).Updates(map[string]any{"status": "conflict", "revision": gorm.Expr("revision + 1"), "updated_at": persistence.Now()}).Error; err != nil {
+				return err
+			}
+		}
+		message, err := repo.GetMessage(ctx, userID, part.MessageID)
+		if err != nil {
+			return err
+		}
+		idx, err := repo.NextPartIdx(ctx, userID, message.ID)
+		if err != nil {
+			return err
+		}
+		notice := &persistence.AgentMessagePart{UserID: userID, MessageID: message.ID, Idx: idx, Type: "text", Text: "这份提案未生效，已有内容已保留。需要依据最新内容重新核对；修订后的提案仍需你确认。"}
+		if err := repo.CreatePartAtIdx(ctx, notice); err != nil {
+			return err
+		}
+		op, err := protocol.Set(protocol.PartPath(message.Seq-1, idx), partFromRow(notice))
+		if err != nil {
+			return err
+		}
+		chunk, err := json.Marshal(protocol.UpdateState(op))
+		if err != nil {
+			return err
+		}
+		_, err = repo.AppendChunk(ctx, userID, message.RunID, string(chunk))
+		return err
 	})
-	_ = s.store.DB.WithContext(ctx).Model(&persistence.AgentMessagePart{}).Where("id = ? AND user_id = ? AND approval_status = 'pending'", partID, userID).Updates(map[string]any{"result_json": string(payload), "is_error": true, "approval_status": "conflict", "updated_at": persistence.Now()}).Error
 }
 
 // recordApproval writes the decision onto the tool-call part so the resumed run
@@ -384,14 +426,6 @@ func (s *approvalService) recordApproval(ctx context.Context, userID, partID, st
 		return ErrApprovalDuplicate
 	}
 	return nil
-}
-
-// markProposalConflict flags a proposal whose base revision moved, so it can no
-// longer be applied and never silently overwrites newer data (§7.4).
-func (s *approvalService) markProposalConflict(ctx context.Context, proposalID string) {
-	s.store.DB.WithContext(ctx).Model(&persistence.Proposal{}).
-		Where("id = ? AND status = 'pending'", proposalID).
-		Updates(map[string]any{"status": "conflict", "revision": gorm.Expr("revision + 1"), "updated_at": persistence.Now()})
 }
 
 // requeueRun wakes the Worker to continue the SAME run under a NEW job (§7.2):
