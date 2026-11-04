@@ -45,9 +45,9 @@ func (s *Server) registerFastResearch() {
 		}
 		setFastResearchCookie(c, "state", state, 300, s.cfg.PublicURL)
 		callback := strings.TrimRight(s.cfg.PublicURL, "/") + "/api/v1/auth/fastresearch/callback?state=" + url.QueryEscape(state)
-		target, _ := url.Parse(strings.TrimRight(s.cfg.FastResearchPublicURL, "/") + "/")
+		target, _ := url.Parse(strings.TrimRight(s.cfg.FastResearchPublicURL, "/") + "/api/sso/launch")
 		query := target.Query()
-		query.Set("launch", "fast-task")
+		query.Set("audience", "fast-task")
 		query.Set("next", callback)
 		target.RawQuery = query.Encode()
 		c.Redirect(http.StatusFound, target.String())

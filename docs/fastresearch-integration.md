@@ -86,15 +86,18 @@ sequenceDiagram
     participant FT as FastTask
 
     B->>FT: GET /api/v1/auth/fastresearch/login
-    FT-->>B: 302 fastrd.io/?launch=fast-task&next=CALLBACK；同时设置 state Cookie
-    B->>FR: 打开 FastResearch 工作台
-    alt 尚无 FastResearch 成员会话
+    FT-->>B: 302 fastrd.io/api/sso/launch?audience=fast-task&next=CALLBACK；同时设置 state Cookie
+    B->>FR: GET /api/sso/launch?audience=fast-task&next=CALLBACK
+    alt 已有 FastResearch 成员会话
+        FR-->>B: 302 CALLBACK?state=...&sso=TICKET（不加载 FastResearch 页面）
+    else 尚无 FastResearch 成员会话
+        FR-->>B: 302 /workspace?launch=fast-task&next=CALLBACK
         FR-->>B: 显示个人 Key 解锁框
         B->>FR: POST /api/content/unlock
         FR-->>B: 签发 fr_session
+        B->>FR: GET /api/sso/launch?audience=fast-task&next=CALLBACK
+        FR-->>B: 302 CALLBACK?state=...&sso=TICKET
     end
-    B->>FR: GET /api/sso/launch?audience=fast-task&next=CALLBACK
-    FR-->>B: 302 CALLBACK?state=...&sso=TICKET
     B->>FT: GET /api/v1/auth/fastresearch/callback
     FT-->>B: 校验 state；设置短期 ticket Cookie；跳转 /?fastresearch=callback
     B->>FT: POST /api/v1/auth/fastresearch/complete
