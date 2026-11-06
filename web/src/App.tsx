@@ -8,9 +8,11 @@ import { PwaUpdate } from './PwaUpdate'
 import { ResearchWorkspace } from './ResearchWorkspace'
 import { GoalManager } from './GoalManager'
 import { FastPanel } from './FastPanel'
+import { ThemeMenu, ThemeSelect } from './ThemeControl'
 import badgeConsoleIcon from './assets/badge-console.svg?no-inline'
 import { timezoneOrDefault } from './date'
 import { assertAccessOwner } from './session-owner'
+import { watchTheme } from './theme'
 export { Today, focusEvidence } from './Today'
 
 type Tab = 'today' | 'goals' | 'panel' | 'jobs' | 'review'
@@ -51,6 +53,9 @@ export function App() {
   const handleLogout = useCallback(async () => { await logout(); setAuthenticated(false) }, [])
   // A refresh rejected mid-session, or a logout in another tab, ends this session too.
   useEffect(() => onSessionEnded(() => setAuthenticated(false)), [])
+  // Keep the browser chrome and the other theme control in step with the system, or with a choice
+  // made in another tab, on the login screen as well as inside the workspace.
+  useEffect(() => watchTheme(), [])
   if (restoring) return null
   return (
     <>
@@ -170,6 +175,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
           {items.map(([id, label]) => <mdui-list-item key={id} icon={NAV_ICONS[id]} active={tab === id} onClick={() => { setTab(id); setDrawerOpen(false) }}>{id === 'panel' && <mdui-icon slot="icon" src={badgeConsoleIcon}/>} {label}</mdui-list-item>)}
         </mdui-list>
         <div className="drawer-foot">
+          <div className="drawer-theme"><ThemeSelect/></div>
           <mdui-divider/>
           <mdui-list>
             <mdui-list-item icon="logout" onClick={onLogout}>退出登录</mdui-list-item>
@@ -184,6 +190,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
         <mdui-tooltip content={`${user?.display_name || '加载中'} · ${user?.timezone || ''}`} placement="left">
           <span className="rail-avatar">{user?.display_name?.slice(0, 1) || 'F'}</span>
         </mdui-tooltip>
+        <ThemeMenu/>
         <mdui-button-icon icon="logout" aria-label="退出登录" onClick={onLogout}/>
       </div>
     </mdui-navigation-rail>

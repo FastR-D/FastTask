@@ -66,8 +66,8 @@ export default defineConfig({
         scope: '/',
         display: 'standalone',
         orientation: 'portrait',
-        // §3.1: a single theme_color (the light value); the dark value stays in
-        // index.html's prefers-color-scheme media-query meta.
+        // Install splash fallback. theme-init.js and theme.ts resolve the browser chrome colour
+        // from the device's saved preference and the current system theme at runtime.
         theme_color: '#f7f8fa',
         background_color: '#f7f8fa',
         icons: [
