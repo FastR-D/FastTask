@@ -7,30 +7,31 @@ import { mkdir, writeFile } from 'node:fs/promises'
 test('production themes preserve the mounted assistant, draft, focus and PWA chrome', { timeout: 120000 }, async () => {
   const artifacts = 'test-results/fastui'
   await mkdir(artifacts, { recursive: true })
-  const server = await preview({ configFile: false, preview: { host: '127.0.0.1', port: 0 } })
-  const base = `http://127.0.0.1:${server.httpServer.address().port}`
-  const browser = await chromium.launch({ headless: true })
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: 'block', colorScheme: 'light' })
-  const errors = [], scenarios = []
-  const user = { id: 'theme-user', identifier: 'theme-user', display_name: 'Theme user', timezone: 'UTC', role: 'admin', locale: 'zh-CN', status: 'active', revision: 1, created_at: '2026-11-10T00:00:00Z' }
-  const token = `header.${Buffer.from(JSON.stringify({ sub: user.id, exp: 4102444800 })).toString('base64url')}.signature`
-  await context.route('**/api/v1/**', async route => {
-    const path = new URL(route.request().url()).pathname.replace('/api/v1', '')
-    if (path === '/panel/profile') return route.fulfill({ status: 404, json: { detail: 'Profile not configured' } })
-    let value = { items: [] }
-    if (path === '/auth/refresh') value = { access_token: token, refresh_token: 'fixture-refresh', user }
-    else if (path === '/me') value = user
-    else if (path === '/agent/availability') value = { configured: true, mode: 'server', model_name: 'fixture-model' }
-    else if (path === '/agent/thread-state') value = { state: null }
-    else if (path === '/agent/threads') value = { items: [], next_cursor: null }
-    else if (path === '/daily-plans/current') value = { plan: { id: 'theme-plan', local_date: new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()), timezone: 'UTC', status: 'draft', revision: 1, current_revision: 1 }, items: [], availability: { status: 'no_tasks', reason: '暂无任务', ready_count: 0, waiting_count: 0, can_replan: true } }
-    else if (path === '/planning-settings') value = { daily_budget_minutes: 120, primary_goal_id: null }
-    await route.fulfill({ json: value })
-  })
-  await context.addInitScript(() => {
-    if (!localStorage.getItem('fasttask_refresh')) localStorage.setItem('fasttask_refresh', 'fixture-refresh')
-  })
+  let server, browser
   try {
+    server = await preview({ configFile: false, preview: { host: '127.0.0.1', port: 0 } })
+    const base = `http://127.0.0.1:${server.httpServer.address().port}`
+    browser = await chromium.launch({ headless: true })
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: 'block', colorScheme: 'light' })
+    const errors = [], scenarios = []
+    const user = { id: 'theme-user', identifier: 'theme-user', display_name: 'Theme user', timezone: 'UTC', role: 'admin', locale: 'zh-CN', status: 'active', revision: 1, created_at: '2026-11-10T00:00:00Z' }
+    const token = `header.${Buffer.from(JSON.stringify({ sub: user.id, exp: 4102444800 })).toString('base64url')}.signature`
+    await context.route('**/api/v1/**', async route => {
+      const path = new URL(route.request().url()).pathname.replace('/api/v1', '')
+      if (path === '/panel/profile') return route.fulfill({ status: 404, json: { detail: 'Profile not configured' } })
+      let value = { items: [] }
+      if (path === '/auth/refresh') value = { access_token: token, refresh_token: 'fixture-refresh', user }
+      else if (path === '/me') value = user
+      else if (path === '/agent/availability') value = { configured: true, mode: 'server', model_name: 'fixture-model' }
+      else if (path === '/agent/thread-state') value = { state: null }
+      else if (path === '/agent/threads') value = { items: [], next_cursor: null }
+      else if (path === '/daily-plans/current') value = { plan: { id: 'theme-plan', local_date: new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()), timezone: 'UTC', status: 'draft', revision: 1, current_revision: 1 }, items: [], availability: { status: 'no_tasks', reason: '暂无任务', ready_count: 0, waiting_count: 0, can_replan: true } }
+      else if (path === '/planning-settings') value = { daily_budget_minutes: 120, primary_goal_id: null }
+      await route.fulfill({ json: value })
+    })
+    await context.addInitScript(() => {
+      if (!localStorage.getItem('fasttask_refresh')) localStorage.setItem('fasttask_refresh', 'fixture-refresh')
+    })
     const page = await context.newPage()
     page.on('pageerror', error => { errors.push(error.message); console.error(error.message) })
     await page.goto(base)
@@ -96,7 +97,13 @@ test('production themes preserve the mounted assistant, draft, focus and PWA chr
     assert.deepEqual(errors, [])
     await writeFile(`${artifacts}/results.json`, JSON.stringify({ status: 'passed', scenarios }, null, 2))
   } finally {
-    await browser.close()
-    await new Promise(resolve => server.httpServer.close(resolve))
+    try {
+      await browser?.close()
+    } finally {
+      if (server) await new Promise((resolve, reject) => {
+        server.httpServer.close(error => error ? reject(error) : resolve())
+        server.httpServer.closeAllConnections()
+      })
+    }
   }
 })
