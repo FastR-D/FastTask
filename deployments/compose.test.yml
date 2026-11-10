@@ -1,0 +1,33 @@
+# Use the dedicated test environment and data directory, never the root .env.
+# docker compose --env-file /absolute/path/compose.env -f deployments/compose.test.yml up -d
+name: fasttask-test
+
+services:
+  fasttask:
+    image: ${FASTTASK_TEST_IMAGE:?Set the tested image tag}
+    container_name: fasttask
+    restart: unless-stopped
+    env_file:
+      - ${FASTTASK_TEST_ENV_FILE:?Set the absolute path to the test environment file}
+    environment:
+      FASTTASK_PUBLIC_URL: https://task.fast.0x535a.cn
+      FASTTASK_NOTIFICATION_ENABLED: "false"
+      FASTTASK_LISTEN: 0.0.0.0
+      FASTTASK_PORT: "10000"
+      FASTTASK_DATABASE: /var/lib/fasttask/fasttask.db
+      FASTTASK_AUDIO_DIR: /var/lib/fasttask/audio
+      FASTTASK_ATTACHMENT_DIR: /var/lib/fasttask/attachments
+      FASTTASK_WEB_DIST: /opt/fasttask/web/dist
+    command: ["serve", "--with-worker", "--with-scheduler"]
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "${FASTTASK_TEST_BIND:-10.22.33.15}:10000:10000"
+    volumes:
+      - ${FASTTASK_TEST_DATA_DIR:?Set a separate test data directory}:/var/lib/fasttask
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

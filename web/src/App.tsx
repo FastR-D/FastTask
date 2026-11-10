@@ -203,7 +203,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
       <ResearchWorkspace active={tab==='today'} timezone={timezone} userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} chatRequest={chatRequest} goalChatRequest={goalChatRequest}/>
       <FastPanel active={tab==='panel'} userId={user.id} timezone={timezone} refreshVersion={businessRevision} onNotice={setNotice}/>
       <div className="page" hidden={tab==='today'||tab==='panel'}>
-        {tab==='goals' && <GoalManager userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} onOpenChat={openChat}/>}
+        {tab==='goals' && <GoalManager timezone={timezone} userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} onOpenChat={openChat}/>}
         {tab==='jobs' && <JobQueue onNotice={setNotice}/>}
         {tab==='review' && <Review onNotice={setNotice}/>}
       </div>

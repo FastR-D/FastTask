@@ -120,6 +120,8 @@ type Task struct {
 	Priority        int        `json:"priority"`
 	Position        int        `json:"position"`
 	EstimateMinutes int        `json:"estimate_minutes"`
+	PlannedStart    *string    `json:"planned_start,omitempty"`
+	PlannedEnd      *string    `json:"planned_end,omitempty"`
 	Revision        int        `json:"revision"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`

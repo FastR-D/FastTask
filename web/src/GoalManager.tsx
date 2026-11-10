@@ -4,18 +4,20 @@ import { createCreationAttempt } from './creation-attempt'
 import { SESSION_OWNER_CHANGED } from './session-owner'
 import { ProposalSummary } from './agent/tools/ProposalApproval'
 import { GoalMapView } from './Lens'
+import { GanttView } from './Gantt'
+import { buildGanttRows, plannedDateError } from './gantt'
 import { fieldValue, useMduiEvent } from './mdui-react'
 import { waitJob } from './jobs'
 import type { Goal, Job, Proposal, Task, TaskTree, TaskTreeNode } from './types'
 
 const GOAL_STATUS: Record<string,string> = { draft:'待启动', active:'进行中', paused:'已暂停', completed:'已完成', abandoned:'已放弃', archived:'已归档' }
 const TASK_STATUS: Record<string,string> = { ready:'待开始', in_progress:'进行中', blocked:'受阻', paused:'已暂停', completed:'已完成', cancelled:'已取消', superseded:'已替换' }
-const TASK_TYPES: Record<string,string> = { milestone:'里程碑', task:'任务', action:'行动' }
+const TASK_TYPES: Record<string,string> = { milestone:'阶段', task:'任务', action:'行动' }
 const emptyGoal = { title:'', success_criteria:'', description:'', target_date:'' }
-const emptyTask = { title:'', success_criteria:'', minimum_action:'', description:'', parent_id:'', depends_on:[] as string[], type:'task', estimate_minutes:'40', priority:'70' }
+const emptyTask = { title:'', success_criteria:'', minimum_action:'', description:'', parent_id:'', depends_on:[] as string[], type:'task', planned_start:'', planned_end:'', estimate_minutes:'40', priority:'70' }
 type Editor = ({ kind:'goal'; goal?:Goal } | { kind:'task'; task?:Task; goalId:string; goalTitle:string }) & {ownerId?:string}
 type DeleteTarget = ({kind:'goal'; value:Goal} | {kind:'task'; value:Task}) & {ownerId?:string}
-type Props = { userId?:string; onNotice:(message:string)=>void; refreshVersion?:number; onBusinessChanged?:()=>void; onOpenChat?:(goal?:Goal)=>void }
+type Props = { timezone?:string; userId?:string; onNotice:(message:string)=>void; refreshVersion?:number; onBusinessChanged?:()=>void; onOpenChat?:(goal?:Goal)=>void }
 
 function flatten(nodes: TaskTreeNode[]): Task[] { return nodes.flatMap(node=>[node.task,...flatten(node.children)]) }
 function canParent(task:Task){return !['completed','cancelled','superseded'].includes(task.status)}
@@ -36,7 +38,7 @@ function sameDependencies(left:unknown,right:unknown){
   return JSON.stringify(Array.isArray(left)?[...left].sort():[])===JSON.stringify(Array.isArray(right)?[...right].sort():[])
 }
 function goalFields(goal:Goal){return {title:goal.title,success_criteria:goal.success_criteria,description:goal.description,target_date:goal.target_date||''}}
-function taskFields(task:Task){return {title:task.title,success_criteria:task.success_criteria,minimum_action:task.minimum_action,description:task.description,parent_id:task.parent_id||'',depends_on:[...task.depends_on??[]],type:task.type,estimate_minutes:String(task.estimate_minutes),priority:String(task.priority)}}
+function taskFields(task:Task){return {title:task.title,success_criteria:task.success_criteria,minimum_action:task.minimum_action,description:task.description,parent_id:task.parent_id||'',depends_on:[...task.depends_on??[]],type:task.type,planned_start:task.planned_start||'',planned_end:task.planned_end||'',estimate_minutes:String(task.estimate_minutes),priority:String(task.priority)}}
 function canonicalDraftValue(key:string,value:unknown){
   if((key==='priority'||key==='estimate_minutes')&&String(value).trim()!==''&&Number.isInteger(Number(value)))return Number(value)
   return typeof value==='string'?value.trim():value
@@ -54,13 +56,13 @@ function errorText(error:unknown) {
   return error instanceof Error?error.message:'操作失败，请稍后重试'
 }
 
-export function GoalManager({ userId,onNotice, refreshVersion=0, onBusinessChanged, onOpenChat }: Props) {
+export function GoalManager({ timezone='Asia/Shanghai',userId,onNotice, refreshVersion=0, onBusinessChanged, onOpenChat }: Props) {
   const [goals,setGoals]=useState<Goal[]>([])
   const [tasks,setTasks]=useState<Task[]>([])
   const [selectedId,setSelectedId]=useState('')
   const [tree,setTree]=useState<TaskTree|null>(null)
   const [treeETag,setTreeETag]=useState('')
-  const [view,setView]=useState<'tree'|'map'>('tree')
+  const [view,setView]=useState<'tree'|'map'|'gantt'>('tree')
   const [selectedTask,setSelectedTask]=useState('')
   const [collapsed,setCollapsed]=useState<Set<string>>(new Set())
   const [loading,setLoading]=useState(true)
@@ -99,6 +101,11 @@ export function GoalManager({ userId,onNotice, refreshVersion=0, onBusinessChang
   const validEstimate=Number.isInteger(Number(taskDraft.estimate_minutes))&&Number(taskDraft.estimate_minutes)>=1&&Number(taskDraft.estimate_minutes)<=1440
   const validPriority=taskDraft.priority.trim()!==''&&Number.isInteger(Number(taskDraft.priority))&&Number(taskDraft.priority)>=0&&Number(taskDraft.priority)<=100
   const taskNumberError=!validEstimate?'预计总用时须为 1–1440 之间的整数分钟。':!validPriority?'优先级须为 0–100 之间的整数。':''
+
+  const dateError=plannedDateError(taskDraft.planned_start,taskDraft.planned_end)
+  const editorRows=buildGanttRows(visibleTree?.nodes??[],selected?.target_date)
+  const editorRow=editor?.kind==='task'&&editor.task?editorRows.find(row=>row.task.id===editor.task!.id):undefined
+  const parentRow=editor?.kind==='task'?editorRows.find(row=>row.task.id===taskDraft.parent_id):undefined
 
   function ownedRequest<T>(path:string,init:RequestInit={},ownerId=dataOwner.current){
     if(ownerId&&currentUserId.current!==ownerId)throw new Error(SESSION_OWNER_CHANGED)
@@ -146,11 +153,11 @@ export function GoalManager({ userId,onNotice, refreshVersion=0, onBusinessChang
     finally{busyRef.current=false;setBusy('')}
   }
   function openGoal(goal?:Goal){if(busyRef.current)return;const ownerId=goal?dataOwner.current:userId;creationAttempts.current.goal=createCreationAttempt<Goal>(ownerId,()=>currentUserId.current);setGoalDraft(goal?goalFields(goal):{...emptyGoal});setEditor({kind:'goal',goal,ownerId})}
-  function openTask(task?:Task,parent?:Task){
+  function openTask(task?:Task,parent?:Task,type='task'){
     if(busyRef.current||!visibleTree||!selected||parent&&!canParent(parent))return
     const ownerId=dataOwner.current
     creationAttempts.current.task=createCreationAttempt<Task>(ownerId,()=>currentUserId.current)
-    setTaskDraft(task?taskFields(task):{...emptyTask,depends_on:[],parent_id:parent?.id||'',type:parent?(parent.type==='milestone'?'task':'action'):'task'})
+    setTaskDraft(task?taskFields(task):{...emptyTask,depends_on:[],parent_id:parent?.id||'',type:parent?(parent.type==='milestone'?'task':'action'):type})
     setEditor({kind:'task',task,goalId:selected.id,goalTitle:selected.title,ownerId})
   }
   function reviewLatestEditor(keepChanges:boolean){
@@ -197,12 +204,12 @@ export function GoalManager({ userId,onNotice, refreshVersion=0, onBusinessChang
     }else{
       if(editorGoalMissing||!taskDraft.title.trim()||!taskDraft.success_criteria.trim()||!taskDraft.minimum_action.trim())return
       const estimate=Number(taskDraft.estimate_minutes),priority=Number(taskDraft.priority)
-      if(!validEstimate||!validPriority)return
+      if(!validEstimate||!validPriority||dateError)return
       const original=editor.task
       const existing=original
       await mutate('editor',async()=>{
-        const payload={...taskDraft,title:taskDraft.title.trim(),parent_id:taskDraft.parent_id||null,estimate_minutes:estimate,priority,position:existing?.position??editorTasks.filter(task=>(task.parent_id||'')===taskDraft.parent_id).length}
-        const originalFields=original?{...original,parent_id:original.parent_id||null,position:original.position??0}:null
+        const payload={...taskDraft,planned_start:taskDraft.planned_start||null,planned_end:taskDraft.planned_end||null,title:taskDraft.title.trim(),parent_id:taskDraft.parent_id||null,estimate_minutes:estimate,priority,position:existing?.position??editorTasks.filter(task=>(task.parent_id||'')===taskDraft.parent_id).length}
+        const originalFields=original?{...original,planned_start:original.planned_start??null,planned_end:original.planned_end??null,parent_id:original.parent_id||null,position:original.position??0}:null
         const updates=originalFields?Object.fromEntries(Object.entries(payload).filter(([key,value])=>!equalDraftValue(value,originalFields[key as keyof typeof originalFields],key))):{...payload,goal_id:editor.goalId}
         if(existing)await ownedRequest<Task>(`/tasks/${existing.id}`,{method:'PATCH',headers:{'If-Match':etag('task',existing)},body:JSON.stringify(updates)},editor.ownerId)
         else{
@@ -211,7 +218,7 @@ export function GoalManager({ userId,onNotice, refreshVersion=0, onBusinessChang
           // Position was assigned by the original creation; a refetch's row
           // count is not a user edit and must not move the recovered task.
           const desired={...payload,position:recovered.data.position}
-          const createdFields={...recovered.data,parent_id:recovered.data.parent_id||null}
+          const createdFields={...recovered.data,planned_start:recovered.data.planned_start??null,planned_end:recovered.data.planned_end??null,parent_id:recovered.data.parent_id||null}
           const changes=Object.fromEntries(Object.entries(desired).filter(([key,value])=>!equalDraftValue(value,createdFields[key as keyof typeof createdFields],key)))
           if(Object.keys(changes).length)await ownedRequest<Task>(`/tasks/${recovered.data.id}`,{method:'PATCH',headers:{'If-Match':recovered.etag||etag('task',recovered.data)},body:JSON.stringify(changes)},editor.ownerId)
         }
@@ -282,7 +289,7 @@ export function GoalManager({ userId,onNotice, refreshVersion=0, onBusinessChang
   const affected=deleteTarget?.kind==='goal'?tasks.filter(task=>task.goal_id===deleteTarget.value.id):deleteTarget?.kind==='task'?tasks.filter(task=>descendantIds(deleteTarget.value.id,tasks).has(task.id)):[]
   const latestEditorFields=latestEditGoal?goalFields(latestEditGoal):latestEditTask?taskFields(latestEditTask):null
   const originalEditorFields=editor?.kind==='goal'&&editor.goal?goalFields(editor.goal):editor?.kind==='task'&&editor.task?taskFields(editor.task):null
-  const labels:Record<string,string>={title:'标题',success_criteria:'完成标准',minimum_action:'最小行动',description:'说明',parent_id:'上级任务',depends_on:'前置成果',type:'类型',estimate_minutes:'预计总用时（分钟）',priority:'优先级',target_date:'目标日期'}
+  const labels:Record<string,string>={title:'标题',success_criteria:'完成标准',minimum_action:'最小行动',description:'说明',parent_id:'上级任务',depends_on:'前置成果',type:'类型',estimate_minutes:'预计总用时（分钟）',priority:'优先级',target_date:'目标日期',planned_start:'计划开始日期',planned_end:'计划结束日期'}
   function editorFieldText(key:string,value:unknown){
     if(key==='parent_id')return value?tasks.find(task=>task.id===value)?.title||'上级任务不可用':'直接属于目标'
     if(key==='depends_on')return (value as string[]).map(id=>tasks.find(task=>task.id===id)?.title||'前置任务不可用').join('、')||'无'
@@ -300,9 +307,9 @@ export function GoalManager({ userId,onNotice, refreshVersion=0, onBusinessChang
       <nav className="goal-index" aria-label="长期目标">{goals.map(goal=><button key={goal.id} type="button" className={selectedId===goal.id?'active':''} disabled={Boolean(busy)} onClick={()=>selectGoal(goal.id)}><b>{goal.title}</b><small>{GOAL_STATUS[goal.status]||goal.status}</small></button>)}{!goals.length&&!loading&&<p className="empty">从一个重要目标开始。</p>}</nav>
       <div className="tree-panel">{selected?<>
         <header className="tree-head"><div><p className="meta">{GOAL_STATUS[selected.status]||selected.status}{selected.target_date?` · ${selected.target_date}`:''}</p><h2>{selected.title}</h2><p>{selected.success_criteria}</p></div><mdui-button variant="text" icon="edit" onClick={()=>openGoal(selected)} disabled={Boolean(busy)}>编辑目标</mdui-button></header>
-        <div className="goal-toolbar"><div className="actions"><mdui-button variant={view==='tree'?'tonal':'text'} onClick={()=>setView('tree')}>任务树</mdui-button><mdui-button variant={view==='map'?'tonal':'text'} onClick={()=>setView('map')}>目标地图</mdui-button></div><mdui-button variant="outlined" icon="add" onClick={()=>openTask()} disabled={Boolean(busy)||!visibleTree}>添加任务</mdui-button></div>
+        <div className="goal-toolbar"><div className="actions"><mdui-button variant={view==='tree'?'tonal':'text'} onClick={()=>setView('tree')}>任务树</mdui-button><mdui-button variant={view==='map'?'tonal':'text'} onClick={()=>setView('map')}>目标地图</mdui-button><mdui-button variant={view==='gantt'?'tonal':'text'} onClick={()=>setView('gantt')}>甘特图</mdui-button></div><mdui-button variant="outlined" icon="add" onClick={()=>openTask()} disabled={Boolean(busy)||!visibleTree}>添加任务</mdui-button></div>
         {visibleTree?.proposals.map(proposal=><TreeProposal key={proposal.id} proposal={proposal} taskTitles={new Map([...tasks,...trashTasks].map(task=>[task.id,task.title]))} busy={Boolean(busy)} demo={modelAvailable===false} onDecide={apply=>decide(proposal,apply)}/>)}
-        {loading&&!visibleTree?<p className="empty">正在读取任务树…</p>:view==='map'?<GoalMapView goal={selected} onNotice={onNotice} onOpenTask={id=>{setSelectedTask(id);setView('tree')}}/>:visibleTree?.nodes.length?renderNodes(visibleTree.nodes):<div className="empty-state"><h3>找到一个能开始的小步骤</h3><p>在对话中描述目标，或手动添加任务。</p>{onOpenChat&&<mdui-button variant="filled" icon="forum" onClick={()=>{if(dataOwner.current&&dataOwner.current!==currentUserId.current){onNotice(SESSION_OWNER_CHANGED);return}onOpenChat(selected)}}>在对话中拆解</mdui-button>}</div>}
+        {loading&&!visibleTree?<p className="empty">正在读取任务树…</p>:view==='gantt'?<GanttView key={`${userId}:${selected.id}`} goal={selected} nodes={visibleTree?.nodes??[]} timezone={timezone} busy={Boolean(busy)||!visibleTree} onEdit={task=>openTask(task)} onAdd={parent=>openTask(undefined,parent,parent?'task':'milestone')}/>:view==='map'?<GoalMapView goal={selected} onNotice={onNotice} onOpenTask={id=>{setSelectedTask(id);setView('tree')}}/>:visibleTree?.nodes.length?renderNodes(visibleTree.nodes):<div className="empty-state"><h3>找到一个能开始的小步骤</h3><p>在对话中描述目标，或手动添加任务。</p>{onOpenChat&&<mdui-button variant="filled" icon="forum" onClick={()=>{if(dataOwner.current&&dataOwner.current!==currentUserId.current){onNotice(SESSION_OWNER_CHANGED);return}onOpenChat(selected)}}>在对话中拆解</mdui-button>}</div>}
         <details className="workspace-disclosure"><summary>更多目标操作</summary><div className="actions">
           <mdui-button variant="text" disabled={Boolean(busy)} onClick={()=>setGoalStatus(selected.status==='active'?'paused':'active')}>{selected.status==='active'?'暂停目标':'恢复目标'}</mdui-button>
           {selected.status==='active'&&<mdui-button variant="text" disabled={Boolean(busy)} onClick={()=>setGoalStatus('completed')}>标记目标完成</mdui-button>}
@@ -329,6 +336,14 @@ export function GoalManager({ userId,onNotice, refreshVersion=0, onBusinessChang
         <mdui-text-field disabled={Boolean(busy)} label="任务标题" variant="outlined" value={taskDraft.title} onInput={event=>setTaskDraft(d=>({...d,title:fieldValue(event)}))}/>
         <div className="form-row"><mdui-select disabled={Boolean(busy)} label="类型" variant="outlined" value={taskDraft.type} onChange={event=>setTaskDraft(d=>({...d,type:fieldValue(event)}))}>{Object.entries(TASK_TYPES).map(([value,label])=><mdui-menu-item key={value} value={value}>{label}</mdui-menu-item>)}</mdui-select>
         <mdui-select disabled={Boolean(busy)} label="上级任务" variant="outlined" value={taskDraft.parent_id} onChange={event=>setTaskDraft(d=>({...d,parent_id:fieldValue(event)}))}><mdui-menu-item value="">直接属于目标</mdui-menu-item>{editorTasks.filter(task=>!excludedParents.has(task.id)&&(canParent(task)||task.id===editor.task?.parent_id)).map(task=><mdui-menu-item key={task.id} value={task.id} disabled={!canParent(task)}>{task.title}{!canParent(task)?` · ${TASK_STATUS[task.status]}（当前上级）`:''}</mdui-menu-item>)}</mdui-select></div>
+        <fieldset className="gantt-date-fields"><legend>{taskDraft.type==='milestone'?'阶段计划周期':'计划日期'}</legend>
+          {parentRow?.range&&<p className="meta">上级「{parentRow.task.title}」：{parentRow.range.start} → {parentRow.range.end}{parentRow.source==='derived'?'（自动汇总）':''}，可作为子任务排期参考。</p>}
+          <div className="form-row"><mdui-text-field disabled={Boolean(busy)} label="计划开始日期" type="date" variant="outlined" value={taskDraft.planned_start} onInput={event=>setTaskDraft(d=>({...d,planned_start:fieldValue(event)}))}/><mdui-text-field disabled={Boolean(busy)} label="计划结束日期" type="date" variant="outlined" value={taskDraft.planned_end} onInput={event=>setTaskDraft(d=>({...d,planned_end:fieldValue(event)}))}/></div>
+          {!taskDraft.planned_start&&!taskDraft.planned_end&&editorRow?.hasChildren&&<p className="meta">留空时按已排期子任务自动汇总{editorRow.source==='derived'&&editorRow.range?`：${editorRow.range.start} → ${editorRow.range.end}`:'，没有可用日期时显示未排期'}。</p>}
+          {(taskDraft.planned_start||taskDraft.planned_end)&&<mdui-button variant="text" disabled={Boolean(busy)} onClick={()=>setTaskDraft(d=>({...d,planned_start:'',planned_end:''}))}>清空计划日期</mdui-button>}
+          {dateError&&<p role="alert" className="form-error">{dateError}</p>}
+          <p className="meta">结束日期包含当天。计划日期用于长期规划，每日安排按现有规则生成。</p>
+        </fieldset>
         <mdui-select disabled={Boolean(busy)} label="前置任务（可多选）" variant="outlined" multiple value={taskDraft.depends_on} onChange={event=>setTaskDraft(d=>({...d,depends_on:dependencyValues(event)}))}>{editorTasks.filter(task=>task.id!==editor.task?.id&&(!['cancelled','superseded'].includes(task.status)||taskDraft.depends_on.includes(task.id))).map(task=><mdui-menu-item key={task.id} value={task.id}>{task.title} · {TASK_STATUS[task.status]||task.status}</mdui-menu-item>)}{taskDraft.depends_on.filter(id=>!editorTasks.some(task=>task.id===id)).map(id=><mdui-menu-item key={id} value={id}>前置任务不可用（保留原关系）</mdui-menu-item>)}</mdui-select>
         <p className="meta">仅在必须取得前置成果才能开始时设置依赖。通常的工作顺序用任务排列表示，准备工作可以并行。</p>
         <mdui-text-field disabled={Boolean(busy)} label="任务完成标准" variant="outlined" rows={2} value={taskDraft.success_criteria} onInput={event=>setTaskDraft(d=>({...d,success_criteria:fieldValue(event)}))}/>
@@ -336,7 +351,7 @@ export function GoalManager({ userId,onNotice, refreshVersion=0, onBusinessChang
         <details><summary>总工作量、优先级与说明</summary><div className="form-stack"><div className="form-row"><mdui-text-field disabled={Boolean(busy)} label="预计总用时（分钟）" type="number" min={1} max={1440} value={taskDraft.estimate_minutes} onInput={event=>setTaskDraft(d=>({...d,estimate_minutes:fieldValue(event)}))}/><mdui-text-field disabled={Boolean(busy)} label="优先级（0–100）" type="number" min={0} max={100} value={taskDraft.priority} onInput={event=>setTaskDraft(d=>({...d,priority:fieldValue(event)}))}/></div><p className="meta">这里记录整个任务的预计总工作量；每日专注预算由今日安排单独记录。</p><mdui-text-field disabled={Boolean(busy)} label="任务说明" rows={2} value={taskDraft.description} onInput={event=>setTaskDraft(d=>({...d,description:fieldValue(event)}))}/></div></details>
       </>}{editor.kind==='task'&&taskNumberError&&<p role="alert" className="form-error">{taskNumberError}</p>}</div>
       <mdui-button slot="action" variant="text" onClick={()=>setEditor(null)} disabled={Boolean(busy)}>取消</mdui-button>
-      <mdui-button slot="action" variant="filled" loading={busy==='editor'} disabled={Boolean(busy)||editorOwnerChanged||(editor.kind==='goal'?(!goalDraft.title.trim()||!goalDraft.success_criteria.trim()):(editorGoalMissing||!taskDraft.title.trim()||!taskDraft.success_criteria.trim()||!taskDraft.minimum_action.trim()||!validEstimate||!validPriority))} onClick={saveEditor}>保存</mdui-button>
+      <mdui-button slot="action" variant="filled" loading={busy==='editor'} disabled={Boolean(busy)||editorOwnerChanged||(editor.kind==='goal'?(!goalDraft.title.trim()||!goalDraft.success_criteria.trim()):(editorGoalMissing||!taskDraft.title.trim()||!taskDraft.success_criteria.trim()||!taskDraft.minimum_action.trim()||!validEstimate||!validPriority||Boolean(dateError)))} onClick={saveEditor}>保存</mdui-button>
     </mdui-dialog>}
     {deleteTarget&&<mdui-dialog ref={deleteRef} open close-on-esc headline="移入回收站" role="dialog" aria-label="删除影响预览">
       <div className="form-stack"><p>「{deleteTarget.value.title}」{deleteTarget.kind==='goal'?`及其 ${affected.length} 项任务`:`及其 ${Math.max(0,affected.length-1)} 项子任务`}将移入回收站。</p><p className="meta">未完成的今日安排会移出，历史推进和专注记录会保留。恢复后会重新安排未来任务。</p>{affected.length>1&&<ul className="delete-preview">{affected.slice(0,8).map(task=><li key={task.id}>{task.title}</li>)}{affected.length>8&&<li>还有 {affected.length-8} 项</li>}</ul>}{error&&<p role="alert" className="form-error">{error}</p>}</div>

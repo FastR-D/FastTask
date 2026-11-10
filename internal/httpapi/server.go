@@ -536,11 +536,13 @@ func (s taskRoutes) RegisterRoutes(api huma.API) {
 			MinimumAction   string             `json:"minimum_action" minLength:"1"`
 			Priority        int                `json:"priority" minimum:"0" maximum:"100"`
 			Position        int                `json:"position"`
+			PlannedStart    *string            `json:"planned_start,omitempty" required:"false"`
+			PlannedEnd      *string            `json:"planned_end,omitempty" required:"false"`
 		}
 	}
 	register(api, "create-task", http.MethodPost, "/tasks", "Create task", userSecurity(), func(ctx context.Context, input *createInput) (*resourceResponse[persistence.Task], error) {
 		b := input.Body
-		task := persistence.Task{GoalID: b.GoalID, ParentID: b.ParentID, DependsOn: b.DependsOn.Value, Type: b.Type, Title: b.Title, Description: b.Description, SuccessCriteria: b.SuccessCriteria, EstimateMinutes: b.EstimateMinutes, MinimumAction: b.MinimumAction, Priority: b.Priority, Position: b.Position}
+		task := persistence.Task{GoalID: b.GoalID, ParentID: b.ParentID, DependsOn: b.DependsOn.Value, Type: b.Type, Title: b.Title, Description: b.Description, SuccessCriteria: b.SuccessCriteria, EstimateMinutes: b.EstimateMinutes, MinimumAction: b.MinimumAction, Priority: b.Priority, Position: b.Position, PlannedStart: b.PlannedStart, PlannedEnd: b.PlannedEnd}
 		if err := s.app.CreateTaskWithExplicitPriority(ctx, principal(ctx).UserID, &task); err != nil {
 			return nil, mapError(err)
 		}
@@ -579,6 +581,8 @@ func (s taskRoutes) RegisterRoutes(api huma.API) {
 			SuccessCriteria *string            `json:"success_criteria,omitempty"`
 			MinimumAction   *string            `json:"minimum_action,omitempty"`
 			BlockedReason   *string            `json:"blocked_reason,omitempty"`
+			PlannedStart    nullableString     `json:"planned_start,omitempty" required:"false"`
+			PlannedEnd      nullableString     `json:"planned_end,omitempty" required:"false"`
 		}
 	}
 	register(api, "patch-task", http.MethodPatch, "/tasks/{task_id}", "Update task", userSecurity(), func(ctx context.Context, input *patchInput) (*resourceResponse[persistence.Task], error) {
@@ -599,6 +603,15 @@ func (s taskRoutes) RegisterRoutes(api huma.API) {
 			raw["parent_id"] = nil
 			if !input.Body.ParentID.Null {
 				raw["parent_id"] = input.Body.ParentID.Value
+			}
+		}
+		for key, value := range map[string]nullableString{"planned_start": input.Body.PlannedStart, "planned_end": input.Body.PlannedEnd} {
+			delete(raw, key)
+			if value.Sent {
+				raw[key] = nil
+				if !value.Null {
+					raw[key] = value.Value
+				}
 			}
 		}
 		for k, v := range raw {

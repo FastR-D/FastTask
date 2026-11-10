@@ -7,6 +7,7 @@ FastTask 是面向科研工作的长期目标与每日推进工作台。把目�
 ## 能做什么
 
 - **管理目标与任务树**：创建目标、里程碑和行动，编辑、移动、暂停、完成、重新打开；删除进入回收站，恢复时保留原有历史。
+- **甘特图规划阶段**：在目标任务中查看阶段和任务时间轴，手填计划日期或从子任务自动汇总，展示前置关系与日期提示，支持按月浏览和手机横向滚动。计划日期用于长期规划，每日安排继续按原有规则生成。
 - **安排今天与未来七天**：围绕主要科研目标安排真实可执行的叶子任务。通常每日三项，八项可形成 3/3/2；不足时说明依赖、预算或状态原因，不复制工作凑数。
 - **继续聊天补任务**：助手读取当前任务树后提出增删改或排期建议，用户确认后应用。有空位和剩余预算时可补到今天，已开始或有证据的承诺受到保护。
 - **遵守真实依赖**：需要前置产物的任务，必须等待前置 Task 最终完成。一般工作顺序可以用排序表达，不必人为增加硬依赖。
@@ -81,6 +82,19 @@ CGO_ENABLED=1 go build -trimpath -o bin/fasttask ./cmd/fasttask
 
 配置从进程环境读取，也会加载当前工作目录下的 `.env`；已经设置的进程环境变量优先。不要把 `.env`、数据库、备份或访问凭据提交到仓库。
 
+### 环境地址
+
+FastTask 当前区分生产环境和测试环境：
+
+| 环境 | `FASTTASK_PUBLIC_URL` | 用途 |
+| --- | --- | --- |
+| 生产 | `https://task.fastrd.io` | 正式用户、正式业务及 FastResearch 生产集成 |
+| 测试 | `https://task.fast.0x535a.cn` | 开发、联调、验收和测试部署 |
+
+两套环境使用独立部署和独立数据。修改配置、执行迁移或验证接口时，必须先确认当前操作针对的是哪一个环境；测试环境的变更不得默认视为生产发布。
+
+实际源站、测试专用部署和回滚方式见 [部署环境说明](docs/deployment.md)；甘特图的测试结果见 [测试与部署记录](docs/gantt-testing.md)。
+
 | 变量 | 默认值或用途 |
 | --- | --- |
 | `FASTTASK_LISTEN` / `FASTTASK_PORT` | `127.0.0.1` / `10000` |
@@ -101,7 +115,8 @@ CGO_ENABLED=1 go build -trimpath -o bin/fasttask ./cmd/fasttask
 | `FASTTASK_FASTRESEARCH_URL` | FastTask 服务端访问 FastResearch 的地址（容器内通常为 `http://host.docker.internal:8787`） |
 | `FASTTASK_FASTRESEARCH_PUBLIC_URL` | 浏览器访问 FastResearch 的公开地址；生产环境必须为 HTTPS |
 | `FASTTASK_FASTRESEARCH_SSO_SECRET` | 与 FastResearch `FASTRESEARCH_FASTTASK_SSO_SECRET` 相同的共享密钥，至少 32 字符 |
-| `FASTTASK_FASTRESEARCH_INGEST_KEY` | FastResearch 服务端读取当日任务的共享密钥；需与 FastResearch 的 `FASTTASK_API_KEY` 一致 |
+| `FASTTASK_FASTRESEARCH_INGEST_KEY` | 旧共享 Key；仅在 `FASTTASK_FASTRESEARCH_ALLOW_LEGACY_INGEST_KEY=true` 时兼容 |
+| `FASTTASK_FASTCAS_SERVICE_*` | FastResearch 服务身份：issuer、客户端白名单、`fasttask-api` audience、scope 与 receiver 白名单 |
 | `FASTTASK_FASTRESEARCH_LOOPBACK_HTTP` | 生产环境允许回环地址使用明文 HTTP；仅本机开发 |
 | `FASTTASK_AGENT_MAX_TURNS` / `FASTTASK_AGENT_MAX_ATTEMPTS` | `8` / `10`；流响应轮次与包含失败建连的总尝试分别计数 |
 | `FASTTASK_AGENT_MAX_OUTPUT_TOKENS` / `FASTTASK_AGENT_CONTEXT_BYTES` | `4096` / `131072`；上游输出 cap 与历史文本字节预算 |
@@ -126,7 +141,7 @@ FASTTASK_ADMIN_PASSWORD=REPLACE_WITH_A_STRONG_INITIAL_PASSWORD
 
 启用 FastCAS 登录时，必须同时配置 `FASTTASK_FASTCAS_ISSUER`、`FASTTASK_FASTCAS_CLIENT_ID`、`FASTTASK_FASTCAS_CLIENT_SECRET`、`FASTTASK_FASTCAS_REDIRECT_URI`；全部留空则保留本地账号登录。
 
-启用 FastResearch Key 登录时，必须同时配置 `FASTTASK_FASTRESEARCH_URL`、`FASTTASK_FASTRESEARCH_PUBLIC_URL` 和至少 32 字符的 `FASTTASK_FASTRESEARCH_SSO_SECRET`，并把 `FASTTASK_FASTRESEARCH_LOGIN_ENABLED` 设为 `true`。FastResearch 侧需配置相同的 `FASTRESEARCH_FASTTASK_SSO_SECRET`。普通成员只通过 FastResearch Key 登录；本地账号和密码仅保留给管理员。FastResearch 工作台读取今日任务还需要 `FASTTASK_FASTRESEARCH_INGEST_KEY`，其值与 FastResearch 的 `FASTTASK_API_KEY` 一致。本机以 `FASTTASK_ENV=production` 运行时，如果 FastResearch 公开地址是 `http://127.0.0.1`、`http://localhost` 或 `http://[::1]`，需要同时设置 `FASTTASK_FASTRESEARCH_LOOPBACK_HTTP=true`。
+启用 FastResearch Key 登录时，必须同时配置 `FASTTASK_FASTRESEARCH_URL`、`FASTTASK_FASTRESEARCH_PUBLIC_URL` 和至少 32 字符的 `FASTTASK_FASTRESEARCH_SSO_SECRET`，并把 `FASTTASK_FASTRESEARCH_LOGIN_ENABLED` 设为 `true`。FastResearch 侧需配置相同的 `FASTRESEARCH_FASTTASK_SSO_SECRET`。普通成员只通过 FastResearch Key 登录；本地账号和密码仅保留给管理员。FastResearch 工作台读取今日任务使用 FastCAS 服务令牌；旧 `FASTTASK_FASTRESEARCH_INGEST_KEY` 需配合 `FASTTASK_FASTRESEARCH_ALLOW_LEGACY_INGEST_KEY=true` 才保留。本机以 `FASTTASK_ENV=production` 运行时，如果 FastResearch 公开地址是 `http://127.0.0.1`、`http://localhost` 或 `http://[::1]`，需要同时设置 `FASTTASK_FASTRESEARCH_LOOPBACK_HTTP=true`。
 
 两端当前的部署拓扑、SSO 时序、今日任务接口、密钥对应关系、安全边界和排障方法见 [docs/fastresearch-integration.md](docs/fastresearch-integration.md)。
 
@@ -218,7 +233,7 @@ Content-Type: application/json
 
 撤销调用上表的 `/reopenings` 接口，提交 `{"summary":"纠正误标记"}`，并使用最新条目 ETag。一次新命令使用新幂等键；结果未知的重试沿用原键和原请求内容。计时完成还需引用有效 `work_session_ids`。若明确联合确认整项任务，提交 `complete_task:true` 和当前 `task_if_match`；撤销今日推进仍保留独立的整项任务成果。
 
-今日任务支持“删除今日任务”后任选一至三项删除，包括已完成、进行中和已跳过项。只移除当天的安排，目标任务、专注和推进证据保留；当天不自动补回被删除的位置，需要时明确点击“重新安排今天”。接口为 `POST /api/v1/daily-plans/{plan_id}/item-deletions`，使用计划 `If-Match`、`Idempotency-Key`，请求体为 `{"items":[{"id":"条目ID","if_match":"条目ETag"}]}`。批量操作在同一事务完成；任一条目过期时整体拒绝。数据库自动迁移至版本 23。
+今日任务支持“删除今日任务”后任选一至三项删除，包括已完成、进行中和已跳过项。只移除当天的安排，目标任务、专注和推进证据保留；当天不自动补回被删除的位置，需要时明确点击“重新安排今天”。接口为 `POST /api/v1/daily-plans/{plan_id}/item-deletions`，使用计划 `If-Match`、`Idempotency-Key`，请求体为 `{"items":[{"id":"条目ID","if_match":"条目ETag"}]}`。批量操作在同一事务完成；任一条目过期时整体拒绝。数据库自动迁移至版本 24。
 
 Windows 笔记本的蓝牙墨水屏入口为“工牌更新”，使用控制台图标，自动读取当前登录用户的当日任务和状态，不在此页标记完成。既有 HTTP 设备接口使用独立 `X-Device-Token`，可通过设备 API 管理；Panel HTTP 接口使用用户认证，或代表相应用户且带 `panel:summary:read` / `panel:tasks:read` 范围的服务令牌。设备和 Panel 的只读权限不授予完成或撤销权限；需要写入时使用用户接口和用户授权。
 

@@ -6,6 +6,8 @@
 >
 > 本文只记录两端代码中已经存在的行为；预留或历史协议单独标出，不视为当前可用能力。
 
+> **环境边界**：`https://task.fastrd.io` 是生产环境地址；`https://task.fast.0x535a.cn` 是 FastTask 测试环境地址，用于开发、联调和验收。本文第 3 节描述生产链路，测试环境不应直接套用生产数据或生产发布流程。
+
 ## 1. 结论摘要
 
 FastTask 与 FastResearch 是两套独立部署、独立数据库的服务。当前连接分为三条主链路：
@@ -57,6 +59,8 @@ flowchart LR
 | --- | --- | --- |
 | FastResearch | `https://fastrd.io` | `http://127.0.0.1:8787` |
 | FastTask | `https://task.fastrd.io` | `http://127.0.0.1:10000` |
+
+FastTask 测试环境使用独立公开地址 `https://task.fast.0x535a.cn`，不改变生产环境的 `FASTTASK_PUBLIC_URL`、FastResearch SSO 或代理配置。
 
 FastResearch 的 `server/fasttask-proxy.mjs` 会识别 `FASTTASK_PROXY_HOST`（默认 `task.fastrd.io`），把请求透明转发到 `FASTTASK_PROXY_URL`（默认 `http://127.0.0.1:10000`）。因此公网 FastTask 页面和 API 可以继续使用 `task.fastrd.io`，而 FastTask 进程本身只监听回环地址。
 
@@ -205,14 +209,15 @@ FastResearch 服务端对 `today` 结果做 8 秒短缓存，用于合并同时�
 ```http
 POST /api/v1/integrations/fastresearch/today
 Content-Type: application/json
-X-API-Key: <FASTTASK_FASTRESEARCH_INGEST_KEY>
+Authorization: Bearer <FastCAS client_credentials token>
 
 {"receiver_refs":["account_...","account_..."]}
 ```
 
 规则：
 
-- 认证头支持 `X-API-Key`；兼容旧调用方的 `X-FastResearch-Provision-Key`。
+- 主认证为 FastCAS 服务令牌：校验签名、issuer、`fasttask-api` audience、`integrations:fastresearch` scope、`service=true`、`sub === client_id`，并限制允许的客户端和 `receiver_refs`。
+- 旧 `X-API-Key` / `X-FastResearch-Provision-Key` 只在 `FASTTASK_FASTRESEARCH_ALLOW_LEGACY_INGEST_KEY=true` 时接受；Bearer 失败不会回退到旧 Key，二者同请求会被拒绝。
 - `receiver_refs` 必填；空白值去重后最多处理 200 个。
 - 返回按请求顺序排列的 `members`；单个账户不存在时只把该成员的 `found` 置为 `false`，不会让整个批次失败。
 - 响应设置 `Cache-Control: no-store`，请求体上限 256 KiB。
@@ -301,6 +306,14 @@ FastResearch 在这两个接口中只使用当前成员会话解析 `accountId`�
 | `FASTTASK_FASTRESEARCH_PUBLIC_URL` | `https://fastrd.io` | 浏览器访问 FastResearch 的公开地址 |
 | `FASTTASK_FASTRESEARCH_SSO_SECRET` | 随机值，至少 32 字符 | 必须与 FastResearch 的 `FASTRESEARCH_FASTTASK_SSO_SECRET` 相同 |
 | `FASTTASK_FASTRESEARCH_INGEST_KEY` | 随机值 | 必须与 FastResearch 的 `FASTTASK_API_KEY` 相同 |
+| `FASTTASK_FASTRESEARCH_ALLOW_LEGACY_INGEST_KEY` | `false` | 仅在迁移窗口显式启用旧共享 Key |
+| `FASTTASK_FASTCAS_SERVICE_ENABLED` | `true` | 启用 FastResearch 的 FastCAS 服务令牌认证 |
+| `FASTTASK_FASTCAS_SERVICE_ISSUER` | `https://cas.fastrd.io` | FastCAS issuer origin |
+| `FASTTASK_FASTCAS_SERVICE_CLIENT_ID` | `fasttask-api` | 接收端 discovery 客户端 ID |
+| `FASTTASK_FASTCAS_SERVICE_AUDIENCE` | `fasttask-api` | 令牌 audience；默认值相同 |
+| `FASTTASK_FASTCAS_SERVICE_ALLOWED_CLIENT_IDS` | `fastresearch` | 允许调用本接口的服务客户端，逗号分隔，精确匹配 |
+| `FASTTASK_FASTCAS_SERVICE_ALLOWED_RECEIVER_REFS` | `account_a,account_b` | 服务令牌允许读取的稳定 FastResearch accountId |
+| `FASTTASK_FASTCAS_SERVICE_ALLOW_LOOPBACK_HTTP` | `false` | 仅本地开发允许回环 HTTP issuer |
 | `FASTTASK_FASTRESEARCH_LOOPBACK_HTTP` | `false` | 生产环境仅允许回环 HTTP 地址时设为 `true` |
 
 ### 6.2 FastResearch 侧
@@ -309,7 +322,12 @@ FastResearch 在这两个接口中只使用当前成员会话解析 `accountId`�
 | --- | --- | --- |
 | `FASTTASK_PUBLIC_URL` | `https://task.fastrd.io` | 浏览器跳转 FastTask 的地址 |
 | `FASTTASK_URL` | `http://127.0.0.1:10000` | FastResearch 服务端访问 FastTask 的地址 |
-| `FASTTASK_API_KEY` | 随机值 | 必须与 FastTask 的 `FASTTASK_FASTRESEARCH_INGEST_KEY` 相同 |
+| `FASTTASK_API_KEY` | 空 | 旧共享 Key，仅在显式兼容模式下使用 |
+| `FASTTASK_FASTCAS_SERVICE_ENABLED` | `true` | 为 FastTask 调用启用 FastCAS 服务身份 |
+| `FASTTASK_FASTCAS_SERVICE_ISSUER` | `https://cas.fastrd.io` | FastCAS issuer origin |
+| `FASTTASK_FASTCAS_SERVICE_CLIENT_ID` | `fastresearch` | FastCAS 服务客户端 ID |
+| `FASTTASK_FASTCAS_SERVICE_CLIENT_SECRET` | 随机值 | FastCAS 服务客户端密钥，只保存在 FastResearch 服务端 |
+| `FASTTASK_FASTCAS_SERVICE_ALLOW_LOOPBACK_HTTP` | `false` | 仅本地开发允许回环 HTTP issuer |
 | `FASTRESEARCH_FASTTASK_SSO_SECRET` | 随机值，至少 32 字符 | 必须与 FastTask 的 `FASTTASK_FASTRESEARCH_SSO_SECRET` 相同 |
 | `FASTTASK_PROXY_HOST` | `task.fastrd.io` | FastResearch 代理 FastTask 时识别的 Host |
 | `FASTTASK_PROXY_URL` | `http://127.0.0.1:10000` | 代理目标 |
@@ -320,8 +338,11 @@ FastResearch 在这两个接口中只使用当前成员会话解析 `accountId`�
 个人 Key fk_...                只在 FastResearch 校验，不下发
 FASTTASK_FASTRESEARCH_SSO_SECRET
   == FASTRESEARCH_FASTTASK_SSO_SECRET      用于 /api/sso/consume
-FASTTASK_FASTRESEARCH_INGEST_KEY
-  == FASTTASK_API_KEY                      用于 /api/v1/integrations/fastresearch/today
+FastCAS service client fastresearch
+  -> audience fasttask-api
+  -> scope integrations:fastresearch      用于 /api/v1/integrations/fastresearch/today
+FASTTASK_FASTRESEARCH_INGEST_KEY == FASTTASK_API_KEY
+  仅在 FASTTASK_FASTRESEARCH_ALLOW_LEGACY_INGEST_KEY=true 时保留
 ```
 
 这些密钥是三组不同职责的凭证，不应复用 FastTask 的 JWT、模型 Provider Key 或 FastResearch 管理员密码。配置示例中只使用占位值，真实密钥不得提交到仓库。
@@ -363,8 +384,9 @@ FastResearch 代码中仍保留 FastTask 工作流客户端，FastTask `xiatong`
 | 返回 `found:false` | 该 `accountId` 尚未登录过 FastTask，或 FastTask 本地用户已停用 |
 | FastResearch 显示 FastTask 连接错误 | FastResearch 日志中的 4 秒超时、FastTask `/health/ready`、网络策略和代理配置 |
 | `task.fastrd.io` 返回 502 | FastResearch 代理目标 `FASTTASK_PROXY_URL`；FastTask 是否监听对应地址；Nginx 上游 |
-| API Key 返回 503 | FastTask 未配置 `FASTTASK_FASTRESEARCH_INGEST_KEY` |
-| API Key 返回 401 | 共享 Key 不一致，或请求未带 `X-API-Key` |
+| 服务令牌返回 503 | FastTask 未启用或未完整配置 `FASTTASK_FASTCAS_SERVICE_*` |
+| 服务令牌返回 401 | 签名、issuer、audience、scope、客户端或 receiver 不在允许范围 |
+| 旧 Key 返回 401 | `FASTTASK_FASTRESEARCH_ALLOW_LEGACY_INGEST_KEY` 未开启，或共享 Key 不一致 |
 
 ### 快速检查
 

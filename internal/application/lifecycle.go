@@ -71,8 +71,30 @@ func validateTaskFields(task *persistence.Task) error {
 	task.Description = strings.TrimSpace(task.Description)
 	task.SuccessCriteria, task.MinimumAction = strings.TrimSpace(task.SuccessCriteria), strings.TrimSpace(task.MinimumAction)
 	task.BlockedReason = strings.TrimSpace(task.BlockedReason)
+	if err := validatePlannedDates(task); err != nil {
+		return err
+	}
 	if (task.Type != "milestone" && task.Type != "task" && task.Type != "action") || task.Title == "" || utf8.RuneCountInString(task.Title) > 300 || task.SuccessCriteria == "" || utf8.RuneCountInString(task.SuccessCriteria) > 2000 || task.MinimumAction == "" || utf8.RuneCountInString(task.MinimumAction) > 2000 || utf8.RuneCountInString(task.Description) > 8000 || utf8.RuneCountInString(task.BlockedReason) > 2000 || task.Priority < 0 || task.Priority > 100 || task.EstimateMinutes < 1 || task.EstimateMinutes > 1440 || task.Position < 0 {
 		return ErrValidation
+	}
+	return nil
+}
+
+func validatePlannedDates(task *persistence.Task) error {
+	if (task.PlannedStart == nil) != (task.PlannedEnd == nil) {
+		return fmt.Errorf("%w: planned_start and planned_end must both be set or cleared", ErrValidation)
+	}
+	if task.PlannedStart == nil {
+		return nil
+	}
+	for _, date := range []*string{task.PlannedStart, task.PlannedEnd} {
+		parsed, err := time.Parse("2006-01-02", *date)
+		if err != nil || parsed.Year() < 1 || parsed.Format("2006-01-02") != *date {
+			return fmt.Errorf("%w: planned dates must use YYYY-MM-DD", ErrValidation)
+		}
+	}
+	if *task.PlannedEnd < *task.PlannedStart {
+		return fmt.Errorf("%w: planned_end must not precede planned_start", ErrValidation)
 	}
 	return nil
 }
@@ -206,7 +228,7 @@ func (a *GoalService) updateTaskTx(tx *gorm.DB, userID, id string, expected int,
 	before := *task
 	for key := range changes {
 		switch key {
-		case "type", "title", "description", "success_criteria", "minimum_action", "blocked_reason", "status", "priority", "estimate_minutes", "position", "parent_id", "depends_on":
+		case "type", "title", "description", "success_criteria", "minimum_action", "blocked_reason", "status", "priority", "estimate_minutes", "position", "parent_id", "depends_on", "planned_start", "planned_end":
 		default:
 			return nil, ErrValidation
 		}
@@ -219,6 +241,18 @@ func (a *GoalService) updateTaskTx(tx *gorm.DB, userID, id string, expected int,
 	for key, destination := range map[string]*int{"priority": &task.Priority, "estimate_minutes": &task.EstimateMinutes, "position": &task.Position} {
 		if err := changeInt(changes, key, destination); err != nil {
 			return nil, err
+		}
+	}
+	for key, destination := range map[string]**string{"planned_start": &task.PlannedStart, "planned_end": &task.PlannedEnd} {
+		if value, exists := changes[key]; exists {
+			*destination = nil
+			if value != nil {
+				date, ok := value.(string)
+				if !ok {
+					return nil, ErrValidation
+				}
+				*destination = &date
+			}
 		}
 	}
 	oldStatus := task.Status
@@ -285,7 +319,7 @@ func (a *GoalService) updateTaskTx(tx *gorm.DB, userID, id string, expected int,
 	task.Revision, task.UpdatedAt = expected+1, now
 	dependencyJSON, _ := json.Marshal(task.DependsOn)
 	result := tx.Model(&persistence.Task{}).Where("id = ? AND user_id = ? AND revision = ? AND deleted_at IS NULL", id, userID, expected).
-		Updates(map[string]any{"type": task.Type, "title": task.Title, "description": task.Description, "success_criteria": task.SuccessCriteria, "minimum_action": task.MinimumAction, "blocked_reason": task.BlockedReason, "status": task.Status, "priority": task.Priority, "estimate_minutes": task.EstimateMinutes, "position": task.Position, "parent_id": task.ParentID, "depends_on": string(dependencyJSON), "revision": task.Revision, "updated_at": now})
+		Updates(map[string]any{"type": task.Type, "title": task.Title, "description": task.Description, "success_criteria": task.SuccessCriteria, "minimum_action": task.MinimumAction, "blocked_reason": task.BlockedReason, "status": task.Status, "priority": task.Priority, "estimate_minutes": task.EstimateMinutes, "position": task.Position, "parent_id": task.ParentID, "depends_on": string(dependencyJSON), "planned_start": task.PlannedStart, "planned_end": task.PlannedEnd, "revision": task.Revision, "updated_at": now})
 	if result.Error != nil {
 		return nil, result.Error
 	}
