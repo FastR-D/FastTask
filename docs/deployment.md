@@ -16,6 +16,7 @@
 | 服务管理 | `dev` 用户级 systemd：`fasttask.service` |
 | 备份目录 | `/home/dev/FastTask-backups` |
 | 当前程序版本 | `0.1.0-gantt`，构建提交 `60ebca7bc86e2782497125d44251f0b0780354d5` |
+| 当前网页版本 | 工作台主题及入口修复 `a53395b`（发布源码 `9794eb5`） |
 | 数据库版本 | 24 |
 
 读取服务状态：
@@ -33,6 +34,24 @@ runuser -u dev -- ./bin/fasttask backup --verify /home/dev/FastTask-backups/<本
 ```
 
 先创建由 `dev` 用户拥有的备份目录。运行中的 SQLite 使用应用备份命令或 SQLite backup API，不直接复制数据库主文件。
+
+### 2026-11-10 工作台主题生产发布
+
+用户完成测试站验收后授权更新生产。北京时间 20:29:38 发布已验收的前端产物（`a53395b`），发布源码提交 `9794eb5`；生产源码使用 fast-forward 同步，后续仅同步发布文档。
+
+发布前归档旧网页，并通过现有应用生成、校验一致性数据库备份。使用 Linux `renameat2(RENAME_EXCHANGE)` 原子交换网页目录，保留旧版带内容哈希的资源供尚未刷新的客户端使用。服务进程 PID 未变，后端二进制与生产配置哈希校验一致；未修改 sidecar 构建，未运行数据库迁移。
+
+备份目录：`/home/dev/FastTask-backups/workbench-release-20261110`，仅属主可访问，包含旧网页归档、`production.db`、原网页目录 `previous-web-dist`、前后状态与资源清单、发布及公网检查记录。
+
+公网健康检查正常，JS/CSS、主题初始化脚本和 Service Worker 哈希与测试站构建一致。公网 HTML 在现有代理注入访问统计脚本后其余内容一致。真实浏览器验证了生产登录、旧 PWA 更新提示及刷新、主题与亮暗切换、整行入口及键盘操作、手机无横向溢出，未发现浏览器异常。
+
+仅回滚本次网页发布：
+
+```bash
+python3 /home/dev/FastTask-backups/workbench-release-20261110/rollback.py
+```
+
+脚本校验当前网页版本后原子恢复旧网页，保留当前数据库和运行进程，不恢复数据库备份。若之后又发布其他网页版本，脚本会拒绝覆盖，需要先核实当前版本。回滚后检查公网 `/health/ready` 及页面。
 
 ### 2026-11-10 甘特图生产发布
 
