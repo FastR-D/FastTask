@@ -9,18 +9,20 @@ type Props = {
   refreshVersion: number
   chatRequest?: number
   goalChatRequest?: GoalChatRequest
+  assistantOpen: boolean
+  onAssistantOpen: () => void
   onNotice: (message: string) => void
   onBusinessChanged: () => void
 }
 
 // The conversation has one permanent home, including while another application
 // page is open. Responsive layout hides panes; it never remounts the runtime.
-export function ResearchWorkspace({ active, timezone, userId, refreshVersion, chatRequest = 0, goalChatRequest, onNotice, onBusinessChanged }: Props) {
+export function ResearchWorkspace({ active, timezone, userId, refreshVersion, chatRequest = 0, goalChatRequest, onNotice, onBusinessChanged, assistantOpen, onAssistantOpen }: Props) {
   const [pane, setPane] = useState<'today' | 'chat'>('today')
-  const openChat = useCallback(() => setPane('chat'), [])
-  useEffect(() => { if (chatRequest) setPane('chat') }, [chatRequest])
+  const openChat = useCallback(() => { setPane('chat'); onAssistantOpen() }, [onAssistantOpen])
+  useEffect(() => { if (chatRequest) { setPane('chat'); onAssistantOpen() } }, [chatRequest, onAssistantOpen])
 
-  return <div className="research-workspace" data-pane={pane} hidden={!active}>
+  return <div className="research-workspace" data-pane={pane} data-assistant-open={assistantOpen} hidden={!active}>
     <nav className="research-pane-switch" aria-label="工作台视图">
       <button type="button" aria-pressed={pane==='today'} onClick={()=>setPane('today')}>今日任务</button>
       <button type="button" aria-pressed={pane==='chat'} onClick={openChat}>对话</button>
@@ -28,7 +30,7 @@ export function ResearchWorkspace({ active, timezone, userId, refreshVersion, ch
     <div className="research-today" aria-label="今日任务区域">
       <Today userId={userId} timezone={timezone} onNotice={onNotice} refreshVersion={refreshVersion} onBusinessChanged={onBusinessChanged} onOpenChat={openChat}/>
     </div>
-    <aside className="research-chat" aria-label="科研对话区域">
+    <aside id="research-assistant" className="research-chat" aria-label="科研对话区域">
       <header className="research-chat-head"><div><h2>研究助手</h2><p>说说你的目标，或现在遇到的阻碍。</p></div><mdui-icon name="forum"/></header>
       <AgentChat goalId={null} goalRequest={goalChatRequest} userId={userId} onNotice={onNotice} onBusinessChanged={onBusinessChanged} compact active={active}/>
     </aside>

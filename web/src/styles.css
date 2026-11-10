@@ -146,6 +146,7 @@ button,input,textarea{font:inherit}
 
 /* ===== 应用外壳：桌面导航栏(rail) / 移动端抽屉+顶栏+底部导航 ===== */
 .app-layout{height:100dvh}
+.workbench-sidebar,.workbench-topbar{display:none}
 .app-main{min-width:0}
 .page{max-width:1160px;margin:0 auto;padding:var(--ft-space-5) clamp(1rem,3vw,2.5rem)}
 
@@ -163,6 +164,12 @@ button,input,textarea{font:inherit}
 .rail-profile{display:flex;flex-direction:column;align-items:center;gap:var(--ft-space-1);padding:var(--ft-space-1) 0 calc(var(--ft-space-1) + env(safe-area-inset-bottom))}
 .theme-menu{display:inline-flex}
 .theme-menu mdui-menu{min-width:8.5rem}
+.visual-theme-menu{display:inline-flex}
+.visual-theme-menu mdui-menu{min-width:8.5rem}
+.rail-tool-button{display:grid;place-items:center;width:2.5rem;height:2.5rem;padding:0;border:0;border-radius:var(--mdui-shape-corner-full);background:transparent;color:rgb(var(--mdui-color-on-surface-variant));cursor:pointer}
+.rail-tool-button:hover{background:rgba(var(--mdui-color-on-surface),var(--mdui-state-layer-hover));color:rgb(var(--mdui-color-on-surface))}
+.rail-tool-button:focus-visible{outline:2px solid rgb(var(--ft-color-focus));outline-offset:2px}
+.rail-tool-button mdui-icon{font-size:1.25rem}
 .rail-avatar{
   width:2.4rem;height:2.4rem;border-radius:var(--mdui-shape-corner-full);
   background:rgb(var(--mdui-color-secondary-container));
