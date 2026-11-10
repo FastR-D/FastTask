@@ -12,87 +12,36 @@
   --ft-space-5:1.5rem;  /* 24px — between groups */
   --ft-space-6:2rem;    /* 32px — between sections */
 }
-/* FastWrite's blue/slate palette, mapped onto MDUI's existing theme contract.
-   Keep the semantic error and completion colours independent of the brand. */
-:root{
-  --mdui-color-primary-light:21,95,184;
-  --mdui-color-on-primary-light:255,255,255;
-  --mdui-color-primary-container-light:219,234,254;
-  --mdui-color-on-primary-container-light:17,61,112;
-  --mdui-color-inverse-primary-light:100,168,238;
-  --mdui-color-secondary-light:53,64,82;
-  --mdui-color-on-secondary-light:255,255,255;
-  --mdui-color-secondary-container-light:219,234,254;
-  --mdui-color-on-secondary-container-light:17,61,112;
-  --mdui-color-background-light:247,248,250;
-  --mdui-color-on-background-light:21,28,40;
-  --mdui-color-surface-light:255,255,255;
-  --mdui-color-surface-dim-light:223,227,232;
-  --mdui-color-surface-bright-light:255,255,255;
-  --mdui-color-surface-container-lowest-light:255,255,255;
-  --mdui-color-surface-container-low-light:252,252,253;
-  --mdui-color-surface-container-light:239,241,244;
-  --mdui-color-surface-container-high-light:223,227,232;
-  --mdui-color-surface-container-highest-light:203,209,217;
-  --mdui-color-surface-variant-light:239,241,244;
-  --mdui-color-on-surface-light:21,28,40;
-  --mdui-color-on-surface-variant-light:75,85,101;
-  --mdui-color-inverse-surface-light:35,45,61;
-  --mdui-color-inverse-on-surface-light:244,247,250;
-  --mdui-color-outline-light:146,155,168;
-  --mdui-color-outline-variant-light:223,227,232;
-  --mdui-color-surface-tint-color-light:21,95,184;
-  --mdui-color-primary-dark:100,168,238;
-  --mdui-color-on-primary-dark:16,36,61;
-  --mdui-color-primary-container-dark:22,56,95;
-  --mdui-color-on-primary-container-dark:183,220,255;
-  --mdui-color-inverse-primary-dark:21,95,184;
-  --mdui-color-secondary-dark:182,193,206;
-  --mdui-color-on-secondary-dark:35,45,61;
-  --mdui-color-secondary-container-dark:22,56,95;
-  --mdui-color-on-secondary-container-dark:183,220,255;
-  --mdui-color-background-dark:16,22,30;
-  --mdui-color-on-background-dark:244,247,250;
-  --mdui-color-surface-dark:23,30,39;
-  --mdui-color-surface-dim-dark:17,22,30;
-  --mdui-color-surface-bright-dark:42,53,67;
-  --mdui-color-surface-container-lowest-dark:17,22,30;
-  --mdui-color-surface-container-low-dark:21,27,36;
-  --mdui-color-surface-container-dark:28,37,48;
-  --mdui-color-surface-container-high-dark:42,53,67;
-  --mdui-color-surface-container-highest-dark:59,72,89;
-  --mdui-color-surface-variant-dark:42,53,67;
-  --mdui-color-on-surface-dark:244,247,250;
-  --mdui-color-on-surface-variant-dark:182,193,206;
-  --mdui-color-inverse-surface-dark:244,247,250;
-  --mdui-color-inverse-on-surface-dark:21,28,40;
-  --mdui-color-outline-dark:130,144,163;
-  --mdui-color-outline-variant-dark:59,72,89;
-  --mdui-color-surface-tint-color-dark:100,168,238;
-  --ft-color-action-fill-light:21,95,184;
-  --ft-color-action-hover-light:16,74,145;
-  --ft-color-focus-light:40,120,208;
-  --ft-color-action-fill-dark:14,99,156;
-  --ft-color-action-hover-dark:17,119,187;
-  --ft-color-focus-dark:91,163,234;
-  --ft-color-on-action:255,255,255;
-}
-:root,.mdui-theme-light{
-  --ft-color-action-fill:var(--ft-color-action-fill-light);
-  --ft-color-action-hover:var(--ft-color-action-hover-light);
-  --ft-color-focus:var(--ft-color-focus-light);
-}
-.mdui-theme-dark{
-  --ft-color-action-fill:var(--ft-color-action-fill-dark);
-  --ft-color-action-hover:var(--ft-color-action-hover-dark);
-  --ft-color-focus:var(--ft-color-focus-dark);
-}
-@media(prefers-color-scheme:dark){
-  .mdui-theme-auto{
-    --ft-color-action-fill:var(--ft-color-action-fill-dark);
-    --ft-color-action-hover:var(--ft-color-action-hover-dark);
-    --ft-color-focus:var(--ft-color-focus-dark);
-  }
+/* Remaining MDUI roles used by classic/workbench. Palette and mode come from foundation. */
+.fastui-mdui{
+  /* MDUI uses primary for text too; filled actions keep the separate primary-fill role below. */
+  --mdui-color-primary:var(--fastui-focus-rgb);
+  --mdui-color-secondary:var(--fastui-secondary-rgb);
+  --mdui-color-on-secondary:var(--fastui-surface-rgb);
+  --mdui-color-secondary-container:var(--fastui-selected-rgb);
+  --mdui-color-on-secondary-container:var(--fastui-text-rgb);
+  --mdui-color-tertiary:var(--fastui-success-rgb);
+  --mdui-color-on-tertiary:var(--fastui-surface-rgb);
+  --mdui-color-tertiary-container:var(--fastui-raised-rgb);
+  --mdui-color-on-tertiary-container:var(--fastui-success-rgb);
+  --mdui-color-on-error:var(--fastui-surface-rgb);
+  --mdui-color-error-container:var(--fastui-raised-rgb);
+  --mdui-color-on-error-container:var(--fastui-danger-rgb);
+  --mdui-color-surface-dim:var(--fastui-workspace-rgb);
+  --mdui-color-surface-bright:var(--fastui-surface-rgb);
+  --mdui-color-surface-container-lowest:var(--fastui-page-rgb);
+  --mdui-color-surface-container-low:var(--fastui-surface-rgb);
+  --mdui-color-surface-container-high:var(--fastui-border-rgb);
+  --mdui-color-surface-container-highest:var(--fastui-border-strong-rgb);
+  --mdui-color-surface-variant:var(--fastui-raised-rgb);
+  --mdui-color-inverse-surface:var(--fastui-text-rgb);
+  --mdui-color-inverse-on-surface:var(--fastui-surface-rgb);
+  --mdui-color-inverse-primary:var(--fastui-focus-rgb);
+  --mdui-color-surface-tint-color:var(--fastui-primary-rgb);
+  --ft-color-action-fill:var(--fastui-primary-rgb);
+  --ft-color-action-hover:var(--fastui-primary-hover-rgb);
+  --ft-color-focus:var(--fastui-focus-rgb);
+  --ft-color-on-action:var(--fastui-on-primary-rgb);
 }
 /* FastWrite uses a separate dark fill so white button labels stay legible,
    while links and focus rings can use the brighter blue text palette. */

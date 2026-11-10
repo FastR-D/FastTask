@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from 'node:zlib'
-import { defineConfig, type Plugin } from 'vite'
+import { build, defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
@@ -11,6 +11,30 @@ import { VitePWA } from 'vite-plugin-pwa'
 // drift apart. libfx's exports map does not expose the .wasm file, so the path is derived from the
 // sibling module it does expose.
 const require = createRequire(import.meta.url)
+
+// Preserve the pre-paint boot boundary while consuming the installed ESM package.
+// The app reads the same controller from window; it creates no second mode listener.
+function themeBoot(): Plugin {
+  const source = async () => {
+    const output = await build({ configFile: false, logLevel: 'silent',
+      build: { write: false, minify: true, lib: { entry: join(import.meta.dirname, 'src/theme-init.ts'), name: 'FastTaskTheme', formats: ['iife'] } },
+    })
+    const bundle = Array.isArray(output) ? output[0] : output
+    if (!('output' in bundle)) throw new Error('Theme boot must produce a bundle')
+    const chunk = bundle.output.find(item => item.type === 'chunk')
+    if (!chunk) throw new Error('Theme boot chunk is missing')
+    return chunk.code
+  }
+  return {
+    name: 'fasttask:theme-boot',
+    async generateBundle() { this.emitFile({ type: 'asset', fileName: 'theme-init.js', source: await source() }) },
+    configureServer(server) {
+      server.middlewares.use('/theme-init.js', (_req, response, next) => {
+        void source().then(code => { response.setHeader('Content-Type', 'text/javascript'); response.end(code) }).catch(next)
+      })
+    },
+  }
+}
 
 function fxCoreWasmPath(): string {
   return join(dirname(require.resolve('libfx/wasm')), 'fx-core.wasm')
@@ -45,6 +69,7 @@ function selfHostFxCore(): Plugin {
 export default defineConfig({
   plugins: [
     react(),
+    themeBoot(),
     selfHostFxCore(),
     // pwa.md §3: an installable, offline-readable PWA. injectManifest (a custom
     // src/sw.ts) is required because generateSW cannot express the per-user cache

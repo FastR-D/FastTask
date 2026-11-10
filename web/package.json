@@ -12,6 +12,7 @@
     "test:panel": "node --test tests/panel-*.test.mjs"
   },
   "dependencies": {
+    "@fastrd/ui-foundation": "https://github.com/FastR-D/FastUI/releases/download/v0.1.0/fastrd-ui-foundation-0.1.0.tgz",
     "@ai-sdk/openai-compatible": "3.0.53",
     "@ai-sdk/provider": "4.0.17",
     "@assistant-ui/react": "^0.15.21",
@@ -29,6 +30,7 @@
     "vite": "latest"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "26.6.2",
     "@types/react": "latest",
     "@types/react-dom": "latest",

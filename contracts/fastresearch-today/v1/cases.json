@@ -1,0 +1,45 @@
+{
+  "request": {"receiver_refs": [" account-a ", "account-a", "", "missing-account"]},
+  "normalized_refs": ["account-a", "missing-account"],
+  "response": {"members": [
+    {
+      "receiver_ref": "account-a", "found": true,
+      "user_id": "task-user-a", "display_name": "Research member",
+      "local_date": "$today", "timezone": "UTC", "plan_id": "today-plan-a",
+      "plan_status": "active", "plan_revision": 3, "updated_at": "2026-11-10T00:00:00Z",
+      "items": [
+        {"id": "item-read", "task_id": "task-read", "kind": "core", "title": "fastread: Read evidence", "commitment": "Extract two claims", "minimum_action": "Read the abstract", "status": "in_progress", "target_minutes": 30, "position": 1, "workspace": {"system": "fastread", "label": "FastRead", "url": "https://fastrd.io/read/"}},
+        {"id": "item-write", "task_id": "task-write", "kind": "core", "title": "fastwrite: Draft findings", "commitment": "Save a findings draft", "minimum_action": "Write one paragraph", "status": "satisfied", "completion_type": "result", "completion_summary": "Draft saved", "target_minutes": 45, "position": 2, "workspace": {"system": "fastwrite", "label": "FastWrite", "url": "https://fastrd.io/write/"}},
+        {"id": "item-review", "task_id": "task-review", "kind": "core", "title": "Review evidence", "commitment": "Check the claim list", "minimum_action": "Open the checklist", "status": "planned", "target_minutes": 45, "position": 3}
+      ],
+      "progress": {"total": 3, "completed": 1, "in_progress": 1, "planned": 1, "skipped": 0}
+    },
+    {"receiver_ref": "missing-account", "found": false, "items": [], "progress": {"total": 0, "completed": 0, "in_progress": 0, "planned": 0, "skipped": 0}}
+  ]},
+  "research_today": {
+    "received": true, "date": "$today", "timezone": "UTC", "planStatus": "active", "planRevision": 3, "updatedAt": "2026-11-10T00:00:00Z",
+    "items": [
+      {"id": "item-read", "taskId": "task-read", "kind": "core", "title": "fastread: Read evidence", "commitment": "Extract two claims", "minimumAction": "Read the abstract", "status": "in_progress", "completionType": "", "completionSummary": "", "targetMinutes": 30, "position": 1, "workspace": {"system": "fastread", "label": "FastRead", "url": "https://fastrd.io/read/"}},
+      {"id": "item-write", "taskId": "task-write", "kind": "core", "title": "fastwrite: Draft findings", "commitment": "Save a findings draft", "minimumAction": "Write one paragraph", "status": "satisfied", "completionType": "result", "completionSummary": "Draft saved", "targetMinutes": 45, "position": 2, "workspace": {"system": "fastwrite", "label": "FastWrite", "url": "https://fastrd.io/write/"}},
+      {"id": "item-review", "taskId": "task-review", "kind": "core", "title": "Review evidence", "commitment": "Check the claim list", "minimumAction": "Open the checklist", "status": "planned", "completionType": "", "completionSummary": "", "targetMinutes": 45, "position": 3, "workspace": null}
+    ],
+    "progress": {"total": 3, "completed": 1, "inProgress": 1, "planned": 1, "skipped": 0}, "error": ""
+  },
+  "auth_cases": [
+    {"name": "service", "status": 200},
+    {"name": "legacy", "status": 200},
+    {"name": "mixed", "status": 400},
+    {"name": "missing", "status": 401},
+    {"name": "wrong-scope", "status": 401},
+    {"name": "wrong-audience", "status": 401},
+    {"name": "wrong-issuer", "status": 401},
+    {"name": "wrong-client", "status": 401},
+    {"name": "non-service", "status": 401},
+    {"name": "wrong-subject", "status": 401},
+    {"name": "expired", "status": 401},
+    {"name": "wrong-signature", "status": 401},
+    {"name": "wrong-token-use", "status": 401},
+    {"name": "denied-receiver", "status": 403},
+    {"name": "service-disabled", "status": 503}
+  ]
+}

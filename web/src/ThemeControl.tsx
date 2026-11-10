@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fieldValue } from './mdui-react'
 import {
-  announceThemeChange,
   announceVisualThemeChange,
   isVisualTheme,
   isThemePreference,
@@ -56,7 +55,6 @@ function useThemePreference(): [ThemePreference, (value: ThemePreference) => voi
   function choose(value: ThemePreference) {
     setThemePreference(value)
     setPreference(value)
-    announceThemeChange(value)
   }
   return [preference, choose]
 }
