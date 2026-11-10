@@ -13,6 +13,7 @@ import (
 
 	"github.com/FastR-D/FastTask/internal/application"
 	"github.com/FastR-D/FastTask/internal/persistence"
+	platformauth "github.com/FastR-D/FastTask/internal/platform/auth"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gin-gonic/gin"
 )
@@ -159,10 +160,9 @@ type fastResearchTodayMember struct {
 }
 
 // registerFastResearchIntegration exposes the read-only daily plan surface the
-// FastResearch workspace uses to show today's FastTask tasks. It is a
-// server-to-server endpoint authenticated by the shared integration key, and the
-// stable receiver_ref is the FastResearch account ID; no personal Key or user
-// token crosses the boundary.
+// FastResearch workspace uses to show today's FastTask tasks. FastCAS service
+// tokens are the primary credential; the old shared key requires an explicit
+// compatibility switch and never acts as a fallback for an invalid bearer.
 func (s *Server) registerFastResearchIntegration() {
 	group := s.Engine.Group("/api/v1/integrations/fastresearch")
 	group.Use(func(c *gin.Context) {
@@ -174,7 +174,7 @@ func (s *Server) registerFastResearchIntegration() {
 }
 
 func (s *Server) fastResearchToday(c *gin.Context) {
-	if !s.requireFastResearchIntegrationKey(c) {
+	if !s.authorizeFastResearchIntegration(c) {
 		return
 	}
 	var body struct {
@@ -201,6 +201,14 @@ func (s *Server) fastResearchToday(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"detail": "receiver_refs is required"})
 		return
 	}
+	if _, ok := c.Get("fastresearch.service_client_id"); ok {
+		for _, ref := range refs {
+			if !fastResearchServiceAllowsReceiverRef(s.cfg.FastCASServiceAllowedReceiverRefs, ref) {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"detail": "receiver_ref is outside the FastCAS service authorization"})
+				return
+			}
+		}
+	}
 	deps := RouteDeps{app: s.app, auth: s.auth, cfg: &s.cfg}
 	members := make([]fastResearchTodayMember, 0, len(refs))
 	for _, ref := range refs {
@@ -209,7 +217,51 @@ func (s *Server) fastResearchToday(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"members": members})
 }
 
-func (s *Server) requireFastResearchIntegrationKey(c *gin.Context) bool {
+func fastResearchServiceAllowsReceiverRef(allowed []string, ref string) bool {
+	for _, candidate := range allowed {
+		if candidate == ref {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) authorizeFastResearchIntegration(c *gin.Context) bool {
+	authorization := strings.TrimSpace(c.GetHeader("Authorization"))
+	legacyKey := strings.TrimSpace(c.GetHeader("X-API-Key"))
+	if legacyKey == "" {
+		legacyKey = strings.TrimSpace(c.GetHeader("X-FastResearch-Provision-Key"))
+	}
+	if authorization != "" {
+		if legacyKey != "" {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"detail": "use either a FastCAS service token or the legacy integration key, not both"})
+			return false
+		}
+		parts := strings.Fields(authorization)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" || strings.Contains(parts[1], ",") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"detail": "invalid FastCAS service token"})
+			return false
+		}
+		claims, err := s.auth.VerifyFastCASServiceToken(c.Request.Context(), parts[1], "integrations:fastresearch")
+		if err != nil {
+			if errors.Is(err, platformauth.ErrFastCASServiceDisabled) {
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"detail": "FastCAS service authentication is not configured"})
+			} else {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"detail": "invalid FastCAS service token"})
+			}
+			return false
+		}
+		c.Set("fastresearch.service_client_id", claims.ClientID)
+		return true
+	}
+	if !s.cfg.FastResearchLegacyIngestKeyEnabled {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"detail": "legacy FastResearch integration key is disabled"})
+		return false
+	}
+	return s.requireLegacyFastResearchIntegrationKey(c)
+}
+
+func (s *Server) requireLegacyFastResearchIntegrationKey(c *gin.Context) bool {
 	configured := strings.TrimSpace(s.cfg.FastResearchIngestKey)
 	if configured == "" {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"detail": "FastResearch integration key is not configured"})

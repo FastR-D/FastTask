@@ -31,11 +31,12 @@ type Principal struct {
 }
 
 type Service struct {
-	store     *persistence.Store
-	config    config.Config
-	mu        sync.Mutex
-	throttle  *loginThrottle
-	casClient *fastcas.Client
+	store            *persistence.Store
+	config           config.Config
+	mu               sync.Mutex
+	throttle         *loginThrottle
+	casClient        *fastcas.Client
+	casServiceClient *fastcas.Client
 }
 
 // ErrLoginThrottled is returned while a client or account is cooling down after repeated failures.

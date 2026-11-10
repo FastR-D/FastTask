@@ -83,8 +83,20 @@ type Config struct {
 	// FastResearch origin bound to this machine only, matching FastCASLoopbackHTTP.
 	FastResearchLoopbackHTTP bool
 	// FastResearchIngestKey authenticates FastResearch's server-to-server reads
-	// (today's plan). Empty disables the integration endpoint.
+	// (today's plan) only when the legacy compatibility switch is enabled.
 	FastResearchIngestKey string
+	// FastResearchLegacyIngestKeyEnabled keeps the old shared key available for
+	// an explicit migration window. Service bearer tokens never fall back to it.
+	FastResearchLegacyIngestKeyEnabled bool
+	// FastCAS service authentication for FastResearch reads. The verifier uses
+	// the short-lived service token issued by the FastCAS client-credentials grant.
+	FastCASServiceEnabled             bool
+	FastCASServiceIssuer              string
+	FastCASServiceClientID            string
+	FastCASServiceAudience            string
+	FastCASServiceAllowedClientIDs    []string
+	FastCASServiceAllowedReceiverRefs []string
+	FastCASServiceLoopbackHTTP        bool
 
 	// Notification delivery (doc/notification.md §8). The channels and their credentials
 	// live in the database and are managed from the admin UI; these are the process-level
@@ -168,24 +180,32 @@ func Load() (Config, error) {
 		AgentMaxTurns:         limits["FASTTASK_AGENT_MAX_TURNS"], AgentMaxAttempts: limits["FASTTASK_AGENT_MAX_ATTEMPTS"], AgentMaxOutputTokens: limits["FASTTASK_AGENT_MAX_OUTPUT_TOKENS"], AgentContextBytes: limits["FASTTASK_AGENT_CONTEXT_BYTES"],
 		AgentWallClock: time.Duration(limits["FASTTASK_AGENT_WALL_CLOCK_MS"]) * time.Millisecond, AgentHeaderTimeout: time.Duration(limits["FASTTASK_AGENT_HEADER_TIMEOUT_MS"]) * time.Millisecond, AgentIdleTimeout: time.Duration(limits["FASTTASK_AGENT_IDLE_TIMEOUT_MS"]) * time.Millisecond,
 
-		SidecarEnabled:           envBool("FASTTASK_SIDECAR_ENABLED", false),
-		SidecarPreferred:         envBool("FASTTASK_SIDECAR_PREFERRED", false),
-		SidecarNodePath:          env("FASTTASK_SIDECAR_NODE_PATH", "node"),
-		SidecarSocket:            env("FASTTASK_SIDECAR_SOCKET", ""),
-		SidecarStartTimeout:      envDuration("FASTTASK_SIDECAR_START_TIMEOUT", 15*time.Second),
-		SidecarSpawn:             envBool("FASTTASK_SIDECAR_SPAWN", true),
-		SidecarSecret:            env("FASTTASK_SIDECAR_SECRET", ""),
-		FastCASIssuer:            env("FASTTASK_FASTCAS_ISSUER", ""),
-		FastCASClientID:          env("FASTTASK_FASTCAS_CLIENT_ID", ""),
-		FastCASClientSecret:      env("FASTTASK_FASTCAS_CLIENT_SECRET", ""),
-		FastCASRedirectURI:       env("FASTTASK_FASTCAS_REDIRECT_URI", ""),
-		FastCASLoopbackHTTP:      envBool("FASTTASK_FASTCAS_LOOPBACK_HTTP", false),
-		FastResearchURL:          strings.TrimRight(env("FASTTASK_FASTRESEARCH_URL", ""), "/"),
-		FastResearchPublicURL:    strings.TrimRight(env("FASTTASK_FASTRESEARCH_PUBLIC_URL", ""), "/"),
-		FastResearchSSOSecret:    env("FASTTASK_FASTRESEARCH_SSO_SECRET", ""),
-		FastResearchLoginEnabled: envBool("FASTTASK_FASTRESEARCH_LOGIN_ENABLED", false),
-		FastResearchLoopbackHTTP: envBool("FASTTASK_FASTRESEARCH_LOOPBACK_HTTP", false),
-		FastResearchIngestKey:    env("FASTTASK_FASTRESEARCH_INGEST_KEY", ""),
+		SidecarEnabled:                     envBool("FASTTASK_SIDECAR_ENABLED", false),
+		SidecarPreferred:                   envBool("FASTTASK_SIDECAR_PREFERRED", false),
+		SidecarNodePath:                    env("FASTTASK_SIDECAR_NODE_PATH", "node"),
+		SidecarSocket:                      env("FASTTASK_SIDECAR_SOCKET", ""),
+		SidecarStartTimeout:                envDuration("FASTTASK_SIDECAR_START_TIMEOUT", 15*time.Second),
+		SidecarSpawn:                       envBool("FASTTASK_SIDECAR_SPAWN", true),
+		SidecarSecret:                      env("FASTTASK_SIDECAR_SECRET", ""),
+		FastCASIssuer:                      env("FASTTASK_FASTCAS_ISSUER", ""),
+		FastCASClientID:                    env("FASTTASK_FASTCAS_CLIENT_ID", ""),
+		FastCASClientSecret:                env("FASTTASK_FASTCAS_CLIENT_SECRET", ""),
+		FastCASRedirectURI:                 env("FASTTASK_FASTCAS_REDIRECT_URI", ""),
+		FastCASLoopbackHTTP:                envBool("FASTTASK_FASTCAS_LOOPBACK_HTTP", false),
+		FastResearchURL:                    strings.TrimRight(env("FASTTASK_FASTRESEARCH_URL", ""), "/"),
+		FastResearchPublicURL:              strings.TrimRight(env("FASTTASK_FASTRESEARCH_PUBLIC_URL", ""), "/"),
+		FastResearchSSOSecret:              env("FASTTASK_FASTRESEARCH_SSO_SECRET", ""),
+		FastResearchLoginEnabled:           envBool("FASTTASK_FASTRESEARCH_LOGIN_ENABLED", false),
+		FastResearchLoopbackHTTP:           envBool("FASTTASK_FASTRESEARCH_LOOPBACK_HTTP", false),
+		FastResearchIngestKey:              env("FASTTASK_FASTRESEARCH_INGEST_KEY", ""),
+		FastResearchLegacyIngestKeyEnabled: envBool("FASTTASK_FASTRESEARCH_ALLOW_LEGACY_INGEST_KEY", false),
+		FastCASServiceEnabled:              envBool("FASTTASK_FASTCAS_SERVICE_ENABLED", false),
+		FastCASServiceIssuer:               env("FASTTASK_FASTCAS_SERVICE_ISSUER", ""),
+		FastCASServiceClientID:             env("FASTTASK_FASTCAS_SERVICE_CLIENT_ID", ""),
+		FastCASServiceAudience:             env("FASTTASK_FASTCAS_SERVICE_AUDIENCE", "fasttask-api"),
+		FastCASServiceAllowedClientIDs:     envList("FASTTASK_FASTCAS_SERVICE_ALLOWED_CLIENT_IDS", ""),
+		FastCASServiceAllowedReceiverRefs:  envList("FASTTASK_FASTCAS_SERVICE_ALLOWED_RECEIVER_REFS", ""),
+		FastCASServiceLoopbackHTTP:         envBool("FASTTASK_FASTCAS_SERVICE_ALLOW_LOOPBACK_HTTP", false),
 
 		NotificationsDisabled: !envBool("FASTTASK_NOTIFICATION_ENABLED", true),
 		NotificationTimeout:   time.Duration(notificationTimeoutMS) * time.Millisecond,
@@ -200,6 +220,28 @@ func Load() (Config, error) {
 	}
 	if fastcasFields != 0 && fastcasFields != 4 {
 		return Config{}, errors.New("configure all four FASTTASK_FASTCAS connection variables or leave all unset")
+	}
+	if c.FastCASServiceEnabled {
+		if c.FastCASServiceIssuer == "" || c.FastCASServiceClientID == "" || c.FastCASServiceAudience == "" || len(c.FastCASServiceAllowedClientIDs) == 0 || len(c.FastCASServiceAllowedReceiverRefs) == 0 {
+			return Config{}, errors.New("FASTTASK_FASTCAS_SERVICE_ENABLED requires ISSUER, CLIENT_ID, AUDIENCE, ALLOWED_CLIENT_IDS, and ALLOWED_RECEIVER_REFS")
+		}
+		serviceIssuer, parseErr := url.Parse(c.FastCASServiceIssuer)
+		if parseErr != nil || serviceIssuer.Host == "" || (serviceIssuer.Scheme != "http" && serviceIssuer.Scheme != "https") || serviceIssuer.User != nil || serviceIssuer.Path != "" || serviceIssuer.RawQuery != "" || serviceIssuer.Fragment != "" {
+			return Config{}, errors.New("FASTTASK_FASTCAS_SERVICE_ISSUER must be an http or https origin without credentials, path, query, or fragment")
+		}
+		if c.Environment == "production" && serviceIssuer.Scheme != "https" && !(c.FastCASServiceLoopbackHTTP && isLoopbackHost(serviceIssuer.Hostname())) {
+			return Config{}, errors.New("FASTTASK_FASTCAS_SERVICE_ISSUER must use https in production")
+		}
+		for _, clientID := range c.FastCASServiceAllowedClientIDs {
+			if clientID == "*" || strings.ContainsAny(clientID, " \t\r\n,") {
+				return Config{}, errors.New("FASTTASK_FASTCAS_SERVICE_ALLOWED_CLIENT_IDS must contain exact client IDs")
+			}
+		}
+		for _, ref := range c.FastCASServiceAllowedReceiverRefs {
+			if ref == "*" || len(ref) > 200 {
+				return Config{}, errors.New("FASTTASK_FASTCAS_SERVICE_ALLOWED_RECEIVER_REFS must contain exact receiver references")
+			}
+		}
 	}
 	if c.FastResearchLoginEnabled {
 		if c.FastResearchURL == "" || c.FastResearchPublicURL == "" || len(c.FastResearchSSOSecret) < 32 {
