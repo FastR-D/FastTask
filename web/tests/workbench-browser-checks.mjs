@@ -9,19 +9,38 @@ export async function checkWorkbench({ command, evaluate, until, artifacts }) {
   const resize = async width => { await command('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:width<600}); await settle(); };
   const screenshot = async name => { await command('Page.bringToFront'); const shot=await command('Page.captureScreenshot',{format:'png',captureBeyondViewport:false}); await writeFile(path.join(artifacts,`${name}.png`),Buffer.from(shot.data,'base64')); };
   // Use actual hit testing, including the custom elements' shadow buttons.
-  const tap = async selector => {
-    const point=await evaluate(`(()=>{const el=[...document.querySelectorAll(${JSON.stringify(selector)})].find(el=>{const r=el.getBoundingClientRect();return r.width&&r.height});if(!el)throw new Error('Missing visible target: '+${JSON.stringify(selector)});const r=el.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`);
+  const tap = async (selector,position = 'center') => {
+    const point=await evaluate(`(()=>{const el=[...document.querySelectorAll(${JSON.stringify(selector)})].find(el=>{const r=el.getBoundingClientRect();return r.width&&r.height});if(!el)throw new Error('Missing visible target: '+${JSON.stringify(selector)});const r=el.getBoundingClientRect();return {x:r.x+(${JSON.stringify(position)}==='right'?r.width-8:r.width/2),y:r.y+r.height/2}})()`);
     await command('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...point});
     await command('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...point});
     await settle();
   };
   const menu = async (kind,value) => {
-    await tap(`.${kind}-menu > mdui-button-icon`);
+    await tap(`.${kind}-menu > [slot="trigger"]`);
     await tap(`.${kind}-menu mdui-menu-item[value="${value}"]`);
   };
   await resize(1440);
   await until(()=>visible('.workbench-sidebar nav'),'sidebar missing');
   await until(()=>visible('.agent-input'),'assistant composer missing');
+  for(const kind of ['visual-theme','theme']) {
+    // Click the text and the empty right edge: both belong to the same full-row trigger.
+    for(const target of [`.workbench-sidebar .${kind}-menu [slot="trigger"]>span`,`.workbench-sidebar .${kind}-menu [slot="trigger"]`]) {
+      await tap(target,target.endsWith('>span')?'center':'right');
+      assert.equal(await evaluate(`document.querySelector('.workbench-sidebar .${kind}-menu').open`),true,'appearance row did not open its menu');
+      await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+      await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+      await settle();
+    }
+    await evaluate(`document.querySelector('.workbench-sidebar .${kind}-menu [slot="trigger"]').focus();true`);
+    await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r',unmodifiedText:'\r'});
+    await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+    await settle();
+    assert.equal(await evaluate(`document.querySelector('.workbench-sidebar .${kind}-menu').open`),true,'keyboard did not open appearance menu');
+    await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    await settle();
+  }
+
   assert.equal(await evaluate('document.documentElement.dataset.ftTheme'),'workbench');
   assert.equal(await evaluate('document.querySelector(".research-workspace").dataset.assistantOpen'),'true');
   await evaluate(`window.__composer=document.querySelector('.agent-input');window.__composer.value='保留这段研究草稿';window.__composer.dispatchEvent(new Event('input',{bubbles:true}));`);

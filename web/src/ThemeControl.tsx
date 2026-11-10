@@ -62,11 +62,13 @@ function useThemePreference(): [ThemePreference, (value: ThemePreference) => voi
 }
 
 /** Desktop control: an icon in the navigation rail that opens the three choices. */
-export function ThemeMenu() {
+export function ThemeMenu({ labelled = false }: { labelled?: boolean }) {
   const [preference, choose] = useThemePreference()
   const label = THEME_LABELS[preference]
-  return <mdui-dropdown className="theme-menu" placement="right-end">
-    <mdui-button-icon slot="trigger" icon={THEME_ICONS[preference]} aria-label={`颜色模式：${label}`} title={`颜色模式：${label}`}/>
+  return <mdui-dropdown className={`theme-menu${labelled ? ' appearance-menu' : ''}`} placement="right-end">
+    {labelled
+      ? <button type="button" slot="trigger" className="workbench-nav-item workbench-appearance-trigger" aria-label={`颜色模式：${label}`}><mdui-icon name={THEME_ICONS[preference]}/><span>颜色模式</span><small>{label}</small></button>
+      : <mdui-button-icon slot="trigger" icon={THEME_ICONS[preference]} aria-label={`颜色模式：${label}`} title={`颜色模式：${label}`}/> }
     <mdui-menu aria-label="颜色模式">
       {THEME_OPTIONS.map(value => <mdui-menu-item key={value} value={value} role="menuitemradio" aria-checked={preference === value} onClick={() => choose(value)}>
         <mdui-icon slot="icon" name={preference === value ? 'check' : undefined}/>{THEME_LABELS[value]}
@@ -112,11 +114,13 @@ function useVisualTheme(): [VisualTheme, (value: VisualTheme) => void] {
 }
 
 /** Desktop control for switching the visual language independently from light/dark mode. */
-export function VisualThemeMenu() {
+export function VisualThemeMenu({ labelled = false }: { labelled?: boolean }) {
   const [theme, choose] = useVisualTheme()
   const label = VISUAL_THEME_LABELS[theme]
-  return <mdui-dropdown className="visual-theme-menu" placement="right-end">
-    <mdui-button-icon slot="trigger" icon={VISUAL_THEME_ICONS[theme]} aria-label={`界面主题：${label}`} title={`界面主题：${label}`}/>
+  return <mdui-dropdown className={`visual-theme-menu${labelled ? ' appearance-menu' : ''}`} placement="right-end">
+    {labelled
+      ? <button type="button" slot="trigger" className="workbench-nav-item workbench-appearance-trigger" aria-label={`界面主题：${label}`}><mdui-icon name={VISUAL_THEME_ICONS[theme]}/><span>界面主题</span><small>{label}</small></button>
+      : <mdui-button-icon slot="trigger" icon={VISUAL_THEME_ICONS[theme]} aria-label={`界面主题：${label}`} title={`界面主题：${label}`}/> }
     <mdui-menu aria-label="界面主题">
       {VISUAL_THEME_OPTIONS.map(value => <mdui-menu-item key={value} value={value} role="menuitemradio" aria-checked={theme === value} onClick={() => choose(value)}>
         <mdui-icon slot="icon" name={theme === value ? 'check' : undefined}/>{VISUAL_THEME_LABELS[value]}

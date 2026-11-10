@@ -179,8 +179,8 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
       <div className="workbench-sidebar-bottom">
         <button type="button" className="workbench-nav-item" aria-current={tab==='panel'?'page':undefined} onClick={()=>setTab('panel')}><mdui-icon src={badgeConsoleIcon}/><span>工牌更新</span><small>工具</small></button>
         <div className="workbench-profile"><span className="rail-avatar">{user.display_name?.slice(0,1)||'F'}</span><div><b>{user.display_name}</b><small>{timezone}</small></div></div>
-        <div className="workbench-appearance"><VisualThemeMenu/><span>界面主题</span></div>
-        <div className="workbench-appearance"><ThemeMenu/><span>颜色模式</span></div>
+        <VisualThemeMenu labelled/>
+        <ThemeMenu labelled/>
         <button type="button" className="workbench-nav-item" onClick={onLogout}><mdui-icon name="logout"/><span>退出登录</span></button>
       </div>
     </mdui-layout-item>
