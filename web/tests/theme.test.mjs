@@ -90,6 +90,26 @@ test('visual theme defaults to workbench and persists independently from colour 
   assert.equal(readThemePreference(storage), 'dark');
   writeVisualTheme('invalid', storage);
   assert.equal(readVisualTheme(storage), 'classic');
+  const blocked = {getItem() {throw new Error('blocked')},setItem() {throw new Error('blocked')}};
+  const doc = fakeDocument();
+  assert.equal(readVisualTheme(blocked), 'workbench');
+  setVisualTheme('classic', doc, blocked);
+  assert.equal(doc.documentElement.dataset.ftTheme, 'classic');
+});
+
+test('boot restores both visual themes with each colour mode', () => {
+  const script = readFileSync(new URL('../public/theme-init.js', import.meta.url), 'utf8');
+  for(const visual of ['workbench','classic']) for(const mode of ['light','dark','system']) {
+    const doc = fakeDocument();
+    runInNewContext(script, {
+      document:doc,
+      localStorage:{getItem:key=>key==='fasttask.visual-theme'?visual:mode},
+      window:{matchMedia:()=>({matches:true})},
+    });
+    assert.equal(doc.documentElement.dataset.ftTheme, visual);
+    assert.deepEqual([...doc.classes], [mode==='system'?'mdui-theme-auto':`mdui-theme-${mode}`]);
+    assert.equal(doc.metas[0].content,mode==='light'?'#f7f8fa':'#10161e');
+  }
 });
 
 test('applying a pin sets the MDUI class and one resolved browser chrome colour', () => {

@@ -2,7 +2,7 @@
 
 更新日期：2026-11-10
 
-状态：设计方向已对齐，尚未开始实现。
+状态：界面实现及本地回归已完成；测试环境部署后由用户验收。
 
 ## 1. 本次目标
 
@@ -258,3 +258,24 @@ fasttask.theme        = system | light | dark
 - [FastWrite 视觉 token 参考](../../FastWrite/apps/web/src/styles.css)
 - [FastNews 导航结构参考](../../FastNews/index.html)
 - [FastCAS 表单与安全中心参考](../../FastCAS/web/src/style.css)
+
+
+## 11. 实施与回归记录（2026-11-10）
+
+已实现独立视觉主题、首屏恢复、跨标签同步及所有用户默认工作台；经典主题保留原样式层。桌面采用 232px 侧栏和 48px 顶栏，今日推进默认打开 400px 研究助手，收起和切换主题均保留 Agent 挂载。1024px 和手机继续使用今日/对话单栏切换。
+
+目标列表、任务树、目标地图、甘特图、复盘、后台作业及工牌工具使用统一的紧凑控件、边框和页面间距。登录保留深色 Hero。主导航四项，工牌更新位于辅助工具入口；视觉主题入口在颜色模式入口上方。
+
+验证入口：
+
+```bash
+npm --prefix web test
+npm --prefix web run build
+node web/tests/gantt-browser.mjs
+```
+
+浏览器测试使用临时数据库、独立账号及真实 Chromium，不连接生产数据。覆盖两种视觉主题 × 三种颜色模式、刷新持久化、真实跨标签同步、助手收起/展开、草稿保留、1440/1024/390px 布局、移动端主题入口、目标视图及编辑表单保留，以及既有甘特图新增/编辑/清空日期、依赖提示和并发冲突。截图位于本机 `/tmp/fasttask-gantt-browser-artifacts`，供部署前视觉检查。
+
+测试部署采用 [web-test.Dockerfile](../deployments/docker/web-test.Dockerfile) 将已验证的前端产物覆盖到现有测试镜像，保持后端二进制和数据版本一致。镜像标签 `io.fastrd.fasttask.web-revision` 记录前端提交；`/health/version` 继续报告基础镜像后端版本。部署及回滚参数记录在 [部署文档](../docs/deployment.md)，验收入口为 https://task.fast.0x535a.cn 。
+
+用户视觉和操作验收待完成；生产发布不在本轮部署范围内。
