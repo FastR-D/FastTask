@@ -67,23 +67,37 @@ bash /home/dev/FastTask-backups/gantt-release-20261110/rollback.sh
 | 容器 | `fasttask` |
 | Compose 项目 | `fasttask-test` |
 | Compose 定义 | `deployments/compose.test.yml` |
-| 当前镜像 | `fasttask:workbench-test-20261110`（前端 `5c54e3c`，沿用甘特图测试后端） |
+| 当前镜像 | `fasttask:workbench-controls-test-20261110`（前端 `a53395b`，沿用甘特图测试后端） |
 | 端口映射 | `10.22.33.15:10000 → 容器 10000` |
 | 独立数据目录 | `/root/dockerData/fasttask-gantt-20261110` |
-| 部署参数 | `/root/repo/FRD/FastTask/backups/workbench-test-20261110/compose.env` |
+| 部署参数 | `/root/repo/FRD/FastTask/backups/workbench-controls-test-20261110/compose.env` |
 | 独立环境配置 | `/root/repo/FRD/FastTask/backups/gantt-test-20261110/test.env` |
 
 测试环境使用专用 Compose 配置；它要求显式提供镜像、测试环境文件和数据目录，并固定测试公开地址及关闭通知。根目录 `.env` 中保留了生产配置，不能把它作为测试部署参数使用。
 
 ```bash
 docker compose \
-  --env-file backups/workbench-test-20261110/compose.env \
+  --env-file backups/workbench-controls-test-20261110/compose.env \
   -f deployments/compose.test.yml up -d
 ```
 
 账号和独立测试密码保存在本机 `backups/gantt-test-20261110/access.txt`，该目录不进入版本控制。测试副本使用本地账号密码登录，数据账号保留原标识；测试密码与生产密码独立。
 
-## 工作台主题测试部署与回滚（2026-11-10）
+## 主题入口点击修复部署与回滚（2026-11-10）
+
+前端修复提交 `a53395b`，镜像 `fasttask:workbench-controls-test-20261110`。部署前备份位于测试数据目录的 `backups/before-workbench-controls-20261110.db`，已通过应用校验。
+
+真实公网浏览器验证了旧 PWA 收到更新提示并刷新、两个入口的文字与整行空白点击、Enter/Escape 键操作、亮暗切换及经典主题往返。测试服务健康正常，后端及数据版本保持一致。
+
+回退到上一版工作台界面：
+
+```bash
+docker compose \
+  --env-file backups/workbench-controls-test-20261110/rollback.env \
+  -f deployments/compose.test.yml up -d
+```
+
+## 首次工作台主题测试部署与回滚（2026-11-10）
 
 本轮仅更新前端，使用 `deployments/docker/web-test.Dockerfile` 和 `web/dist` 构建上下文；镜像 `io.fastrd.fasttask.web-revision` 标签为 `5c54e3c`。基础镜像为 `fasttask:gantt-test-20261110`（镜像 ID `1fa5d5ca20d42361f638aaaad4ba0605ae513419f914ad39d16ccc8a626a34f8`），后端二进制、配置和数据目录保持一致。
 
