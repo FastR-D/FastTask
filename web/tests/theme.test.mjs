@@ -4,10 +4,14 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import {
   applyTheme,
+  applyVisualTheme,
   readThemePreference,
+  readVisualTheme,
   resolveTheme,
   setThemePreference,
+  setVisualTheme,
   writeThemePreference,
+  writeVisualTheme,
 } from '../src/theme.ts';
 
 function memoryStorage() {
@@ -37,6 +41,7 @@ function fakeDocument(initialClass = 'mdui-theme-auto') {
     classes,
     metas,
     documentElement: {
+      dataset: {},
       classList: {
         add: value => classes.add(value),
         remove: (...values) => values.forEach(value => classes.delete(value)),
@@ -76,6 +81,17 @@ test('system resolves against the operating system while a pin ignores it', () =
   assert.equal(resolveTheme('dark', false), 'dark');
 });
 
+test('visual theme defaults to workbench and persists independently from colour mode', () => {
+  const storage = memoryStorage();
+  assert.equal(readVisualTheme(storage), 'workbench');
+  writeVisualTheme('classic', storage);
+  assert.equal(readVisualTheme(storage), 'classic');
+  storage.setItem('fasttask.theme', 'dark');
+  assert.equal(readThemePreference(storage), 'dark');
+  writeVisualTheme('invalid', storage);
+  assert.equal(readVisualTheme(storage), 'classic');
+});
+
 test('applying a pin sets the MDUI class and one resolved browser chrome colour', () => {
   const doc = fakeDocument();
   assert.equal(applyTheme('light', doc, true), 'light');
@@ -87,6 +103,15 @@ test('applying a pin sets the MDUI class and one resolved browser chrome colour'
   assert.equal(applyTheme('system', doc, true), 'dark');
   assert.deepEqual([...doc.classes], ['mdui-theme-auto']);
   assert.equal(doc.metas[0].content, '#10161e');
+});
+
+test('visual theme applies only the independent data attribute', () => {
+  const doc = fakeDocument();
+  assert.equal(applyVisualTheme('classic', doc), 'classic');
+  assert.equal(doc.documentElement.dataset.ftTheme, 'classic');
+  assert.deepEqual([...doc.classes], ['mdui-theme-auto']);
+  assert.equal(setVisualTheme('workbench', doc, memoryStorage()), 'workbench');
+  assert.equal(doc.documentElement.dataset.ftTheme, 'workbench');
 });
 
 test('the blocking boot script restores the theme before React, including when storage is blocked', () => {
@@ -105,6 +130,7 @@ test('the blocking boot script restores the theme before React, including when s
       window: { matchMedia: () => ({ matches: darkOS }) },
     });
     assert.deepEqual([...doc.classes], [expectedClass]);
+    assert.equal(doc.documentElement.dataset.ftTheme, 'workbench');
     assert.equal(doc.metas[0].content, expectedColor);
     assert.equal(doc.metas[1].removed, true);
   }

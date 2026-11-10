@@ -1,5 +1,5 @@
-// Apply the saved choice before the first paint so a pinned light theme never flashes dark.
-// Keep the key, class names and colours in sync with src/theme.ts.
+// Apply the saved choices before the first paint so neither colour mode nor visual theme flashes.
+// Keep the keys, class names and colours in sync with src/theme.ts.
 ;(() => {
   try {
     let stored
@@ -8,6 +8,10 @@
     const dark = preference === 'dark' ||
       (preference === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches)
     const root = document.documentElement
+    let visualTheme
+    try { visualTheme = localStorage.getItem('fasttask.visual-theme') } catch {}
+    if (visualTheme !== 'classic' && visualTheme !== 'workbench') visualTheme = 'workbench'
+    if (root.dataset) root.dataset.ftTheme = visualTheme
     root.classList.remove('mdui-theme-auto', 'mdui-theme-light', 'mdui-theme-dark')
     root.classList.add(preference === 'system' ? 'mdui-theme-auto' : `mdui-theme-${preference}`)
     const metas = [...document.querySelectorAll('meta[name="theme-color"]')]

@@ -7,14 +7,18 @@
 
 export type ThemePreference = 'system' | 'light' | 'dark'
 export type ResolvedTheme = 'light' | 'dark'
+export type VisualTheme = 'workbench' | 'classic'
 
 export const THEME_STORAGE_KEY = 'fasttask.theme'
+export const VISUAL_THEME_STORAGE_KEY = 'fasttask.visual-theme'
 
 // ThemeControl listens for this event so the rail and the drawer controls cannot disagree after one
 // of them changes the setting. It also carries the new value to every mounted control.
 export const THEME_CHANGE_EVENT = 'fasttask:theme'
+export const VISUAL_THEME_CHANGE_EVENT = 'fasttask:visual-theme'
 
 const PREFERENCES: readonly ThemePreference[] = ['system', 'light', 'dark']
+const VISUAL_THEMES: readonly VisualTheme[] = ['workbench', 'classic']
 const THEME_CLASSES = ['mdui-theme-auto', 'mdui-theme-light', 'mdui-theme-dark']
 
 // Background colours of the two palettes in styles.css. The browser paints its address bar and the
@@ -25,6 +29,28 @@ export const THEME_COLORS: Record<ResolvedTheme, string> = { light: '#f7f8fa', d
 /** isThemePreference narrows a value that came out of storage or an event payload. */
 export function isThemePreference(value: unknown): value is ThemePreference {
   return PREFERENCES.includes(value as ThemePreference)
+}
+
+/** isVisualTheme narrows a persisted or event-provided visual theme. */
+export function isVisualTheme(value: unknown): value is VisualTheme {
+  return VISUAL_THEMES.includes(value as VisualTheme)
+}
+
+/** The new workbench visual language is the default. Classic remains available as an explicit choice. */
+export function readVisualTheme(storage: Storage | null = safeStorage()): VisualTheme {
+  try {
+    const stored = storage?.getItem(VISUAL_THEME_STORAGE_KEY)
+    return isVisualTheme(stored) ? stored : 'workbench'
+  } catch {
+    return 'workbench'
+  }
+}
+
+export function writeVisualTheme(value: VisualTheme, storage: Storage | null = safeStorage()): void {
+  if (!storage || !isVisualTheme(value)) return
+  try { storage.setItem(VISUAL_THEME_STORAGE_KEY, value) } catch {
+    // The theme still applies for this session when storage is blocked.
+  }
 }
 
 /** readThemePreference treats a missing or unrecognizable value as "follow the system". A value this
@@ -76,6 +102,16 @@ export function applyTheme(
   return resolved
 }
 
+/** applyVisualTheme changes only the visual language, leaving light/dark mode untouched. */
+export function applyVisualTheme(
+  visualTheme: VisualTheme = readVisualTheme(),
+  doc: Document | undefined = globalThis.document,
+): VisualTheme {
+  if (!doc) return visualTheme
+  doc.documentElement.dataset.ftTheme = visualTheme
+  return visualTheme
+}
+
 /** setThemePreference persists the choice and applies it immediately. */
 export function setThemePreference(
   value: ThemePreference,
@@ -86,10 +122,24 @@ export function setThemePreference(
   return applyTheme(value, doc)
 }
 
+export function setVisualTheme(
+  value: VisualTheme,
+  doc: Document | undefined = globalThis.document,
+  storage: Storage | null = safeStorage(),
+): VisualTheme {
+  writeVisualTheme(value, storage)
+  return applyVisualTheme(value, doc)
+}
+
 /** announceThemeChange tells the other mounted controls about a change made by one of them. */
 export function announceThemeChange(value: ThemePreference): void {
   if (typeof window === 'undefined') return
   window.dispatchEvent(new CustomEvent<ThemePreference>(THEME_CHANGE_EVENT, { detail: value }))
+}
+
+export function announceVisualThemeChange(value: VisualTheme): void {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new CustomEvent<VisualTheme>(VISUAL_THEME_CHANGE_EVENT, { detail: value }))
 }
 
 /** watchTheme keeps the browser chrome in step with the system while the preference is "system",
@@ -97,6 +147,7 @@ export function announceThemeChange(value: ThemePreference): void {
 export function watchTheme(): () => void {
   if (typeof window === 'undefined') return () => undefined
   applyTheme()
+  applyVisualTheme()
   const media = window.matchMedia?.('(prefers-color-scheme: dark)')
   const onSystemChange = () => {
     // The applied class also works when storage is blocked and the choice only lasts this session.
@@ -105,7 +156,13 @@ export function watchTheme(): () => void {
     announceThemeChange('system')
   }
   const onStorage = (event: StorageEvent) => {
-    if (event.key !== null && event.key !== THEME_STORAGE_KEY) return
+    if (event.key !== null && event.key !== THEME_STORAGE_KEY && event.key !== VISUAL_THEME_STORAGE_KEY) return
+    if (event.key === null || event.key === VISUAL_THEME_STORAGE_KEY) {
+      const visualTheme = readVisualTheme()
+      applyVisualTheme(visualTheme)
+      announceVisualThemeChange(visualTheme)
+      if (event.key !== null) return
+    }
     const preference = readThemePreference()
     applyTheme(preference)
     announceThemeChange(preference)
