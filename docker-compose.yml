@@ -29,9 +29,7 @@ services:
   fasttask:
     build:
       context: .
-      # Pinned in the Dockerfile; override only to track a different FastCAS SDK commit.
       args:
-        FASTCAS_REF: ${FASTCAS_REF:-676d49b18f700c009f1f491280a93de7da294836}
         # The default module proxy is not reachable from this network; the host's own Go
         # toolchain is configured the same way (go env GOPROXY).
         GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}

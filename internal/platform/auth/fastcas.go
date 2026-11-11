@@ -62,7 +62,7 @@ func (s FastCASTransactions) Take(ctx context.Context, state string) (*fastcas.T
 }
 
 func (s *Service) FastCASClient() (*fastcas.Client, error) {
-	if s.config.FastCASIssuer == "" {
+	if s.config.FastCASDisabled || s.config.FastCASIssuer == "" {
 		return nil, ErrFastCASDisabled
 	}
 	// Client construction is lazy and makes no network call. Cache discovery/JWKS.
@@ -102,6 +102,9 @@ func (s *Service) ProveFastCASLocal(ctx context.Context, p Principal, password s
 }
 
 func (s *Service) BeginFastCAS(ctx context.Context, p *Principal, password, binding string) (string, error) {
+	if p == nil && s.config.FastCASLoginDisabled || p != nil && s.config.FastCASLinkDisabled {
+		return "", ErrFastCASDisabled
+	}
 	c, err := s.FastCASClient()
 	if err != nil {
 		return "", err
@@ -154,6 +157,9 @@ func (s *Service) CompleteFastCAS(ctx context.Context, callback, binding string,
 		return FastCASResult{}, err
 	}
 	if result.Transaction.Purpose == "link" {
+		if s.config.FastCASLinkDisabled {
+			return FastCASResult{}, ErrFastCASDisabled
+		}
 		if p == nil {
 			return FastCASResult{}, errors.New("local account proof required")
 		}
@@ -194,6 +200,9 @@ func (s *Service) CompleteFastCAS(ctx context.Context, callback, binding string,
 		}
 		return FastCASResult{Linked: true}, nil
 	}
+	if s.config.FastCASLoginDisabled {
+		return FastCASResult{}, ErrFastCASDisabled
+	}
 	if result.Transaction.Purpose != "login" {
 		return FastCASResult{}, errors.New("FastTask does not allow public registration")
 	}
@@ -204,6 +213,9 @@ func (s *Service) CompleteFastCAS(ctx context.Context, callback, binding string,
 			return FastCASResult{}, e
 		}
 		if remote.State == "prepared" {
+			if s.config.FastCASLinkDisabled {
+				return FastCASResult{}, ErrFastCASDisabled
+			}
 			remote, e = c.ActivateLink(ctx, pending.ID)
 			if e != nil {
 				return FastCASResult{}, e
@@ -278,6 +290,9 @@ func (s *Service) UpdateFastCASLink(ctx context.Context, p Principal, id, passwo
 	if revoke {
 		link, err = c.RevokeLink(ctx, link)
 	} else if link.State == "prepared" {
+		if s.config.FastCASLinkDisabled {
+			return nil, ErrFastCASDisabled
+		}
 		link, err = c.ActivateLink(ctx, id)
 	}
 	if err != nil {

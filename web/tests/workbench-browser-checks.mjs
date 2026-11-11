@@ -4,7 +4,7 @@ import path from 'node:path';
 
 // Shared with the isolated Chromium fixture in gantt-browser.mjs.
 export async function checkWorkbench({ command, evaluate, until, artifacts }) {
-  const visible = selector => evaluate(`Boolean([...document.querySelectorAll(${JSON.stringify(selector)})].find(el=>el.getBoundingClientRect().width&&el.getBoundingClientRect().height))`);
+  const visible = selector => evaluate(`Boolean([...document.querySelectorAll(${JSON.stringify(selector)})].find(el=>{const style=getComputedStyle(el);const r=el.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&r.width&&r.height}))`);
   const settle = () => evaluate('new Promise(resolve=>setTimeout(resolve,250))');
   const resize = async width => { await command('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:width<600}); await settle(); };
   const screenshot = async name => { await command('Page.bringToFront'); const shot=await command('Page.captureScreenshot',{format:'png',captureBeyondViewport:false}); await writeFile(path.join(artifacts,`${name}.png`),Buffer.from(shot.data,'base64')); };
@@ -85,10 +85,13 @@ export async function checkWorkbench({ command, evaluate, until, artifacts }) {
     assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'),true,`today overflows at ${width}`);
     await screenshot(`workbench-${width}-today`);
     if(width<1080){
-      await tap('.research-pane-switch button:nth-child(2)');
+      const assistantToggle = width<840 ? '.app-bar mdui-button-icon[aria-label="收起研究助手"]' : '.app-rail .rail-assistant-toggle[aria-label="收起研究助手"]';
+      const assistantOpenToggle = width<840 ? '.app-bar mdui-button-icon[aria-label="打开研究助手"]' : '.app-rail .rail-assistant-toggle[aria-label="打开研究助手"]';
+      await tap(assistantToggle);
+      assert.equal(await visible('.research-chat'),false);
+      await tap(assistantOpenToggle);
       assert.equal(await visible('.agent-input'),true);
       await screenshot(`workbench-${width}-assistant`);
-      await tap('.research-pane-switch button:first-child');
     }
   }
   await tap('.app-bar mdui-button-icon[aria-label="打开导航"]');
