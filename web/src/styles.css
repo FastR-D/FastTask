@@ -490,7 +490,7 @@ button,input,textarea{font:inherit}
 
 /* The assistant is a workbench-level pane. Business pages stay in the viewport while this pane and
    AgentChat remain mounted across navigation. */
-.research-workspace{--research-assistant-width:400px;display:grid;grid-template-columns:minmax(0,1fr) 8px var(--research-assistant-width);height:100%;min-height:0;min-width:0;position:relative;overflow:hidden;margin:0 auto}
+.research-workspace{--research-page-min-width:320px;--research-assistant-min-width:320px;--research-assistant-width:400px;display:grid;grid-template-columns:minmax(var(--research-page-min-width),1fr) 8px minmax(var(--research-assistant-min-width),var(--research-assistant-width));height:100%;min-height:0;min-width:0;position:relative;overflow:hidden;margin:0 auto}
 .research-page-viewport{min-width:0;min-height:0;overflow:auto;scrollbar-gutter:stable}
 .research-today{min-width:0;min-height:100%;box-sizing:border-box;padding:var(--ft-space-6) clamp(1.25rem,3vw,3rem)}
 .research-chat{min-width:0;min-height:0;display:flex;flex-direction:column;border-left:1px solid rgb(var(--mdui-color-outline-variant));padding:var(--ft-space-6) 0 var(--ft-space-6) var(--ft-space-6);overflow:hidden}
