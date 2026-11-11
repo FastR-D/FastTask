@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900" role="img" aria-labelledby="title desc">
+  <title id="title">研究助手与工作区布局示意图</title>
+  <desc id="desc">展示现状中研究助手绑定今日推进，以及目标结构中研究助手成为所有页面共享的可调整宽度侧栏。</desc>
+  <defs>
+    <style>
+      .bg{fill:#f4f6f8}.surface{fill:#fff;stroke:#d7dde5;stroke-width:2}.muted{fill:#64748b}.text{fill:#172033}.blue{fill:#155fb8}.blueSoft{fill:#e8f1fb}.assistant{fill:#f3f7fc;stroke:#9bb8d8;stroke-width:2}.line{stroke:#b9c4d0;stroke-width:2}.dash{stroke:#155fb8;stroke-width:3;stroke-dasharray:8 7}.handle{fill:#155fb8}.small{font-family:'AR PL UMing TW MBE',serif;font-size:16px}.body{font-family:'AR PL UMing TW MBE',serif;font-size:18px}.label{font-family:'AR PL UMing TW MBE',serif;font-size:18px;font-weight:600}.h2{font-family:'AR PL UMing TW MBE',serif;font-size:28px;font-weight:700}.h1{font-family:'AR PL UMing TW MBE',serif;font-size:34px;font-weight:700}.tiny{font-family:'AR PL UMing TW MBE',serif;font-size:14px}
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#155fb8"/></marker>
+  </defs>
+
+  <rect class="bg" width="1400" height="900"/>
+  <text x="54" y="58" class="h1 text">研究助手与今日推进解耦 · 工作区布局草图</text>
+  <text x="54" y="91" class="body muted">目标：助手成为工作台级面板，页面负责主区内容；桌面端可拖拽调整两侧宽度。</text>
+
+  <text x="54" y="150" class="h2 text">现状：助手绑定在今日推进内部</text>
+  <rect x="54" y="178" width="610" height="270" rx="10" class="surface"/>
+  <rect x="54" y="178" width="74" height="270" rx="10" fill="#e8edf3"/>
+  <text x="70" y="214" class="label text">导航</text>
+  <text x="70" y="256" class="small muted">今日</text>
+  <text x="70" y="286" class="small muted">目标</text>
+  <text x="70" y="316" class="small muted">复盘</text>
+  <text x="70" y="346" class="small muted">作业</text>
+  <rect x="148" y="198" width="318" height="230" rx="7" fill="#fff" stroke="#d7dde5"/>
+  <text x="170" y="232" class="label text">今日推进</text>
+  <line x1="170" y1="256" x2="430" y2="256" class="line"/>
+  <rect x="170" y="278" width="225" height="12" rx="6" fill="#dce4ed"/>
+  <rect x="170" y="308" width="185" height="12" rx="6" fill="#dce4ed"/>
+  <rect x="170" y="338" width="240" height="12" rx="6" fill="#dce4ed"/>
+  <text x="170" y="391" class="tiny muted">只有今日页拥有这块右栏</text>
+  <rect x="478" y="198" width="166" height="230" rx="7" class="assistant"/>
+  <text x="496" y="232" class="label text">研究助手</text>
+  <line x1="496" y1="256" x2="626" y2="256" class="line"/>
+  <rect x="496" y="278" width="112" height="10" rx="5" fill="#c6d8ea"/>
+  <rect x="496" y="306" width="132" height="10" rx="5" fill="#c6d8ea"/>
+  <rect x="496" y="368" width="130" height="28" rx="5" fill="#dceaf8"/>
+  <path d="M466 214 L478 214 M466 214 L474 206 M466 214 L474 222" class="dash" fill="none"/>
+  <text x="54" y="489" class="body muted">问题：切换到目标任务、复盘或后台作业后，助手不在当前页面结构里。</text>
+
+  <text x="720" y="150" class="h2 text">目标：工作台级可伸缩分栏</text>
+  <rect x="720" y="178" width="626" height="270" rx="10" class="surface"/>
+  <rect x="720" y="178" width="74" height="270" rx="10" fill="#e8edf3"/>
+  <text x="736" y="214" class="label text">导航</text>
+  <text x="736" y="256" class="small muted">今日</text>
+  <text x="736" y="286" class="small muted">目标</text>
+  <text x="736" y="316" class="small muted">复盘</text>
+  <text x="736" y="346" class="small muted">作业</text>
+  <rect x="814" y="198" width="300" height="230" rx="7" fill="#fff" stroke="#d7dde5"/>
+  <text x="836" y="232" class="label text">当前页面</text>
+  <text x="836" y="260" class="small muted">今日推进 / 目标任务 / 复盘 / 作业</text>
+  <line x1="836" y1="284" x2="1090" y2="284" class="line"/>
+  <rect x="836" y="306" width="202" height="12" rx="6" fill="#dce4ed"/>
+  <rect x="836" y="336" width="245" height="12" rx="6" fill="#dce4ed"/>
+  <rect x="836" y="366" width="180" height="12" rx="6" fill="#dce4ed"/>
+  <rect x="1130" y="198" width="198" height="230" rx="7" class="assistant"/>
+  <text x="1150" y="232" class="label text">研究助手</text>
+  <text x="1150" y="258" class="tiny muted">所有页面共享</text>
+  <line x1="1150" y1="276" x2="1306" y2="276" class="line"/>
+  <rect x="1150" y="300" width="128" height="10" rx="5" fill="#c6d8ea"/>
+  <rect x="1150" y="328" width="150" height="10" rx="5" fill="#c6d8ea"/>
+  <rect x="1150" y="380" width="152" height="28" rx="5" fill="#dceaf8"/>
+  <line x1="1122" y1="250" x2="1122" y2="390" class="dash"/>
+  <circle cx="1122" cy="320" r="8" class="handle"/>
+  <text x="1042" y="470" class="small blue">拖拽分隔线调宽 / 调窄</text>
+
+  <path d="M664 314 C686 314 692 314 716 314" fill="none" stroke="#155fb8" stroke-width="3" marker-end="url(#arrow)"/>
+  <text x="686" y="296" class="tiny blue">解耦</text>
+
+  <text x="54" y="556" class="h2 text">桌面端交互</text>
+  <rect x="54" y="584" width="1292" height="112" rx="10" class="surface"/>
+  <circle cx="84" cy="620" r="8" class="blue"/><text x="106" y="627" class="body text">页面切换：只替换主区，助手对话、草稿、运行状态和滚动位置保持。</text>
+  <circle cx="84" cy="656" r="8" class="blue"/><text x="106" y="663" class="body text">助手操作：全局打开 / 收起；宽度记忆在浏览器本地。</text>
+  <circle cx="84" cy="692" r="8" class="blue"/><text x="106" y="699" class="body text">分隔线：鼠标、触摸、键盘均可操作，并设置主区和助手区最小宽度。</text>
+
+  <text x="54" y="758" class="h2 text">移动端建议</text>
+  <rect x="54" y="786" width="1292" height="70" rx="10" class="surface"/>
+  <text x="78" y="829" class="body text">所有页面保留统一的助手入口；点击后以底部抽屉打开助手，关闭后回到原页面和原滚动位置。</text>
+  <text x="1080" y="829" class="label blue">待确认：抽屉 / 单列切换</text>
+</svg>
