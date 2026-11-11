@@ -1,12 +1,13 @@
 import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AgentChat, type GoalChatRequest } from './agent'
 
 const ASSISTANT_OPEN_KEY = 'fasttask.research-assistant.open'
 const ASSISTANT_WIDTH_KEY = 'fasttask.research-assistant.width'
 const MIN_ASSISTANT_WIDTH = 320
-const MAX_ASSISTANT_WIDTH = 560
+const MAX_ASSISTANT_WIDTH = 800
 const DEFAULT_ASSISTANT_WIDTH = 400
+const RESIZER_WIDTH = 8
 
 export function readResearchAssistantOpen(): boolean {
   try {
@@ -26,8 +27,9 @@ function readAssistantWidth(): number {
   }
 }
 
-function clampWidth(value: number): number {
-  return Math.min(MAX_ASSISTANT_WIDTH, Math.max(MIN_ASSISTANT_WIDTH, Math.round(value)))
+function clampWidth(value: number, availableMax = MAX_ASSISTANT_WIDTH): number {
+  const max = Math.max(MIN_ASSISTANT_WIDTH, Math.min(MAX_ASSISTANT_WIDTH, Math.round(availableMax)))
+  return Math.min(max, Math.max(MIN_ASSISTANT_WIDTH, Math.round(value)))
 }
 
 type Props = {
@@ -45,8 +47,20 @@ type Props = {
 // navigation between pages.
 export function ResearchWorkspace({ children, userId, assistantOpen, goalChatRequest, onAssistantClose, onNotice, onBusinessChanged }: Props) {
   const [assistantWidth, setAssistantWidth] = useState(readAssistantWidth)
+  const [availableMaxWidth, setAvailableMaxWidth] = useState(MAX_ASSISTANT_WIDTH)
   const [resizing, setResizing] = useState(false)
+  const workspaceRef = useRef<HTMLDivElement>(null)
   const resizeStart = useRef<{ x: number; width: number } | null>(null)
+
+  useLayoutEffect(() => {
+    const workspace = workspaceRef.current
+    if (!workspace) return
+    const measure = () => setAvailableMaxWidth(Math.max(MIN_ASSISTANT_WIDTH, Math.min(MAX_ASSISTANT_WIDTH, workspace.clientWidth - MIN_ASSISTANT_WIDTH - RESIZER_WIDTH)))
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(workspace)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     try { window.localStorage.setItem(ASSISTANT_WIDTH_KEY, String(assistantWidth)) } catch { /* local preferences are optional */ }
@@ -55,7 +69,7 @@ export function ResearchWorkspace({ children, userId, assistantOpen, goalChatReq
   useEffect(() => {
     const move = (event: globalThis.PointerEvent) => {
       if (!resizeStart.current) return
-      setAssistantWidth(clampWidth(resizeStart.current.width - (event.clientX - resizeStart.current.x)))
+      setAssistantWidth(clampWidth(resizeStart.current.width - (event.clientX - resizeStart.current.x), availableMaxWidth))
     }
     const end = () => { resizeStart.current = null; setResizing(false) }
     window.addEventListener('pointermove', move)
@@ -66,7 +80,7 @@ export function ResearchWorkspace({ children, userId, assistantOpen, goalChatReq
       window.removeEventListener('pointerup', end)
       window.removeEventListener('pointercancel', end)
     }
-  }, [])
+  }, [availableMaxWidth])
 
   function startResize(event: PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return
@@ -79,10 +93,10 @@ export function ResearchWorkspace({ children, userId, assistantOpen, goalChatReq
     const step = event.shiftKey ? 48 : 16
     if (event.key === 'ArrowLeft') {
       event.preventDefault()
-      setAssistantWidth(value => clampWidth(value + step))
+      setAssistantWidth(value => clampWidth(value + step, availableMaxWidth))
     } else if (event.key === 'ArrowRight') {
       event.preventDefault()
-      setAssistantWidth(value => clampWidth(value - step))
+      setAssistantWidth(value => clampWidth(value - step, availableMaxWidth))
     } else if (event.key === 'Home') {
       event.preventDefault()
       setAssistantWidth(MIN_ASSISTANT_WIDTH)
@@ -92,8 +106,9 @@ export function ResearchWorkspace({ children, userId, assistantOpen, goalChatReq
     }
   }
 
-  const style = { '--research-assistant-width': `${assistantWidth}px` } as CSSProperties
-  return <div className="research-workspace" data-assistant-open={assistantOpen} data-assistant-resizing={resizing} style={style}>
+  const effectiveAssistantWidth = clampWidth(assistantWidth, availableMaxWidth)
+  const style = { '--research-assistant-width': `${effectiveAssistantWidth}px` } as CSSProperties
+  return <div ref={workspaceRef} className="research-workspace" data-assistant-open={assistantOpen} data-assistant-resizing={resizing} style={style}>
     <main className="research-page-viewport" aria-label="当前工作页面">
       {children}
     </main>
@@ -105,7 +120,7 @@ export function ResearchWorkspace({ children, userId, assistantOpen, goalChatReq
       aria-orientation="vertical"
       aria-valuemin={MIN_ASSISTANT_WIDTH}
       aria-valuemax={MAX_ASSISTANT_WIDTH}
-      aria-valuenow={assistantWidth}
+      aria-valuenow={effectiveAssistantWidth}
       tabIndex={assistantOpen ? 0 : -1}
       onPointerDown={startResize}
       onKeyDown={resizeByKeyboard}

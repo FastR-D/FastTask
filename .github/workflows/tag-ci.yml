@@ -1,23 +1,29 @@
-name: Tag CI FastTask
+name: Validate and deploy FastTask
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
     tags: ['v*']
-  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: tag-ci-fasttask-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  backend:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  web:
+    uses: FastR-D/.github/.github/workflows/node-npm-check.yml@98eac6706014d070c5563eb75e3899611507f176
+    with:
+      working-directory: web
+
+  validate:
+    needs: web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    concurrency:
+      group: validate-fasttask-${{ github.ref }}
+      cancel-in-progress: true
     env:
       GOWORK: 'off'
       CGO_ENABLED: '1'
@@ -25,14 +31,89 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: 1.26.8
+          go-version: '1.26.8'
           cache: true
       - run: go mod download
       - run: go mod verify
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - run: go test ./...
       - run: go build -trimpath -o bin/fasttask ./cmd/fasttask
+      # The reusable web gate tests this revision before the release job rebuilds
+      # its locked web/sidecar runtime and prunes development-only dependencies.
+      - run: npm ci && npm run build && npm run build:sidecar && npm prune --omit=dev --ignore-scripts
+        working-directory: web
+      - name: Checkout pinned FastDeploy packager
+        uses: actions/checkout@v4
+        with:
+          repository: FastR-D/FastDeploy
+          ref: cc223a0b83b0ef2389974dd70a4b74148cd1af87
+          path: .fastdeploy-tools
+          persist-credentials: false
+      - name: Package the tested runtime
+        run: python3 .fastdeploy-tools/scripts/package.py fasttask --output "$RUNNER_TEMP/fasttask-release"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: ${{ runner.temp }}/fasttask-release/
+          if-no-files-found: error
+          retention-days: 7
 
-  web:
-    uses: FastR-D/.github/.github/workflows/node-npm-check.yml@98eac6706014d070c5563eb75e3899611507f176
+  deploy:
+    needs: validate
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    uses: FastR-D/FastDeploy/.github/workflows/deploy.yml@cc223a0b83b0ef2389974dd70a4b74148cd1af87
     with:
-      working-directory: web
+      app: fasttask
+      artifact-name: release-${{ github.sha }}
+      # These values are literal KEY=value entries; do not add shell quotes.
+      # Code-relative paths are supplied by the trusted FastDeploy server profile.
+      runtime-env: |
+        FASTTASK_ADMIN_NAME=FastTask Admin
+        FASTTASK_ADMIN_USER=admin
+        FASTTASK_ATTACHMENT_DIR=/home/dev/FastTask/data/attachments
+        FASTTASK_AUDIO_DIR=/home/dev/FastTask/data/audio
+        FASTTASK_DATABASE=/home/dev/FastTask/data/fasttask.db
+        FASTTASK_ENV=production
+        FASTTASK_FASTCAS_CLIENT_ID=fasttask
+        FASTTASK_FASTCAS_ISSUER=https://cas.fastrd.io
+        FASTTASK_FASTCAS_LOOPBACK_HTTP=false
+        FASTTASK_FASTCAS_REDIRECT_URI=https://task.fastrd.io/api/v1/auth/fastcas/callback
+        FASTTASK_FASTCAS_SERVICE_ALLOWED_CLIENT_IDS=fastresearch
+        FASTTASK_FASTCAS_SERVICE_ALLOW_LOOPBACK_HTTP=false
+        FASTTASK_FASTCAS_SERVICE_AUDIENCE=fasttask-api
+        FASTTASK_FASTCAS_SERVICE_CLIENT_ID=fasttask-api
+        FASTTASK_FASTCAS_SERVICE_ENABLED=true
+        FASTTASK_FASTCAS_SERVICE_ISSUER=https://cas.fastrd.io
+        FASTTASK_FASTRESEARCH_ALLOW_LEGACY_INGEST_KEY=false
+        FASTTASK_FASTRESEARCH_LOGIN_ENABLED=true
+        FASTTASK_FASTRESEARCH_PUBLIC_URL=https://fastrd.io
+        FASTTASK_FASTRESEARCH_URL=http://127.0.0.1:8787
+        FASTTASK_LISTEN=127.0.0.1
+        FASTTASK_LOG_FORMAT=text
+        FASTTASK_LOG_LEVEL=info
+        FASTTASK_NOTIFICATION_ENABLED=true
+        FASTTASK_PORT=10000
+        FASTTASK_PUBLIC_URL=https://task.fastrd.io
+        FASTTASK_SIDECAR_ENABLED=true
+        FASTTASK_SIDECAR_PREFERRED=true
+        FASTTASK_TRUSTED_PROXIES=127.0.0.1,::1
+    secrets:
+      SSH_HOST: ${{ secrets.FASTRD_SSH_HOST }}
+      SSH_PORT: ${{ secrets.FASTRD_SSH_PORT }}
+      SSH_USER: ${{ secrets.FASTRD_SSH_USER }}
+      SSH_PRIVATE_KEY: ${{ secrets.FASTRD_SSH_PRIVATE_KEY }}
+      SSH_KNOWN_HOSTS: ${{ secrets.FASTRD_SSH_KNOWN_HOSTS }}
+      runtime-secrets: |
+        {
+          "FASTTASK_ADMIN_PASSWORD": ${{ toJSON(secrets.FASTTASK_ADMIN_PASSWORD) }},
+          "FASTTASK_FASTCAS_CLIENT_SECRET": ${{ toJSON(secrets.FASTTASK_FASTCAS_CLIENT_SECRET) }},
+          "FASTTASK_FASTCAS_SERVICE_ALLOWED_RECEIVER_REFS": ${{ toJSON(secrets.FASTTASK_FASTCAS_SERVICE_ALLOWED_RECEIVER_REFS) }},
+          "FASTTASK_FASTRESEARCH_SSO_SECRET": ${{ toJSON(secrets.FASTTASK_FASTRESEARCH_SSO_SECRET) }},
+          "FASTTASK_JWT_SECRET": ${{ toJSON(secrets.FASTTASK_JWT_SECRET) }},
+          "FASTTASK_PANEL_JWT_SECRET": ${{ toJSON(secrets.FASTTASK_PANEL_JWT_SECRET) }},
+          "FASTTASK_PROVIDER_ENCRYPTION_KEY": ${{ toJSON(secrets.FASTTASK_PROVIDER_ENCRYPTION_KEY) }}
+        }

@@ -22,6 +22,19 @@ export async function checkWorkbench({ command, evaluate, until, artifacts }) {
   await resize(1440);
   await until(()=>visible('.workbench-sidebar nav'),'sidebar missing');
   await until(()=>visible('.agent-input'),'assistant composer missing');
+  assert.equal(await evaluate('document.querySelector(".research-assistant-resizer").getAttribute("aria-valuemin")'),'320');
+  assert.equal(await evaluate('document.querySelector(".research-assistant-resizer").getAttribute("aria-valuemax")'),'800');
+  await evaluate('document.querySelector(".research-assistant-resizer").focus();true');
+  await command('Input.dispatchKeyEvent',{type:'keyDown',key:'End',code:'End',windowsVirtualKeyCode:35});
+  await command('Input.dispatchKeyEvent',{type:'keyUp',key:'End',code:'End',windowsVirtualKeyCode:35});
+  await settle();
+  assert.equal(await evaluate('document.querySelector(".research-assistant-resizer").getAttribute("aria-valuenow")'),'800');
+  assert.match(await evaluate('getComputedStyle(document.querySelector(".research-workspace")).gridTemplateColumns'),/800px/);
+  await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Home',code:'Home',windowsVirtualKeyCode:36});
+  await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Home',code:'Home',windowsVirtualKeyCode:36});
+  await settle();
+  assert.equal(await evaluate('document.querySelector(".research-assistant-resizer").getAttribute("aria-valuenow")'),'320');
+  await evaluate('localStorage.removeItem("fasttask.research-assistant.width");true');
   for(const kind of ['visual-theme','theme']) {
     // Click the text and the empty right edge: both belong to the same full-row trigger.
     for(const target of [`.workbench-sidebar .${kind}-menu [slot="trigger"]>span`,`.workbench-sidebar .${kind}-menu [slot="trigger"]`]) {
