@@ -77,6 +77,7 @@ type Config struct {
 
 	FastCASIssuer, FastCASClientID, FastCASClientSecret, FastCASRedirectURI string
 	FastCASLoopbackHTTP                                                     bool
+	FastCASDisabled, FastCASLoginDisabled, FastCASLinkDisabled              bool
 	FastResearchURL, FastResearchPublicURL, FastResearchSSOSecret           string
 	FastResearchLoginEnabled                                                bool
 	// FastResearchLoopbackHTTP relaxes the production HTTPS requirement for a
@@ -192,6 +193,9 @@ func Load() (Config, error) {
 		FastCASClientSecret:                env("FASTTASK_FASTCAS_CLIENT_SECRET", ""),
 		FastCASRedirectURI:                 env("FASTTASK_FASTCAS_REDIRECT_URI", ""),
 		FastCASLoopbackHTTP:                envBool("FASTTASK_FASTCAS_LOOPBACK_HTTP", false),
+		FastCASDisabled:                    !envBool("FASTTASK_FASTCAS_ENABLED", true),
+		FastCASLoginDisabled:               !envBool("FASTTASK_FASTCAS_LOGIN_ENABLED", true),
+		FastCASLinkDisabled:                !envBool("FASTTASK_FASTCAS_LINK_ENABLED", true),
 		FastResearchURL:                    strings.TrimRight(env("FASTTASK_FASTRESEARCH_URL", ""), "/"),
 		FastResearchPublicURL:              strings.TrimRight(env("FASTTASK_FASTRESEARCH_PUBLIC_URL", ""), "/"),
 		FastResearchSSOSecret:              env("FASTTASK_FASTRESEARCH_SSO_SECRET", ""),
@@ -218,7 +222,7 @@ func Load() (Config, error) {
 			fastcasFields++
 		}
 	}
-	if fastcasFields != 0 && fastcasFields != 4 {
+	if !c.FastCASDisabled && fastcasFields != 0 && fastcasFields != 4 {
 		return Config{}, errors.New("configure all four FASTTASK_FASTCAS connection variables or leave all unset")
 	}
 	if c.FastCASServiceEnabled {

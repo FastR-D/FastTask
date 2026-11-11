@@ -19,7 +19,7 @@ require (
 )
 
 require (
-	github.com/FastR-D/FastCAS/sdk/go v0.1.0
+	github.com/FastR-D/FastCAS/sdk/go v0.1.2
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.15.0 // indirect
 	github.com/bytedance/sonic/loader v0.5.0 // indirect
@@ -61,5 +61,3 @@ require (
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
-
-replace github.com/FastR-D/FastCAS/sdk/go => ../FastCAS/sdk/go

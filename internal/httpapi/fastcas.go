@@ -45,7 +45,7 @@ func (s *Server) registerFastCAS() {
 		return p, true
 	}
 	group.GET("/status", func(c *gin.Context) {
-		if s.cfg.FastCASIssuer == "" {
+		if s.cfg.FastCASDisabled || s.cfg.FastCASIssuer == "" {
 			c.JSON(200, gin.H{"enabled": false, "links": []any{}})
 			return
 		}
@@ -58,10 +58,16 @@ func (s *Server) registerFastCAS() {
 			c.JSON(503, gin.H{"detail": "account status unavailable"})
 			return
 		}
-		c.JSON(200, gin.H{"enabled": true, "issuer": s.cfg.FastCASIssuer, "links": links})
+		c.JSON(200, gin.H{"enabled": true, "login_enabled": !s.cfg.FastCASLoginDisabled, "link_enabled": !s.cfg.FastCASLinkDisabled, "issuer": s.cfg.FastCASIssuer, "links": links})
 	})
-	group.GET("/available", func(c *gin.Context) { c.JSON(200, gin.H{"enabled": s.cfg.FastCASIssuer != ""}) })
+	group.GET("/available", func(c *gin.Context) {
+		c.JSON(200, gin.H{"enabled": !s.cfg.FastCASDisabled && s.cfg.FastCASIssuer != "", "login_enabled": !s.cfg.FastCASDisabled && s.cfg.FastCASIssuer != "" && !s.cfg.FastCASLoginDisabled, "link_enabled": !s.cfg.FastCASDisabled && s.cfg.FastCASIssuer != "" && !s.cfg.FastCASLinkDisabled})
+	})
 	group.GET("/login", func(c *gin.Context) {
+		if s.cfg.FastCASLoginDisabled {
+			c.AbortWithStatusJSON(403, gin.H{"detail": "FastCAS login is disabled"})
+			return
+		}
 		if !configured(c) {
 			return
 		}
@@ -75,6 +81,10 @@ func (s *Server) registerFastCAS() {
 		c.Redirect(302, target)
 	})
 	group.POST("/link", func(c *gin.Context) {
+		if s.cfg.FastCASLinkDisabled {
+			c.AbortWithStatusJSON(403, gin.H{"detail": "New FastCAS account links are disabled"})
+			return
+		}
 		if !configured(c) || !sameOrigin(c) {
 			return
 		}
@@ -195,19 +205,19 @@ func (s *Server) registerFastCASOpenAPI() {
 	optionalBearer := []map[string][]string{{}, {"userBearer": {}}}
 	api.Paths[prefix+"/available"] = &huma.PathItem{Get: &huma.Operation{
 		OperationID: "fastcas-available", Tags: []string{"FastCAS"}, Summary: "Check whether optional FastCAS login is configured",
-		Responses: map[string]*huma.Response{"200": jsonResponse("availability", object([]string{"enabled"}, map[string]*huma.Schema{"enabled": {Type: "boolean"}}))},
+		Responses: map[string]*huma.Response{"200": jsonResponse("availability", object([]string{"enabled"}, map[string]*huma.Schema{"enabled": {Type: "boolean"}, "login_enabled": {Type: "boolean"}, "link_enabled": {Type: "boolean"}}))},
 	}}
 	api.Paths[prefix+"/status"] = &huma.PathItem{Get: &huma.Operation{
 		OperationID: "fastcas-status", Tags: []string{"FastCAS"}, Summary: "List the current local user's FastCAS links",
 		Description: "When FastCAS is disabled, returns enabled=false without requiring local login; when enabled, requires a local bearer token.", Security: optionalBearer,
 		Responses: map[string]*huma.Response{"200": jsonResponse("current links", object([]string{"enabled", "links"}, map[string]*huma.Schema{
-			"enabled": {Type: "boolean"}, "issuer": str, "links": {Type: "array", Items: link},
+			"enabled": {Type: "boolean"}, "login_enabled": {Type: "boolean"}, "link_enabled": {Type: "boolean"}, "issuer": str, "links": {Type: "array", Items: link},
 		})), "401": {Description: "local sign-in required"}, "503": {Description: "account status unavailable"}},
 	}}
 	api.Paths[prefix+"/login"] = &huma.PathItem{Get: &huma.Operation{
 		OperationID: "fastcas-login", Tags: []string{"FastCAS"}, Summary: "Start optional FastCAS login",
 		Description: "Sets a short-lived HttpOnly browser-binding cookie and redirects to the configured issuer. Does not create a local account.",
-		Responses:   map[string]*huma.Response{"302": {Description: "redirect to FastCAS", Headers: map[string]*huma.Param{"Location": {Schema: str}}}, "503": {Description: "FastCAS unavailable"}},
+		Responses:   map[string]*huma.Response{"302": {Description: "redirect to FastCAS", Headers: map[string]*huma.Param{"Location": {Schema: str}}}, "403": {Description: "FastCAS login disabled"}, "503": {Description: "FastCAS unavailable"}},
 	}}
 	api.Paths[prefix+"/link"] = &huma.PathItem{Post: &huma.Operation{
 		OperationID: "fastcas-link", Tags: []string{"FastCAS"}, Summary: "Prove the existing local account and begin linking",

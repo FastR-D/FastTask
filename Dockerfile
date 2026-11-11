@@ -22,29 +22,7 @@ COPY web/ ./
 COPY sidecar/ /src/sidecar/
 RUN npm run build
 
-# go.mod replaces github.com/FastR-D/FastCAS/sdk/go with ../FastCAS/sdk/go — a sibling checkout that
-# exists on a developer's machine and not in a build context, so `COPY . .` can never bring it in. This
-# stage fetches it and puts it exactly where that relative path resolves to from /src.
-#
-# It downloads the pinned tarball rather than cloning: one small HTTPS GET with retries instead of a git
-# negotiation, which is what a build network is most likely to interrupt. The ref is pinned because a
-# floating branch would let an upstream push change what "this commit of FastTask" builds into.
-#
-# A build that must not reach the network overrides the stage instead of editing it, with a directory
-# whose root holds FastCAS/sdk/go: `docker build --build-context fastcas-sdk=/path/to/parent .`
-FROM alpine:3.22 AS fastcas-sdk
-ARG FASTCAS_REF=676d49b18f700c009f1f491280a93de7da294836
-ARG FASTCAS_TARBALL=https://codeload.github.com/FastR-D/FastCAS/tar.gz/${FASTCAS_REF}
-RUN set -eu; \
-    for attempt in 1 2 3; do \
-        wget -qO /sdk.tar.gz "$FASTCAS_TARBALL" && break; \
-        echo "fastcas sdk download failed (attempt $attempt of 3)" >&2; \
-        sleep 5; \
-    done; \
-    mkdir -p /FastCAS; \
-    tar -xzf /sdk.tar.gz -C /FastCAS --strip-components=1; \
-    test -f /FastCAS/sdk/go/go.mod
-
+# FastCAS is resolved from the pinned Go module version in go.mod/go.sum.
 FROM golang:1.26.8-alpine AS go
 # The module proxy is an argument because the default one is not reachable from every network this
 # is built on; a build that cannot reach it fails at `go mod download` with a dial timeout that
@@ -55,9 +33,6 @@ ENV GOPROXY=$GOPROXY
 RUN sed -i "s|dl-cdn.alpinelinux.org|${APK_MIRROR}|g" /etc/apk/repositories \
  && apk add --no-cache build-base sqlite-dev
 WORKDIR /src
-# The module, not the whole upstream repository: go.mod's replace target has to be a directory whose
-# go.mod declares github.com/FastR-D/FastCAS/sdk/go.
-COPY --from=fastcas-sdk /FastCAS/sdk/go/ /FastCAS/sdk/go/
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .

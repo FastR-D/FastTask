@@ -613,3 +613,8 @@ button:focus-visible,summary:focus-visible{outline:2px solid rgb(var(--mdui-colo
   .goal-tree .goal-tree{margin-left:var(--ft-space-2);padding-left:var(--ft-space-2)}
   .goal-task-detail{padding-left:var(--ft-space-3)}
 }
+
+/* Optional account authentication uses the same desktop spacing as other tools. */
+.account-body{display:grid;gap:var(--ft-space-3);max-width:760px;padding:var(--ft-space-4);background:rgb(var(--mdui-color-surface-container-low));border:1px solid rgb(var(--mdui-color-outline-variant));border-radius:var(--mdui-shape-corner-large)}
+.account-body p{margin:0}
+.account-state{font-weight:600}

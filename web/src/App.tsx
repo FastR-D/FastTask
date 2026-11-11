@@ -1,3 +1,4 @@
+import {FastCASAccount} from './FastCASAccount'
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, completeFastCAS, completeFastResearch, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, onSessionEnded, readOfflineUser, rememberUser, request, token } from './api'
 import type { Goal, Job, User } from './types'
@@ -15,11 +16,11 @@ import { assertAccessOwner } from './session-owner'
 import { watchTheme } from './theme'
 export { Today, focusEvidence } from './Today'
 
-type Tab = 'today' | 'goals' | 'panel' | 'jobs' | 'review'
+type Tab = 'today' | 'goals' | 'panel' | 'jobs' | 'review' | 'account'
 
 const NAV_ICONS: Record<Tab, string | undefined> = {
   today: 'today', goals: 'account_tree', jobs: 'pending',
-  panel: undefined, review: 'fact_check',
+  panel: undefined, review: 'fact_check', account: 'verified_user',
 }
 const BAR_TABS: Tab[] = ['today', 'goals', 'review', 'jobs']
 
@@ -88,7 +89,7 @@ function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialErr
   const [fastcas, setFastcas] = useState(false)
   const [fastResearch, setFastResearch] = useState(false)
   useEffect(() => {
-    void request<{enabled:boolean}>('/auth/fastcas/available').then(r => setFastcas(r.data.enabled)).catch(() => {})
+    void request<{enabled:boolean;login_enabled?:boolean}>('/auth/fastcas/available').then(r => setFastcas(r.data.enabled && r.data.login_enabled !== false)).catch(() => {})
     void request<{enabled:boolean}>('/auth/fastresearch/available').then(r => setFastResearch(r.data.enabled)).catch(() => {})
   }, [])
   const [busy, setBusy] = useState(false)
@@ -116,7 +117,7 @@ function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialErr
         {error && <p className="login-error" role="alert"><mdui-icon name="error_outline"/>{error}</p>}
         <mdui-button variant="filled" full-width disabled={busy} loading={busy} onClick={submit}>{busy ? '正在验证…' : '开始今天'}</mdui-button>
         {fastResearch && <mdui-button type="button" variant="filled" full-width onClick={() => window.location.assign('/api/v1/auth/fastresearch/login')}>使用 FastResearch Key 登录</mdui-button>}
-        {fastcas && !fastResearch && <mdui-button type="button" variant="outlined" full-width onClick={() => window.location.assign('/api/v1/auth/fastcas/login')}>使用 FastCAS 登录</mdui-button>}
+        {fastcas && <mdui-button type="button" variant="outlined" full-width onClick={() => window.location.assign('/api/v1/auth/fastcas/login')}>使用 FastCAS 登录</mdui-button>}
         <small>{fastResearch ? '普通用户使用个人 FastResearch Key。管理员仍使用上方 FastTask 账号和密码。' : '生产环境请使用管理员下发账号，登录状态会安全地保留在此设备上，退出登录时一并清除。'}</small>
       </form>
     </div>
@@ -164,7 +165,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
   useMduiEvent(drawerRef, 'close', () => setDrawerOpen(false))
   useMduiEvent(snackbarRef, 'close', () => setNotice(''))
   const items = navItems()
-  const currentLabel = tab === 'panel' ? '工牌更新' : items.find(([id]) => id === tab)?.[1] ?? ''
+  const currentLabel = tab === 'account' ? '账号认证' : tab === 'panel' ? '工牌更新' : items.find(([id]) => id === tab)?.[1] ?? ''
   if(!user)return <main className="page"><h1>正在打开工作台</h1>
     <p role={profileError?'alert':'status'}>{profileError?`暂时无法确认当前账号：${profileError}`:'正在确认当前账号…'}</p>
     <div className="actions">{profileError&&<mdui-button variant="outlined" onClick={()=>setProfileAttempt(value=>value+1)}>重试确认账号</mdui-button>}<mdui-button variant="text" onClick={onLogout}>退出登录</mdui-button></div>
@@ -176,7 +177,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
       <nav aria-label="主导航">
         {items.map(([id,label]) => <button key={id} type="button" className="workbench-nav-item" aria-current={tab===id?'page':undefined} onClick={()=>setTab(id)}><mdui-icon name={NAV_ICONS[id]}/><span>{label}</span>{tab===id&&<span className="workbench-nav-dot"/>}</button>)}
       </nav>
-      <div className="workbench-sidebar-bottom">
+      <div className="workbench-sidebar-bottom"><button type="button" className="workbench-nav-item" aria-label="账号认证" aria-current={tab==='account'?'page':undefined} onClick={()=>setTab('account')}><mdui-icon name="verified_user" aria-hidden="true"/><span>账号认证</span></button>
         <button type="button" className="workbench-nav-item" aria-current={tab==='panel'?'page':undefined} onClick={()=>setTab('panel')}><mdui-icon src={badgeConsoleIcon}/><span>工牌更新</span><small>工具</small></button>
         <div className="workbench-profile"><span className="rail-avatar">{user.display_name?.slice(0,1)||'F'}</span><div><b>{user.display_name}</b><small>{timezone}</small></div></div>
         <VisualThemeMenu labelled/>
@@ -196,7 +197,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
         </mdui-list>
         <div className="drawer-foot">
           <mdui-list>
-            <mdui-list-item icon="badge" onClick={() => { setTab('panel'); setDrawerOpen(false) }}>工牌更新</mdui-list-item>
+            <mdui-list-item icon="verified_user" onClick={() => { setTab('account'); setDrawerOpen(false) }}>账号认证</mdui-list-item><mdui-list-item icon="badge" onClick={() => { setTab('panel'); setDrawerOpen(false) }}>工牌更新</mdui-list-item>
           </mdui-list>
           <div className="drawer-theme"><VisualThemeSelect/></div>
           <div className="drawer-theme"><ThemeSelect/></div>
@@ -210,7 +211,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
     <mdui-navigation-rail className="app-rail" value={tab} divider>
       <div slot="top" className="rail-brand"><span className="brand-mark">3</span></div>
       {items.map(([id, label]) => <mdui-navigation-rail-item key={id} value={id} icon={NAV_ICONS[id]} onClick={() => setTab(id)}>{id === 'panel' && <><mdui-icon slot="icon" src={badgeConsoleIcon}/><mdui-icon slot="active-icon" src={badgeConsoleIcon}/></>}{label}</mdui-navigation-rail-item>)}
-      <div slot="bottom" className="rail-profile">
+      <div slot="bottom" className="rail-profile"><mdui-button-icon icon="verified_user" aria-label="账号认证" onClick={()=>setTab('account')}/>
         <mdui-tooltip content="工牌更新" placement="left">
           <button className="rail-tool-button" type="button" aria-label="工牌更新" onClick={() => setTab('panel')}>
             <mdui-icon src={badgeConsoleIcon}/>
@@ -232,7 +233,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
     <mdui-layout-main className="app-main">
       <ResearchWorkspace active={tab==='today'} timezone={timezone} userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} chatRequest={chatRequest} goalChatRequest={goalChatRequest} assistantOpen={assistantOpen} onAssistantOpen={showAssistant}/>
       <FastPanel active={tab==='panel'} userId={user.id} timezone={timezone} refreshVersion={businessRevision} onNotice={setNotice}/>
-      <div className="page" hidden={tab==='today'||tab==='panel'}>
+      <div className="page" hidden={tab==='today'||tab==='panel'}>{tab==='account'&&<FastCASAccount/>}
         {tab==='goals' && <GoalManager timezone={timezone} userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} onOpenChat={openChat}/>}
         {tab==='jobs' && <JobQueue onNotice={setNotice}/>}
         {tab==='review' && <Review onNotice={setNotice}/>}
