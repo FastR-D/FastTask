@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FastResearch today wire request",
+  "type": "object",
+  "required": ["receiver_refs"],
+  "properties": {"receiver_refs": {"type": "array", "items": {"type": "string"}}},
+  "description": "Receiver trims whitespace, drops empty/duplicate values and takes the first 200 unique refs. At least one normalized ref is required. Unknown properties are ignored."
+}

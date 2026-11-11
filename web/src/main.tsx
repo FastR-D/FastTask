@@ -1,6 +1,8 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import './mdui'
+import '@fastrd/ui-foundation/tokens.css'
+import '@fastrd/ui-foundation/mdui.css'
 import { App } from './App'
 import './styles.css'
 import './workbench-theme.css'

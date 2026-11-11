@@ -1,6 +1,6 @@
 /* Classic stays in styles.css. This layer changes presentation without remounting business views. */
 html[data-ft-theme='workbench'] {
-  --ft-wb-canvas: #eef0f3;
+  --ft-wb-canvas: var(--fastui-workspace);
   --ft-wb-surface: rgb(var(--mdui-color-surface));
   --ft-wb-soft: rgb(var(--mdui-color-surface-container-low));
   --ft-wb-border: rgb(var(--mdui-color-outline-variant));
@@ -10,10 +10,6 @@ html[data-ft-theme='workbench'] {
   --ft-wb-primary: rgb(var(--mdui-color-primary));
   --ft-wb-selected: rgb(var(--mdui-color-primary-container));
   --ft-wb-radius: 6px;
-}
-html[data-ft-theme='workbench'].mdui-theme-dark { --ft-wb-canvas:#10161e; }
-@media(prefers-color-scheme:dark) {
-  html[data-ft-theme='workbench'].mdui-theme-auto { --ft-wb-canvas:#10161e; }
 }
 
 /* MDUI receives RGB tuples through its existing palette; CSS colours above are only for native elements. */

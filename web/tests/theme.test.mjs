@@ -1,157 +1,109 @@
-import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { readFileSync } from 'node:fs';
-import { runInNewContext } from 'node:vm';
-import {
-  applyTheme,
-  applyVisualTheme,
-  readThemePreference,
-  readVisualTheme,
-  resolveTheme,
-  setThemePreference,
-  setVisualTheme,
-  writeThemePreference,
-  writeVisualTheme,
-} from '../src/theme.ts';
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { chromium, expect } from '@playwright/test'
+import { preview } from 'vite'
+import { mkdir, writeFile } from 'node:fs/promises'
 
-function memoryStorage() {
-  const values = new Map();
-  return {
-    values,
-    getItem: key => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, String(value)),
-    removeItem: key => values.delete(key),
-  };
-}
-
-function fakeDocument(initialClass = 'mdui-theme-auto') {
-  const classes = new Set(initialClass.split(' '));
-  const metas = [];
-  const meta = (media, content) => ({
-    media,
-    content,
-    parentNode: {},
-    removed: false,
-    setAttribute(name, value) { this[name] = value },
-    removeAttribute(name) { delete this[name] },
-    remove() { this.removed = true },
-  });
-  metas.push(meta('(prefers-color-scheme: light)', '#f7f8fa'), meta('(prefers-color-scheme: dark)', '#10161e'));
-  return {
-    classes,
-    metas,
-    documentElement: {
-      dataset: {},
-      classList: {
-        add: value => classes.add(value),
-        remove: (...values) => values.forEach(value => classes.delete(value)),
-      },
-    },
-    querySelectorAll: () => metas.filter(value => !value.removed),
-    createElement: () => meta(),
-    head: { appendChild(node) { metas.push(node); return node } },
-  };
-}
-
-test('the theme choice persists, treats unknown storage as system, and survives blocked storage', () => {
-  const storage = memoryStorage();
-  assert.equal(readThemePreference(storage), 'system');
-  writeThemePreference('dark', storage);
-  assert.equal(readThemePreference(storage), 'dark');
-  writeThemePreference('system', storage);
-  assert.equal(storage.values.size, 0);
-
-  writeThemePreference('sepia', storage);
-  storage.setItem('fasttask.theme', 'sepia');
-  assert.equal(readThemePreference(storage), 'system');
-
-  const blocked = {
-    getItem() { throw new Error('blocked') },
-    setItem() { throw new Error('blocked') },
-    removeItem() { throw new Error('blocked') },
-  };
-  assert.equal(readThemePreference(blocked), 'system');
-  assert.equal(setThemePreference('light', undefined, blocked), 'light');
-});
-
-test('system resolves against the operating system while a pin ignores it', () => {
-  assert.equal(resolveTheme('system', true), 'dark');
-  assert.equal(resolveTheme('system', false), 'light');
-  assert.equal(resolveTheme('light', true), 'light');
-  assert.equal(resolveTheme('dark', false), 'dark');
-});
-
-test('visual theme defaults to workbench and persists independently from colour mode', () => {
-  const storage = memoryStorage();
-  assert.equal(readVisualTheme(storage), 'workbench');
-  writeVisualTheme('classic', storage);
-  assert.equal(readVisualTheme(storage), 'classic');
-  storage.setItem('fasttask.theme', 'dark');
-  assert.equal(readThemePreference(storage), 'dark');
-  writeVisualTheme('invalid', storage);
-  assert.equal(readVisualTheme(storage), 'classic');
-  const blocked = {getItem() {throw new Error('blocked')},setItem() {throw new Error('blocked')}};
-  const doc = fakeDocument();
-  assert.equal(readVisualTheme(blocked), 'workbench');
-  setVisualTheme('classic', doc, blocked);
-  assert.equal(doc.documentElement.dataset.ftTheme, 'classic');
-});
-
-test('boot restores both visual themes with each colour mode', () => {
-  const script = readFileSync(new URL('../public/theme-init.js', import.meta.url), 'utf8');
-  for(const visual of ['workbench','classic']) for(const mode of ['light','dark','system']) {
-    const doc = fakeDocument();
-    runInNewContext(script, {
-      document:doc,
-      localStorage:{getItem:key=>key==='fasttask.visual-theme'?visual:mode},
-      window:{matchMedia:()=>({matches:true})},
-    });
-    assert.equal(doc.documentElement.dataset.ftTheme, visual);
-    assert.deepEqual([...doc.classes], [mode==='system'?'mdui-theme-auto':`mdui-theme-${mode}`]);
-    assert.equal(doc.metas[0].content,mode==='light'?'#f7f8fa':'#10161e');
+test('production themes preserve the mounted assistant, draft, focus and PWA chrome', { timeout: 120000 }, async () => {
+  const artifacts = 'test-results/fastui'
+  await mkdir(artifacts, { recursive: true })
+  let server, browser
+  try {
+    server = await preview({ configFile: false, preview: { host: '127.0.0.1', port: 0 } })
+    const base = `http://127.0.0.1:${server.httpServer.address().port}`
+    browser = await chromium.launch({ headless: true })
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: 'block', colorScheme: 'light' })
+    const errors = [], scenarios = []
+    const user = { id: 'theme-user', identifier: 'theme-user', display_name: 'Theme user', timezone: 'UTC', role: 'admin', locale: 'zh-CN', status: 'active', revision: 1, created_at: '2026-11-10T00:00:00Z' }
+    const token = `header.${Buffer.from(JSON.stringify({ sub: user.id, exp: 4102444800 })).toString('base64url')}.signature`
+    await context.route('**/api/v1/**', async route => {
+      const path = new URL(route.request().url()).pathname.replace('/api/v1', '')
+      if (path === '/panel/profile') return route.fulfill({ status: 404, json: { detail: 'Profile not configured' } })
+      let value = { items: [] }
+      if (path === '/auth/refresh') value = { access_token: token, refresh_token: 'fixture-refresh', user }
+      else if (path === '/me') value = user
+      else if (path === '/agent/availability') value = { configured: true, mode: 'server', model_name: 'fixture-model' }
+      else if (path === '/agent/thread-state') value = { state: null }
+      else if (path === '/agent/threads') value = { items: [], next_cursor: null }
+      else if (path === '/daily-plans/current') value = { plan: { id: 'theme-plan', local_date: new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()), timezone: 'UTC', status: 'draft', revision: 1, current_revision: 1 }, items: [], availability: { status: 'no_tasks', reason: '暂无任务', ready_count: 0, waiting_count: 0, can_replan: true } }
+      else if (path === '/planning-settings') value = { daily_budget_minutes: 120, primary_goal_id: null }
+      await route.fulfill({ json: value })
+    })
+    await context.addInitScript(() => {
+      if (!localStorage.getItem('fasttask_refresh')) localStorage.setItem('fasttask_refresh', 'fixture-refresh')
+    })
+    const page = await context.newPage()
+    page.on('pageerror', error => { errors.push(error.message); console.error(error.message) })
+    await page.goto(base)
+    const composer = page.locator('.agent-input')
+    await expect(composer).toBeVisible()
+    await composer.fill('保留这段研究草稿')
+    const original = await composer.elementHandle()
+    const peer = await context.newPage()
+    await peer.goto(base)
+    for (const visual of ['classic', 'workbench']) for (const mode of ['light', 'dark', 'system']) {
+      await composer.focus()
+      await peer.evaluate(({ visual, mode }) => {
+        localStorage.setItem('fasttask.visual-theme', visual)
+        localStorage.setItem('fasttask.theme', mode)
+      }, { visual, mode })
+      await expect(page.locator('html')).toHaveAttribute('data-ft-theme', visual)
+      await expect(page.locator('html')).toHaveAttribute('data-fastui-theme', mode === 'dark' ? 'dark' : 'light')
+      await expect(composer).toBeFocused()
+      await expect(composer).toHaveValue('保留这段研究草稿')
+      assert.equal(await original.evaluate(el => el === document.querySelector('.agent-input')), true)
+      assert.equal(await page.evaluate(() => document.querySelector('meta[name="theme-color"]').content === getComputedStyle(document.documentElement).getPropertyValue('--fastui-page').trim()), true)
+      await page.screenshot({ path: `${artifacts}/${visual}-${mode}.png` })
+    }
+    scenarios.push('classic/workbench × light/dark/system preserve assistant DOM, focus, draft and PWA color')
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await expect(page.locator('html')).toHaveAttribute('data-fastui-theme', 'dark')
+    await page.emulateMedia({ colorScheme: 'light' })
+    await expect(page.locator('html')).toHaveAttribute('data-fastui-theme', 'light')
+    await page.locator('.workbench-sidebar .theme-menu [slot="trigger"]').click()
+    await page.locator('.workbench-sidebar .theme-menu mdui-menu-item[value="dark"]').click()
+    await expect(page.locator('html')).toHaveAttribute('data-fastui-theme', 'dark')
+    assert.equal(await page.evaluate(() => localStorage.getItem('fasttask.theme')), 'dark')
+    scenarios.push('system media change and real MDUI theme menu persist existing storage key')
+    await page.reload()
+    await expect(page.locator('html')).toHaveAttribute('data-fastui-theme', 'dark')
+    await expect(composer).toBeVisible()
+    for (const width of [1440, 1024, 390]) {
+      await page.setViewportSize({ width, height: 1000 })
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
+      await page.screenshot({ path: `${artifacts}/workbench-${width}.png` })
+    }
+    // Hold the React entry at the network boundary: the blocking foundation boot must stand alone.
+    for (const [stored, system, resolved] of [['light', 'dark', 'light'], ['dark', 'light', 'dark'], ['invalid', 'dark', 'dark'], ['blocked', 'dark', 'dark']]) {
+      const cold = await browser.newContext({ colorScheme: system, serviceWorkers: 'block' })
+      await cold.addInitScript(stored => {
+        if (stored === 'blocked') {
+          Object.defineProperty(Storage.prototype, 'getItem', { value() { throw new DOMException('blocked', 'SecurityError') } })
+        } else {
+          localStorage.setItem('fasttask.theme', stored)
+          localStorage.setItem('fasttask.visual-theme', 'classic')
+        }
+      }, stored)
+      await cold.route('**/assets/index-*.js', route => route.abort())
+      const boot = await cold.newPage()
+      await boot.goto(base)
+      await expect(boot.locator('html')).toHaveAttribute('data-fastui-theme', resolved)
+      await expect(boot.locator('html')).toHaveAttribute('data-ft-theme', stored === 'blocked' ? 'workbench' : 'classic')
+      assert.equal(await boot.locator('#root').evaluate(el => el.childElementCount), 0)
+      assert.equal(await boot.evaluate(() => document.querySelector('meta[name="theme-color"]').content === getComputedStyle(document.documentElement).getPropertyValue('--fastui-page').trim()), true)
+      await cold.close()
+    }
+    scenarios.push('blocking pre-React boot honors pin, invalid preference, blocked storage and PWA color')
+    assert.deepEqual(errors, [])
+    await writeFile(`${artifacts}/results.json`, JSON.stringify({ status: 'passed', scenarios }, null, 2))
+  } finally {
+    try {
+      await browser?.close()
+    } finally {
+      if (server) await new Promise((resolve, reject) => {
+        server.httpServer.close(error => error ? reject(error) : resolve())
+        server.httpServer.closeAllConnections()
+      })
+    }
   }
-});
-
-test('applying a pin sets the MDUI class and one resolved browser chrome colour', () => {
-  const doc = fakeDocument();
-  assert.equal(applyTheme('light', doc, true), 'light');
-  assert.deepEqual([...doc.classes], ['mdui-theme-light']);
-  assert.equal(doc.metas[0].content, '#f7f8fa');
-  assert.equal('media' in doc.metas[0], false);
-  assert.equal(doc.metas[1].removed, true);
-
-  assert.equal(applyTheme('system', doc, true), 'dark');
-  assert.deepEqual([...doc.classes], ['mdui-theme-auto']);
-  assert.equal(doc.metas[0].content, '#10161e');
-});
-
-test('visual theme applies only the independent data attribute', () => {
-  const doc = fakeDocument();
-  assert.equal(applyVisualTheme('classic', doc), 'classic');
-  assert.equal(doc.documentElement.dataset.ftTheme, 'classic');
-  assert.deepEqual([...doc.classes], ['mdui-theme-auto']);
-  assert.equal(setVisualTheme('workbench', doc, memoryStorage()), 'workbench');
-  assert.equal(doc.documentElement.dataset.ftTheme, 'workbench');
-});
-
-test('the blocking boot script restores the theme before React, including when storage is blocked', () => {
-  const script = readFileSync(new URL('../public/theme-init.js', import.meta.url), 'utf8');
-  for (const [stored, darkOS, expectedClass, expectedColor] of [
-    ['light', true, 'mdui-theme-light', '#f7f8fa'],
-    ['dark', false, 'mdui-theme-dark', '#10161e'],
-    [null, true, 'mdui-theme-auto', '#10161e'],
-    ['invalid', false, 'mdui-theme-auto', '#f7f8fa'],
-    ['blocked', true, 'mdui-theme-auto', '#10161e'],
-  ]) {
-    const doc = fakeDocument();
-    runInNewContext(script, {
-      document: doc,
-      localStorage: { getItem() { if (stored === 'blocked') throw new Error('blocked'); return stored } },
-      window: { matchMedia: () => ({ matches: darkOS }) },
-    });
-    assert.deepEqual([...doc.classes], [expectedClass]);
-    assert.equal(doc.documentElement.dataset.ftTheme, 'workbench');
-    assert.equal(doc.metas[0].content, expectedColor);
-    assert.equal(doc.metas[1].removed, true);
-  }
-});
+})
