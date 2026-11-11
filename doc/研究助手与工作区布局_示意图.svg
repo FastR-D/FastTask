@@ -69,7 +69,7 @@
   <rect x="54" y="584" width="1292" height="112" rx="10" class="surface"/>
   <circle cx="84" cy="620" r="8" class="blue"/><text x="106" y="627" class="body text">页面切换：只替换主区，助手对话、草稿、运行状态和滚动位置保持。</text>
   <circle cx="84" cy="656" r="8" class="blue"/><text x="106" y="663" class="body text">助手操作：全局打开 / 收起；宽度记忆在浏览器本地。</text>
-  <circle cx="84" cy="692" r="8" class="blue"/><text x="106" y="699" class="body text">分隔线：鼠标、触摸、键盘均可操作，并设置主区和助手区最小宽度。</text>
+  <circle cx="84" cy="692" r="8" class="blue"/><text x="106" y="699" class="body text">分隔线：两侧最小均为 320px；助手上限 min(800px, 工作区宽度 - 328px)。</text>
 
   <text x="54" y="758" class="h2 text">移动端建议</text>
   <rect x="54" y="786" width="1292" height="70" rx="10" class="surface"/>

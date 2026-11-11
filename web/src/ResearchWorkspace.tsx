@@ -20,7 +20,9 @@ export function readResearchAssistantOpen(): boolean {
 
 function readAssistantWidth(): number {
   try {
-    const value = Number(window.localStorage.getItem(ASSISTANT_WIDTH_KEY))
+    const stored = window.localStorage.getItem(ASSISTANT_WIDTH_KEY)
+    if (stored === null) return DEFAULT_ASSISTANT_WIDTH
+    const value = Number(stored)
     return Number.isFinite(value) ? clampWidth(value) : DEFAULT_ASSISTANT_WIDTH
   } catch {
     return DEFAULT_ASSISTANT_WIDTH
@@ -85,7 +87,7 @@ export function ResearchWorkspace({ children, userId, assistantOpen, goalChatReq
   function startResize(event: PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return
     event.preventDefault()
-    resizeStart.current = { x: event.clientX, width: assistantWidth }
+    resizeStart.current = { x: event.clientX, width: clampWidth(assistantWidth, availableMaxWidth) }
     setResizing(true)
   }
 
@@ -93,16 +95,16 @@ export function ResearchWorkspace({ children, userId, assistantOpen, goalChatReq
     const step = event.shiftKey ? 48 : 16
     if (event.key === 'ArrowLeft') {
       event.preventDefault()
-      setAssistantWidth(value => clampWidth(value + step, availableMaxWidth))
+      setAssistantWidth(value => clampWidth(clampWidth(value, availableMaxWidth) + step, availableMaxWidth))
     } else if (event.key === 'ArrowRight') {
       event.preventDefault()
-      setAssistantWidth(value => clampWidth(value - step, availableMaxWidth))
+      setAssistantWidth(value => clampWidth(clampWidth(value, availableMaxWidth) - step, availableMaxWidth))
     } else if (event.key === 'Home') {
       event.preventDefault()
       setAssistantWidth(MIN_ASSISTANT_WIDTH)
     } else if (event.key === 'End') {
       event.preventDefault()
-      setAssistantWidth(MAX_ASSISTANT_WIDTH)
+      setAssistantWidth(availableMaxWidth)
     }
   }
 
@@ -119,7 +121,7 @@ export function ResearchWorkspace({ children, userId, assistantOpen, goalChatReq
       aria-label="调整研究助手宽度"
       aria-orientation="vertical"
       aria-valuemin={MIN_ASSISTANT_WIDTH}
-      aria-valuemax={MAX_ASSISTANT_WIDTH}
+      aria-valuemax={availableMaxWidth}
       aria-valuenow={effectiveAssistantWidth}
       tabIndex={assistantOpen ? 0 : -1}
       onPointerDown={startResize}

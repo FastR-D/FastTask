@@ -22,6 +22,7 @@ export async function checkWorkbench({ command, evaluate, until, artifacts }) {
   await resize(1440);
   await until(()=>visible('.workbench-sidebar nav'),'sidebar missing');
   await until(()=>visible('.agent-input'),'assistant composer missing');
+  assert.equal(await evaluate('document.querySelector(".research-assistant-resizer").getAttribute("aria-valuenow")'),'400','first visit must use the default width');
   assert.equal(await evaluate('document.querySelector(".research-assistant-resizer").getAttribute("aria-valuemin")'),'320');
   assert.equal(await evaluate('document.querySelector(".research-assistant-resizer").getAttribute("aria-valuemax")'),'800');
   await evaluate('document.querySelector(".research-assistant-resizer").focus();true');
@@ -30,11 +31,31 @@ export async function checkWorkbench({ command, evaluate, until, artifacts }) {
   await settle();
   assert.equal(await evaluate('document.querySelector(".research-assistant-resizer").getAttribute("aria-valuenow")'),'800');
   assert.match(await evaluate('getComputedStyle(document.querySelector(".research-workspace")).gridTemplateColumns'),/800px/);
+  await resize(1080);
+  const constrained = await evaluate(`(()=>{const w=document.querySelector('.research-workspace');return {workspace:w.clientWidth,page:document.querySelector('.research-page-viewport').getBoundingClientRect().width,assistant:document.querySelector('.research-chat').getBoundingClientRect().width,max:Number(document.querySelector('.research-assistant-resizer').getAttribute('aria-valuemax'))}})()`);
+  assert.equal(constrained.page,320,'narrow desktop must preserve 320px for the page');
+  assert.equal(constrained.assistant,constrained.workspace-320-8);
+  assert.equal(constrained.max,constrained.assistant,'separator must report the effective maximum');
+  const dragStart=await evaluate(`(()=>{const r=document.querySelector('.research-assistant-resizer').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+100}})()`);
+  await command('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...dragStart});
+  await command('Input.dispatchMouseEvent',{type:'mouseMoved',button:'left',buttons:1,x:dragStart.x+40,y:dragStart.y});
+  await command('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,x:dragStart.x+40,y:dragStart.y});
+  await settle();
+  assert.equal(await evaluate('Number(document.querySelector(".research-assistant-resizer").getAttribute("aria-valuenow"))'),constrained.assistant-40,'drag must start from the displayed width after resizing');
+  assert.equal(await evaluate('document.querySelector(".research-page-viewport").getBoundingClientRect().width'),360);
+  await screenshot('workbench-1080-width-limit');
+  await resize(1440);
+  await evaluate('document.querySelector(".research-assistant-resizer").focus();true');
   await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Home',code:'Home',windowsVirtualKeyCode:36});
   await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Home',code:'Home',windowsVirtualKeyCode:36});
   await settle();
   assert.equal(await evaluate('document.querySelector(".research-assistant-resizer").getAttribute("aria-valuenow")'),'320');
-  await evaluate('localStorage.removeItem("fasttask.research-assistant.width");true');
+  for(let i=0;i<5;i++) {
+    await command('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowLeft',code:'ArrowLeft',windowsVirtualKeyCode:37});
+    await command('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowLeft',code:'ArrowLeft',windowsVirtualKeyCode:37});
+  }
+  await settle();
+  assert.equal(await evaluate('document.querySelector(".research-assistant-resizer").getAttribute("aria-valuenow")'),'400');
   for(const kind of ['visual-theme','theme']) {
     // Click the text and the empty right edge: both belong to the same full-row trigger.
     for(const target of [`.workbench-sidebar .${kind}-menu [slot="trigger"]>span`,`.workbench-sidebar .${kind}-menu [slot="trigger"]`]) {
