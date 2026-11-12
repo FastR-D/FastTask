@@ -42,6 +42,7 @@ func (s adminRoutes) registerAdminUsers(api huma.API) {
 			Timezone    string `json:"timezone,omitempty"`
 			Locale      string `json:"locale,omitempty"`
 			Role        string `json:"role" enum:"member,admin"`
+			Status      string `json:"status,omitempty" enum:"active,disabled"`
 		}
 	}
 	register(api, "create-admin-user", http.MethodPost, "/admin/users", "Create user", userSecurity(), func(ctx context.Context, input *createInput) (*itemResponse[persistence.User], error) {
@@ -49,7 +50,7 @@ func (s adminRoutes) registerAdminUsers(api huma.API) {
 		if err != nil {
 			return nil, mapError(err)
 		}
-		user, err := s.app.CreateUser(ctx, actor, application.CreateUserCommand{Identifier: input.Body.Identifier, Password: input.Body.Password, DisplayName: input.Body.DisplayName, Timezone: input.Body.Timezone, Locale: input.Body.Locale, Role: input.Body.Role})
+		user, err := s.app.CreateUser(ctx, actor, application.CreateUserCommand{Identifier: input.Body.Identifier, Password: input.Body.Password, DisplayName: input.Body.DisplayName, Timezone: input.Body.Timezone, Locale: input.Body.Locale, Role: input.Body.Role, Status: input.Body.Status})
 		if err != nil {
 			return nil, mapError(err)
 		}
@@ -74,6 +75,8 @@ func (s adminRoutes) registerAdminUsers(api huma.API) {
 		UserID  string `path:"user_id"`
 		IfMatch string `header:"If-Match" required:"true"`
 		Body    struct {
+			Identifier  *string `json:"identifier,omitempty" minLength:"3" maxLength:"120"`
+			Password    *string `json:"password,omitempty" minLength:"12" maxLength:"200"`
 			DisplayName *string `json:"display_name,omitempty"`
 			Timezone    *string `json:"timezone,omitempty"`
 			Locale      *string `json:"locale,omitempty"`
@@ -90,7 +93,7 @@ func (s adminRoutes) registerAdminUsers(api huma.API) {
 		if err != nil {
 			return nil, mapError(err)
 		}
-		user, err := s.app.UpdateUser(ctx, actor, input.UserID, expected, application.UpdateUserCommand{DisplayName: input.Body.DisplayName, Timezone: input.Body.Timezone, Locale: input.Body.Locale, Role: input.Body.Role, Status: input.Body.Status})
+		user, err := s.app.UpdateUser(ctx, actor, input.UserID, expected, application.UpdateUserCommand{Identifier: input.Body.Identifier, Password: input.Body.Password, DisplayName: input.Body.DisplayName, Timezone: input.Body.Timezone, Locale: input.Body.Locale, Role: input.Body.Role, Status: input.Body.Status})
 		if err != nil {
 			return nil, mapError(err)
 		}
@@ -103,6 +106,24 @@ func (s adminRoutes) registerAdminUsers(api huma.API) {
 			Password string `json:"password" minLength:"12" maxLength:"200"`
 		}
 	}
+	type deleteInput struct {
+		UserID  string `path:"user_id"`
+		IfMatch string `header:"If-Match" required:"true"`
+	}
+	register(api, "delete-admin-user", http.MethodDelete, "/admin/users/{user_id}", "Delete user", userSecurity(), func(ctx context.Context, input *deleteInput) (*struct{}, error) {
+		actor, err := s.app.CurrentAdmin(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		expected, err := revisionFromETag(input.IfMatch)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if err = s.app.DeleteUser(ctx, actor, input.UserID, expected); err != nil {
+			return nil, mapError(err)
+		}
+		return &struct{}{}, nil
+	})
 	register(api, "reset-admin-user-password", http.MethodPost, "/admin/users/{user_id}/password", "Reset user password", userSecurity(), func(ctx context.Context, input *passwordInput) (*struct{}, error) {
 		actor, err := s.app.CurrentAdmin(ctx)
 		if err != nil {

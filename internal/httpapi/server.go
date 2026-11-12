@@ -248,6 +248,8 @@ func operationStatus(id string) int {
 		return http.StatusAccepted
 	case "auth-logout":
 		return http.StatusNoContent
+	case "delete-admin-user", "reset-admin-user-password", "revoke-admin-user-sessions":
+		return http.StatusNoContent
 	default:
 		return http.StatusOK
 	}

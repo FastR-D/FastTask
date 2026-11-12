@@ -1,4 +1,5 @@
 import {FastCASAccount} from './FastCASAccount'
+import {AdminUsers} from './AdminUsers'
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, completeFastCAS, completeFastResearch, ensureFreshAccessToken, hasRefreshToken, idem, login, logout, offlineSessionAvailable, onSessionEnded, readOfflineUser, rememberUser, request, token } from './api'
 import type { Goal, Job, User } from './types'
@@ -17,11 +18,11 @@ import { watchTheme } from './theme'
 import { Today, focusEvidence } from './Today'
 export { Today, focusEvidence }
 
-type Tab = 'today' | 'goals' | 'panel' | 'jobs' | 'review' | 'account'
+type Tab = 'today' | 'goals' | 'panel' | 'jobs' | 'review' | 'account' | 'users'
 
 const NAV_ICONS: Record<Tab, string | undefined> = {
   today: 'today', goals: 'account_tree', jobs: 'pending',
-  panel: undefined, review: 'fact_check', account: 'verified_user',
+  panel: undefined, review: 'fact_check', account: 'verified_user', users: 'manage_accounts',
 }
 const BAR_TABS: Tab[] = ['today', 'goals', 'review', 'jobs']
 
@@ -30,6 +31,7 @@ export function App() {
   const [callbackPending] = useState(() => ['fastcas', 'fastresearch'].some(key => new URLSearchParams(window.location.search).get(key) === 'callback'))
   const [fastResearchCallback] = useState(() => new URLSearchParams(window.location.search).get('fastresearch') === 'callback')
   const [authError, setAuthError] = useState('')
+  const [registrationRequired, setRegistrationRequired] = useState(false)
   // Cold start of an installed PWA has an empty in-memory access token but a
   // persisted refresh token (pwa.md §4). Restore the session silently rather
   // than flashing the login screen; if the refresh token is gone or rejected the
@@ -38,7 +40,7 @@ export function App() {
   useEffect(() => {
     if (!restoring) return
     let alive = true
-    const restore = callbackPending ? (fastResearchCallback ? completeFastResearch() : completeFastCAS()).then(() => token.get()) : ensureFreshAccessToken()
+    const restore = callbackPending ? (fastResearchCallback ? completeFastResearch().then(() => token.get()) : completeFastCAS().then(result => { if (alive) setRegistrationRequired(Boolean(result.registration_required)); return result.registration_required ? null : token.get() })) : ensureFreshAccessToken()
     restore.then(restored => {
       if (!alive) return
       setAuthenticated(Boolean(restored) || offlineSessionAvailable())
@@ -61,9 +63,9 @@ export function App() {
   if (restoring) return null
   return (
     <>
-      {authenticated
+      {authenticated && !registrationRequired
         ? <Workspace onLogout={handleLogout} requireFreshProfile={callbackPending} />
-        : <Login onLogin={() => setAuthenticated(true)} initialError={authError} />}
+        : <Login onLogin={() => { setRegistrationRequired(false); setAuthenticated(true) }} initialError={authError} registrationRequired={registrationRequired} />}
       <PwaUpdate />
     </>
   )
@@ -83,12 +85,17 @@ export function loginErrorText(error: unknown): string {
   return '登录失败'
 }
 
-function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialError?: string }) {
+function Login({ onLogin, initialError = '', registrationRequired = false }: { onLogin: () => void; initialError?: string; registrationRequired?: boolean }) {
+  const [registering, setRegistering] = useState(registrationRequired)
+  const [displayName, setDisplayName] = useState('')
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState(initialError)
   const [fastcas, setFastcas] = useState(false)
   const [fastResearch, setFastResearch] = useState(false)
+  useEffect(() => {
+    if (registering) void request<{email:string;name:string}>('/auth/fastcas/registration').then(r => { setIdentifier(r.data.email); setDisplayName(r.data.name) }).catch(e => setError(e.message))
+  }, [registering])
   useEffect(() => {
     void request<{enabled:boolean;login_enabled?:boolean}>('/auth/fastcas/available').then(r => setFastcas(r.data.enabled && r.data.login_enabled !== false)).catch(() => {})
     void request<{enabled:boolean}>('/auth/fastresearch/available').then(r => setFastResearch(r.data.enabled)).catch(() => {})
@@ -97,7 +104,10 @@ function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialErr
   async function submit() {
     if (busy || !identifier.trim() || !password) return
     setBusy(true); setError('')
-    try { await login(identifier.trim(), password); onLogin() }
+    try {
+      if (registering) { const result = await request<{url:string}>('/auth/fastcas/registration', {method:'POST',body:JSON.stringify({identifier:identifier.trim(),display_name:displayName,password})}); window.location.assign(result.data.url); return }
+      await login(identifier.trim(), password); onLogin()
+    }
     catch (e) { setError(loginErrorText(e)) }
     finally { setBusy(false) }
   }
@@ -112,11 +122,13 @@ function Login({ onLogin, initialError = '' }: { onLogin: () => void; initialErr
     </section>
     <div className="login-panel">
       <form className="login-card" onSubmit={onSubmit} onKeyDown={onKeyDown}>
-        <div><p className="eyebrow">WELCOME BACK</p><h2>进入工作台</h2></div>
+        <div><p className="eyebrow">WELCOME BACK</p><h2>{registering ? '完善 FastTask 账号' : '进入工作台'}</h2></div>
+        {registering && <mdui-text-field label="姓名" variant="outlined" required maxlength={120} value={displayName} onInput={e => setDisplayName(fieldValue(e))} />}
         <mdui-text-field label="账号" variant="outlined" required autocomplete="username" value={identifier} onInput={e => setIdentifier(fieldValue(e))}/>
         <mdui-text-field label="密码" type="password" toggle-password variant="outlined" required autocomplete="current-password" value={password} onInput={e => setPassword(fieldValue(e))}/>
         {error && <p className="login-error" role="alert"><mdui-icon name="error_outline"/>{error}</p>}
-        <mdui-button variant="filled" full-width disabled={busy} loading={busy} onClick={submit}>{busy ? '正在验证…' : '开始今天'}</mdui-button>
+        <mdui-button variant="filled" full-width disabled={busy} loading={busy} onClick={submit}>{busy ? '正在验证…' : registering ? '创建并绑定账号' : '开始今天'}</mdui-button>
+        {registering && <mdui-button variant="text" onClick={() => { setRegistering(false); setPassword('') }}>已有账号，返回登录后绑定</mdui-button>}
         {fastResearch && <mdui-button type="button" variant="filled" full-width onClick={() => window.location.assign('/api/v1/auth/fastresearch/login')}>使用 FastResearch Key 登录</mdui-button>}
         {fastcas && <mdui-button type="button" variant="outlined" full-width onClick={() => window.location.assign('/api/v1/auth/fastcas/login')}>使用 FastCAS 登录</mdui-button>}
         <small>{fastResearch ? '普通用户使用个人 FastResearch Key。管理员仍使用上方 FastTask 账号和密码。' : '生产环境请使用管理员下发账号，登录状态会安全地保留在此设备上，退出登录时一并清除。'}</small>
@@ -170,6 +182,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
   useMduiEvent(drawerRef, 'close', () => setDrawerOpen(false))
   useMduiEvent(snackbarRef, 'close', () => setNotice(''))
   const items = navItems()
+  if(user?.role==='admin') items.push(['users','用户管理'])
   const currentLabel = tab === 'account' ? '账号认证' : tab === 'panel' ? '工牌更新' : items.find(([id]) => id === tab)?.[1] ?? ''
   if(!user)return <main className="page"><h1>正在打开工作台</h1>
     <p role={profileError?'alert':'status'}>{profileError?`暂时无法确认当前账号：${profileError}`:'正在确认当前账号…'}</p>
@@ -250,6 +263,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
         <FastPanel active={tab==='panel'} userId={user.id} timezone={timezone} refreshVersion={businessRevision} onNotice={setNotice}/>
       <div className="page" hidden={tab==='today'||tab==='panel'}>
         {tab==='account'&&<FastCASAccount/>}
+        {tab==='users'&&user.role==='admin'&&<AdminUsers currentUser={user}/>}
         {tab==='goals' && <GoalManager timezone={timezone} userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} onOpenChat={openChat}/>}
         {tab==='jobs' && <JobQueue onNotice={setNotice}/>}
         {tab==='review' && <Review onNotice={setNotice}/>}

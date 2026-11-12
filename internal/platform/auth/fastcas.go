@@ -122,10 +122,11 @@ func (s *Service) BeginFastCAS(ctx context.Context, p *Principal, password, bind
 }
 
 type FastCASResult struct {
-	User         persistence.User `json:"user"`
-	AccessToken  string           `json:"access_token"`
-	RefreshToken string           `json:"refresh_token"`
-	Linked       bool             `json:"linked"`
+	RegistrationRequired bool             `json:"registration_required,omitempty"`
+	User                 persistence.User `json:"user"`
+	AccessToken          string           `json:"access_token"`
+	RefreshToken         string           `json:"refresh_token"`
+	Linked               bool             `json:"linked"`
 }
 
 func (s *Service) CompleteFastCAS(ctx context.Context, callback, binding string, p *Principal) (FastCASResult, error) {
@@ -155,6 +156,9 @@ func (s *Service) CompleteFastCAS(ctx context.Context, callback, binding string,
 	result, err := c.FinishLogin(ctx, callback, options)
 	if err != nil {
 		return FastCASResult{}, err
+	}
+	if result.Transaction.Purpose == "register" {
+		return s.finishFastCASRegistration(ctx, binding, result)
 	}
 	if result.Transaction.Purpose == "link" {
 		if s.config.FastCASLinkDisabled {
@@ -198,6 +202,9 @@ func (s *Service) CompleteFastCAS(ctx context.Context, callback, binding string,
 		if err = s.applyFastCASLink(ctx, *link, ""); err != nil {
 			return FastCASResult{}, err
 		}
+		if err = promoteCASAdmin(s.store.DB.WithContext(ctx), p.UserID, result.Identity); err != nil {
+			return FastCASResult{}, err
+		}
 		return FastCASResult{Linked: true}, nil
 	}
 	if s.config.FastCASLoginDisabled {
@@ -229,7 +236,7 @@ func (s *Service) CompleteFastCAS(ctx context.Context, callback, binding string,
 	}
 	link, err := c.ResolveLink(ctx, result.Identity.Subject)
 	if err != nil {
-		return FastCASResult{}, err
+		return s.promptFastCASRegistration(ctx, binding, result.Identity, err)
 	}
 	return s.loginFastCAS(ctx, result.Identity, *link)
 }
@@ -247,6 +254,12 @@ func (s *Service) loginFastCAS(ctx context.Context, identity fastcas.Identity, l
 		}
 		if err := tx.First(&result.User, "id = ? AND status = 'active'", local.UserID).Error; err != nil {
 			return errors.New("local account disabled")
+		}
+		if err := promoteCASAdmin(tx, local.UserID, identity); err != nil {
+			return err
+		}
+		if err := tx.First(&result.User, "id = ?", local.UserID).Error; err != nil {
+			return err
 		}
 		now := persistence.Now()
 		session := persistence.Session{ID: persistence.NewID("session"), FamilyID: persistence.NewID("family"), UserID: local.UserID, RefreshHash: persistence.Hash(refresh), Status: "active", ExpiresAt: now.Add(s.config.RefreshTTL), CreatedAt: now, UpdatedAt: now, AuthSource: "fastcas", CasIssuer: identity.Issuer, CasSID: identity.SessionID, CasLinkID: link.ID, CasLinkVersion: link.Version}

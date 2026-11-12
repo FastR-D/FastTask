@@ -149,7 +149,40 @@ func (s *Server) registerFastCAS() {
 			c.JSON(401, gin.H{"detail": "FastCAS login or account authentication failed; sign in locally to verify the binding"})
 			return
 		}
+		if result.RegistrationRequired {
+			s.fastcasCookie(c, "binding", binding, 300)
+		}
 		c.JSON(200, result)
+	})
+	group.GET("/registration", func(c *gin.Context) {
+		if !configured(c) {
+			return
+		}
+		binding, _ := c.Cookie("fasttask.fastcas.binding")
+		profile, err := s.auth.FastCASRegistrationStatus(c.Request.Context(), binding)
+		if err != nil {
+			c.JSON(401, gin.H{"detail": err.Error()})
+			return
+		}
+		c.JSON(200, profile)
+	})
+	group.POST("/registration", func(c *gin.Context) {
+		if !configured(c) || !sameOrigin(c) {
+			return
+		}
+		binding, _ := c.Cookie("fasttask.fastcas.binding")
+		var input platformauth.FastCASRegistrationInput
+		if c.ShouldBindJSON(&input) != nil {
+			c.JSON(400, gin.H{"detail": "请填写账号资料"})
+			return
+		}
+		next, target, err := s.auth.BeginFastCASRegistration(c.Request.Context(), binding, input)
+		if err != nil {
+			c.JSON(400, gin.H{"detail": err.Error()})
+			return
+		}
+		s.fastcasCookie(c, "binding", next, 300)
+		c.JSON(200, gin.H{"url": target})
 	})
 	for _, action := range []string{"revoke", "reconcile"} {
 		group.POST("/links/:id/"+action, func(c *gin.Context) {
@@ -203,6 +236,10 @@ func (s *Server) registerFastCASOpenAPI() {
 	})
 	bearer := []map[string][]string{{"userBearer": {}}}
 	optionalBearer := []map[string][]string{{}, {"userBearer": {}}}
+	api.Paths[prefix+"/registration"] = &huma.PathItem{
+		Get:  &huma.Operation{OperationID: "fastcas-registration-profile", Tags: []string{"FastCAS"}, Summary: "Get the browser's verified signup profile", Responses: map[string]*huma.Response{"200": jsonResponse("profile", object([]string{"email", "name"}, map[string]*huma.Schema{"email": str, "name": str})), "401": {Description: "signup proof expired"}}},
+		Post: &huma.Operation{OperationID: "fastcas-register", Tags: []string{"FastCAS"}, Summary: "Prepare a new local account and begin CAS binding", RequestBody: &huma.RequestBody{Required: true, Content: map[string]*huma.MediaType{"application/json": {Schema: object([]string{"identifier", "display_name", "password"}, map[string]*huma.Schema{"identifier": str, "display_name": str, "password": str})}}}, Responses: map[string]*huma.Response{"200": jsonResponse("authorization URL", object([]string{"url"}, map[string]*huma.Schema{"url": str})), "400": {Description: "invalid profile or expired proof"}, "403": {Description: "same-origin request required"}}},
+	}
 	api.Paths[prefix+"/available"] = &huma.PathItem{Get: &huma.Operation{
 		OperationID: "fastcas-available", Tags: []string{"FastCAS"}, Summary: "Check whether optional FastCAS login is configured",
 		Responses: map[string]*huma.Response{"200": jsonResponse("availability", object([]string{"enabled"}, map[string]*huma.Schema{"enabled": {Type: "boolean"}, "login_enabled": {Type: "boolean"}, "link_enabled": {Type: "boolean"}}))},

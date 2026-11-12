@@ -20,9 +20,12 @@ type CreateUserCommand struct {
 	Timezone    string
 	Locale      string
 	Role        string
+	Status      string
 }
 
 type UpdateUserCommand struct {
+	Identifier  *string
+	Password    *string
 	DisplayName *string
 	Timezone    *string
 	Locale      *string
@@ -84,7 +87,7 @@ func (a *AdminService) CurrentAdmin(ctx context.Context) (persistence.User, erro
 }
 
 func (a *AdminService) ListUsers(ctx context.Context, query, status string) ([]persistence.User, error) {
-	q := a.Store.DB.WithContext(ctx).Model(&persistence.User{})
+	q := a.Store.DB.WithContext(ctx).Model(&persistence.User{}).Where("status <> 'deleted'")
 	if text := strings.TrimSpace(query); text != "" {
 		like := "%" + text + "%"
 		q = q.Where("identifier LIKE ? OR display_name LIKE ?", like, like)
@@ -100,6 +103,12 @@ func (a *AdminService) CreateUser(ctx context.Context, actor persistence.User, c
 	command.Identifier = strings.ToLower(strings.TrimSpace(command.Identifier))
 	command.DisplayName = strings.TrimSpace(command.DisplayName)
 	command.Role = normalizeRole(command.Role)
+	if command.Status == "" {
+		command.Status = "active"
+	}
+	if command.Status != "active" && command.Status != "disabled" {
+		return nil, ErrValidation
+	}
 	if command.Timezone == "" {
 		command.Timezone = "Asia/Shanghai"
 	}
@@ -117,7 +126,7 @@ func (a *AdminService) CreateUser(ctx context.Context, actor persistence.User, c
 		return nil, ErrValidation
 	}
 	now := persistence.Now()
-	user := &persistence.User{ID: persistence.NewID("user"), Identifier: command.Identifier, PasswordHash: hash, DisplayName: command.DisplayName, Timezone: command.Timezone, Locale: command.Locale, Role: command.Role, Status: "active", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := &persistence.User{ID: persistence.NewID("user"), Identifier: command.Identifier, PasswordHash: hash, DisplayName: command.DisplayName, Timezone: command.Timezone, Locale: command.Locale, Role: command.Role, Status: command.Status, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	err = a.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		if err := tx.Create(user).Error; err != nil {
 			return uniqueConflict(err)
@@ -131,6 +140,14 @@ func (a *AdminService) CreateUser(ctx context.Context, actor persistence.User, c
 }
 
 func (a *AdminService) UpdateUser(ctx context.Context, actor persistence.User, id string, expected int, command UpdateUserCommand) (*persistence.User, error) {
+	var passwordHash string
+	if command.Password != nil {
+		var err error
+		passwordHash, err = platformauth.HashPassword(*command.Password)
+		if err != nil {
+			return nil, ErrValidation
+		}
+	}
 	if command.Role != nil {
 		*command.Role = normalizeRole(*command.Role)
 		if !validRole(*command.Role) {
@@ -147,13 +164,16 @@ func (a *AdminService) UpdateUser(ctx context.Context, actor persistence.User, i
 	}
 	var user persistence.User
 	err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
-		if err := tx.First(&user, "id = ?", id).Error; err != nil {
+		if err := tx.First(&user, "id = ? AND status <> 'deleted'", id).Error; err != nil {
 			return notFound(err)
 		}
 		if user.Revision != expected {
 			return ErrRevision
 		}
 		if (command.Role != nil && user.Role == "admin" && *command.Role != "admin") || (command.Status != nil && user.Status == "active" && *command.Status != "active") {
+			if id == actor.ID {
+				return ErrConflict
+			}
 			var count int64
 			if err := tx.Model(&persistence.User{}).Where("role = ? AND status = ? AND id <> ?", "admin", "active", id).Count(&count).Error; err != nil {
 				return err
@@ -163,6 +183,21 @@ func (a *AdminService) UpdateUser(ctx context.Context, actor persistence.User, i
 			}
 		}
 		changes := map[string]any{"revision": expected + 1, "updated_at": persistence.Now()}
+		if passwordHash != "" {
+			changes["password_hash"] = passwordHash
+		}
+		if command.Identifier != nil {
+			value := strings.ToLower(strings.TrimSpace(*command.Identifier))
+			if len(value) < 3 || len(value) > 120 {
+				return ErrValidation
+			}
+			changes["identifier"] = value
+		}
+		if command.Identifier != nil || command.Role != nil || passwordHash != "" {
+			if err := tx.Model(&persistence.Session{}).Where("user_id = ? AND status = 'active'", id).Update("status", "revoked").Error; err != nil {
+				return err
+			}
+		}
 		if command.DisplayName != nil {
 			value := strings.TrimSpace(*command.DisplayName)
 			if value == "" {
@@ -189,12 +224,13 @@ func (a *AdminService) UpdateUser(ctx context.Context, actor persistence.User, i
 		}
 		result := tx.Model(&persistence.User{}).Where("id = ? AND revision = ?", id, expected).Updates(changes)
 		if result.Error != nil {
-			return result.Error
+			return uniqueConflict(result.Error)
 		}
 		if result.RowsAffected != 1 {
 			return ErrRevision
 		}
-		return auditAdmin(tx, actor, id, "user.updated", map[string]any{"changes": command})
+		command.Password = nil
+		return auditAdmin(tx, actor, id, "user.updated", map[string]any{"changes": command, "password_reset": passwordHash != ""})
 	})
 	if err != nil {
 		return nil, err
@@ -203,6 +239,40 @@ func (a *AdminService) UpdateUser(ctx context.Context, actor persistence.User, i
 		return nil, err
 	}
 	return &user, nil
+}
+
+func (a *AdminService) DeleteUser(ctx context.Context, actor persistence.User, id string, expected int) error {
+	if actor.ID == id {
+		return ErrConflict
+	}
+	return a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+		var user persistence.User
+		if err := tx.First(&user, "id = ? AND status <> 'deleted'", id).Error; err != nil {
+			return notFound(err)
+		}
+		if user.Revision != expected {
+			return ErrRevision
+		}
+		if user.Role == "admin" && user.Status == "active" {
+			var count int64
+			if err := tx.Model(&persistence.User{}).Where("role = 'admin' AND status = 'active' AND id <> ?", id).Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				return ErrConflict
+			}
+		}
+		if err := tx.Model(&user).Updates(map[string]any{"identifier": "deleted-" + id, "display_name": "已删除用户", "password_hash": "", "role": "member", "status": "deleted", "revision": expected + 1, "updated_at": persistence.Now()}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&persistence.Session{}).Where("user_id = ?", id).Update("status", "revoked").Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&persistence.Device{}).Where("user_id = ?", id).Update("status", "revoked").Error; err != nil {
+			return err
+		}
+		return auditAdmin(tx, actor, id, "user.deleted", map[string]any{"sessions_revoked": true})
+	})
 }
 
 func (a *AdminService) ResetUserPassword(ctx context.Context, actor persistence.User, id, password string) error {

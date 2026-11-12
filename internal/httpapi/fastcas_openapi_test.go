@@ -34,7 +34,7 @@ func TestFastCASOpenAPICoversGinRoutes(t *testing.T) {
 		}
 		seen++
 	}
-	if seen != 10 {
-		t.Fatalf("expected 10 FastCAS routes, found %d", seen)
+	if seen != 12 {
+		t.Fatalf("expected 12 FastCAS routes, found %d", seen)
 	}
 }
