@@ -1,3 +1,5 @@
+> 当前 Research 工作台已改用统一摘要协议：`POST /api/integrations/fastresearch/workspace`（`workspace:read` 服务授权），按已验证 CAS subject 和有效绑定读取今日计划，不依赖旧 Research accountId 映射。服务端同时验证 JWT、中心 introspection 和绑定版本。需与 FastResearch 配套发布；下文旧票据和 accountId today 协议属于兼容记录，新的工作台不再调用。
+
 # FastTask 与 FastResearch 集成架构
 
 > 适用范围：FastTask `xiatong` 分支与 FastResearch `main` 分支的当前实现。

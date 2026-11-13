@@ -140,6 +140,7 @@ func New(app *application.App, authService *platformauth.Service, cfg config.Con
 	server.registerFastCAS()
 	server.registerFastResearch()
 	server.registerFastResearchIntegration()
+	server.registerWorkspaceSummary()
 	server.static()
 	return server
 }

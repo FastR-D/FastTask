@@ -294,6 +294,12 @@ func (s RouteDeps) fastResearchTodayFor(ctx context.Context, receiverRef string)
 		}
 		return member
 	}
+	result := s.workspaceTasksFor(ctx, user)
+	result.ReceiverRef = receiverRef
+	return result
+}
+func (s RouteDeps) workspaceTasksFor(ctx context.Context, user persistence.User) fastResearchTodayMember {
+	member := fastResearchTodayMember{Items: []fastResearchTodayItem{}}
 	member.Found = true
 	member.UserID = user.ID
 	member.DisplayName = user.DisplayName
