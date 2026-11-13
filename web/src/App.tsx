@@ -263,7 +263,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
         <FastPanel active={tab==='panel'} userId={user.id} timezone={timezone} refreshVersion={businessRevision} onNotice={setNotice}/>
       <div className="page" hidden={tab==='today'||tab==='panel'}>
         {tab==='account'&&<FastCASAccount/>}
-        {tab==='users'&&user.role==='admin'&&<AdminUsers currentUser={user}/>}
+        {tab==='users'&&user.role==='admin'&&<AdminUsers currentUser={user} onCurrentUserUpdated={updated=>{setUser(updated);rememberUser(updated)}} onSessionRevoked={onLogout}/>}
         {tab==='goals' && <GoalManager timezone={timezone} userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} onOpenChat={openChat}/>}
         {tab==='jobs' && <JobQueue onNotice={setNotice}/>}
         {tab==='review' && <Review onNotice={setNotice}/>}
