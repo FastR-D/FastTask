@@ -1,6 +1,6 @@
 import type { ThreadRuntime } from '@assistant-ui/react'
 import { createContext, useCallback, useContext, useEffect, useRef, useSyncExternalStore, type ReactNode } from 'react'
-import { readComposerDraft, removeComposerDraft, writeComposerDraft } from './draft-storage'
+import { moveFailedMessages, readComposerDraft, removeComposerDraft, writeComposerDraft } from './draft-storage'
 
 const DraftUserContext = createContext<string | undefined>(undefined)
 
@@ -45,6 +45,7 @@ export function ComposerDraftPersistence({ thread }: { thread: ThreadRuntime }) 
       // A first send establishes the server thread. Move any *next* unsent
       // text typed while it was starting, rather than restoring the sent text.
       writeComposerDraft(userId, threadId, current)
+      moveFailedMessages(userId, threadId!)
       removeComposerDraft(userId)
     } else {
       const saved = readComposerDraft(userId, threadId)

@@ -7,10 +7,10 @@ import { stopWithFeedback } from '../harness/cancellation'
 import { activeRunId, cancelActiveRun, driveRun, selectMode } from '../harness'
 import { forcedModeOf, readModePreference } from './modePreference'
 import { convertState } from './converter'
-import type { ApprovalDecision, ServerAgentState } from './state'
+import type { ApprovalDecision, FasttaskState, ServerAgentState } from './state'
 import { threadState } from './threads'
 import { useComposerDraftUserId } from './ComposerDraft'
-import { writeComposerDraft } from './draft-storage'
+import { preserveFailedMessage, removeFailedMessage } from './draft-storage'
 import { assertAccessOwner, SESSION_OWNER_CHANGED } from '../session-owner'
 
 export function agentErrorText(error: unknown): string {
@@ -149,15 +149,6 @@ export function useProposalDecision() {
   }
 }
 
-// lastUserText is the message the runtime is sending. The harness host needs the text to prompt with
-// (§5.1), and assistant-ui — not this module — owns the request, so the text is captured on the way out
-// and read on the way back.
-let lastUserText = ''
-// lastRequestedHarnessMode records who was asked to drive the current command. The response header is
-// the fast path for learning the run id, but a transport/proxy can leave it unreadable; in that case the
-// streamed fasttask.runId is the authoritative fallback.
-let lastRequestedHarnessMode: 'wasm' | 'sidecar' | '' = ''
-
 /** extractUserText concatenates the text parts of the add-message commands in a request body. */
 export function extractUserText(commands: unknown): string {
   if (!Array.isArray(commands)) return ''
@@ -184,12 +175,9 @@ export function extractUserText(commands: unknown): string {
  */
 export async function prepareAgentCommand(body: { state?: unknown; commands?: unknown; [key: string]: unknown }) {
   const state = body.state as ServerAgentState | undefined
-  const text = extractUserText(body.commands)
-  lastUserText = text
   // A user who picked a host in settings beats the probe (§3.2); 'auto' means probe.
   const selection = await selectMode(forcedModeOf(readModePreference()))
   const mode = selection.mode === 'unavailable' ? undefined : selection.mode
-  lastRequestedHarnessMode = mode ?? ''
   return {
     ...body,
     threadId: state?.fasttask?.threadId ?? null,
@@ -224,8 +212,11 @@ export function useAgentRuntime(
   const owner=useRef(options.getUserId?.())
   const sentAuth=useRef<{ownerId?:string;access:string}|null>(null)
   const drivenRuns=useRef(new Set<string>())
+  const mounted=useRef(true)
+  const sentCommand=useRef<{text:string;mode:'wasm'|'sidecar'|'';outcome:'pending'|'failed'|'cancelled'|'finished'}|null>(null)
   const noticeRef=useRef(onNotice)
   noticeRef.current=onNotice
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false}},[])
   const runtime = useAssistantTransportRuntime<ServerAgentState>({
     // MUST be explicit: the default protocol is "data-stream", and omitting this
     // silently speaks the wrong protocol — the stream looks fine but messages never
@@ -246,27 +237,41 @@ export function useAgentRuntime(
     // before the first command. Only the ID returned by FastTask in state is a
     // server thread; sending the temporary ID makes the first message a 404.
     prepareSendCommandsRequest: async body=>{
+      // Record this attempt before any await, including failures in host selection
+      // or authentication. SDK onFinish also runs after onError/onCancel.
+      const command={text:extractUserText(body.commands),mode:'' as 'wasm'|'sidecar'|'',outcome:'pending' as const}
+      sentCommand.current=command
       const prepared=await prepareAgentCommand(body)
       const access=await ensureFreshAccessToken()
       assertOwner(access,owner.current,options.getUserId)
       // SDK captured its headers before the awaited host probe. A peer may have
       // rotated them in the meantime; stop before sending known-stale headers.
       if(sentAuth.current?.access!==access)throw new Error('登录状态已更新，草稿已保留，请再次发送。')
+      command.mode=prepared.harness_mode==='wasm'||prepared.harness_mode==='sidecar'?prepared.harness_mode:''
       return prepared
     },
     // Attachments are in the transport options, and the adapter uploads to our own storage so a message
     // carries a reference instead of bytes (doc/chat-features.md §4.1, §4.2).
     ...(options.attachments ? { adapters: { attachments: options.attachments } } : {}),
-    onFinish: () => options.onThreadChanged?.(),
+    onFinish: () => {
+      if(!mounted.current || options.getUserId && options.getUserId()!==owner.current)return
+      const business=runtime.thread.getState().state as FasttaskState|undefined
+      const command=sentCommand.current
+      if(command?.outcome==='pending') {
+        command.outcome='finished'
+        if(owner.current&&command.text)removeFailedMessage(owner.current,business?.threadId??initialState.fasttask?.threadId,command.text)
+      }
+      options.onThreadChanged?.()
+    },
     // A run the server handed to a browser host has to be driven from here: the Worker will not touch
     // it, and nothing else does (doc/harness.md §1.2). The stream keeps rendering from server state
     // while the host works, so the UI needs no change (§13 phase D).
     onResponse: response => {
-      if (options.getUserId && options.getUserId() !== owner.current) return
+      if (!mounted.current || options.getUserId && options.getUserId() !== owner.current) return
       const runId = harnessRunOf(response)
       if (!runId || drivenRuns.current.has(runId)) return
       drivenRuns.current.add(runId)
-      void driveRun({ ownerId: owner.current, getOwner: options.getUserId, runId, text: lastUserText, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
+      void driveRun({ ownerId: owner.current, getOwner: options.getUserId, runId, text: sentCommand.current?.text??'', forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
         if (!options.getUserId || options.getUserId() === owner.current) noticeRef.current(`对话驱动失败：${agentErrorText(error)}`)
       })
     },
@@ -274,32 +279,38 @@ export function useAgentRuntime(
     // A dropped stream or reload must preserve the pending proposal; only an
     // explicit stop (without an error) requests cancellation on the server.
     onCancel: ({ error }) => {
+      if(sentCommand.current)sentCommand.current.outcome=error?'failed':'cancelled'
       if (error) return
-      if (options.getUserId && options.getUserId() !== owner.current) return
-      const state = runtime.thread.getState().state as ServerAgentState | undefined
-      void stopWithFeedback(() => cancelActiveRun(state?.fasttask?.runId, owner.current), message => noticeRef.current(message), agentErrorText)
+      if (!mounted.current || options.getUserId && options.getUserId() !== owner.current) return
+      // convertState exposes the business namespace directly as runtime.state.
+      // Never fall back to the global host: it may belong to another conversation.
+      const business = runtime.thread.getState().state as FasttaskState | undefined
+      const runId = typeof business?.runId==='string'&&business.runId ? business.runId : undefined
+      if(!runId){noticeRef.current('暂时无法确认要停止的对话，请重新载入后核对生成状态。');return}
+      void stopWithFeedback(() => cancelActiveRun(runId, owner.current), message => noticeRef.current(message), agentErrorText)
     },
     onError: async (error, { commands }) => {
+      if(sentCommand.current)sentCommand.current.outcome='failed'
+      if(!mounted.current || options.getUserId && options.getUserId()!==owner.current)return
       const unsent = commands.find(command => command.type === 'add-message')
       if (unsent?.type === 'add-message') {
         const text = unsent.message.parts
           .flatMap(part => part.type === 'text' ? [part.text] : [])
           .join('')
         if (text) {
-          if(options.getUserId && owner.current && options.getUserId()!==owner.current) {
-            const current=runtime.thread.getState().state
-            const threadId=current&&typeof current==='object'&&'threadId' in current&&typeof current.threadId==='string'?current.threadId:initialState.fasttask?.threadId
-            writeComposerDraft(owner.current,threadId,text)
-          }
-          else runtime.thread.composer.setText(text)
+          const business=runtime.thread.getState().state as FasttaskState|undefined
+          const threadId=business?.threadId??initialState.fasttask?.threadId
+          const current=runtime.thread.composer.getState().text
+          if(!current){runtime.thread.composer.setText(text);if(owner.current)removeFailedMessage(owner.current,threadId,text)}
+          else if(current!==text&&owner.current)preserveFailedMessage(owner.current,threadId,text)
         }
       }
       if(/\b(?:Status 401:|status 401:)/.test(error.message) && sentAuth.current?.ownerId) {
         try {
           const access=await refreshAccessTokenAfterUnauthorized(sentAuth.current.access)
           assertOwner(access,sentAuth.current.ownerId,options.getUserId)
-          onNotice(unsent?'登录已恢复，草稿已保留，请再次发送。':'登录已恢复，请重新载入对话继续。')
-        } catch(recoveryError) { onNotice(`对话发送失败：${agentErrorText(recoveryError)}`) }
+          if(mounted.current)onNotice(unsent?'登录已恢复，草稿和未确认的发送内容已保留，请核对后重试。':'登录已恢复，请重新载入对话继续。')
+        } catch(recoveryError) { if(mounted.current&&(!options.getUserId||options.getUserId()===owner.current))onNotice(`对话发送失败：${agentErrorText(recoveryError)}`) }
         return
       }
       onNotice(`对话发送失败：${agentErrorText(error)}`)
@@ -312,14 +323,15 @@ export function useAgentRuntime(
   // WASM; a wasm request may have fallen back to the sidecar.
   useEffect(() => {
     const maybeDrive = () => {
-      if (options.getUserId && options.getUserId() !== owner.current) return
-      if (lastRequestedHarnessMode !== 'wasm') return
-      const state = runtime.thread.getState().state as ServerAgentState | undefined
-      if (state?.fasttask?.harnessMode !== 'wasm') return
-      const runId = state?.fasttask?.runId
-      if (!state?.isRunning || !runId || drivenRuns.current.has(runId) || activeRunId() === runId) return
+      if (!mounted.current || options.getUserId && options.getUserId() !== owner.current) return
+      if (sentCommand.current?.mode !== 'wasm' || sentCommand.current.outcome !== 'pending') return
+      const state = runtime.thread.getState()
+      const business = state.state as FasttaskState|undefined
+      if (business?.harnessMode !== 'wasm') return
+      const runId = business.runId
+      if (!state.isRunning || !runId || drivenRuns.current.has(runId) || activeRunId() === runId) return
       drivenRuns.current.add(runId)
-      void driveRun({ ownerId: owner.current, getOwner: options.getUserId, runId, text: lastUserText, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
+      void driveRun({ ownerId: owner.current, getOwner: options.getUserId, runId, text: sentCommand.current.text, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
         if (!options.getUserId || options.getUserId() === owner.current) noticeRef.current(`对话驱动失败：${agentErrorText(error)}`)
       })
     }

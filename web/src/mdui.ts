@@ -1,7 +1,7 @@
 // MDUI 2.x 组件与全局样式统一在此注册，仅由浏览器入口 main.tsx 引入，
 // 保证单元测试(jsdom)中自定义元素保持惰性、不触发 lit 运行时。
 import 'mdui/mdui.css'
-import '@fontsource/material-icons/400.css'
+import './icons.css'
 
 import 'mdui/components/avatar.js'
 import 'mdui/components/button.js'

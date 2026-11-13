@@ -49,9 +49,9 @@ export function activeFocusSeconds(session: WorkSession, now=Date.now()) {
   return Math.max(0,Math.floor((end-started)/1000)-Math.max(0,session.paused_seconds??0))
 }
 
-type TodayProps = { userId?:string; onNotice: (message: string) => void; timezone?: string; refreshVersion?: number; onBusinessChanged?: () => void; onOpenChat?: () => void }
+type TodayProps = { userId?:string; onNotice: (message: string) => void; timezone?: string; refreshVersion?: number; onBusinessChanged?: () => void; onOpenChat?: () => void; onOpenPanel?: () => void }
 
-export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersion = 0, onBusinessChanged, onOpenChat }: TodayProps) {
+export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersion = 0, onBusinessChanged, onOpenChat, onOpenPanel }: TodayProps) {
   const timezone=profileTimezone===undefined?undefined:timezoneOrDefault(profileTimezone)
   const owner=useRef(userId)
   owner.current??=userId
@@ -94,6 +94,11 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
   const deletionAttempt=useRef(createCreationAttempt<{plan:Plan;items:PlanItem[];deleted_ids:string[]}>())
   const deletionPlanID=useRef('')
   const loadSequence = useRef(0)
+  // A session write supersedes reads begun before OR during that write. Plan
+  // refreshes can still finish without resetting a newer running/paused timer.
+  const sessionRevision=useRef(0)
+  const sessionWritePending=useRef(false)
+  const [calendarDay,setCalendarDay]=useState(()=>timezone?localDateInTimezone(new Date(),timezone):'')
   const settingsSequence=useRef(0)
   const settingsDirty=useRef(false)
   const settingsEditETag=useRef('')
@@ -102,6 +107,21 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
   async function ownedRequest<T>(path:string,init:RequestInit={}){
     if(owner.current&&currentUserId.current!==owner.current)throw new Error(SESSION_OWNER_CHANGED)
     return apiRequest<T>(path,init,owner.current)
+  }
+
+  async function writeSession(path:string,init:RequestInit){
+    sessionRevision.current++;sessionWritePending.current=true
+    try{
+      const {data}=await ownedRequest<WorkSession>(path,init)
+      setSessions(current=>[...current.filter(value=>value.id!==data.id),data])
+      setSession(['running','paused'].includes(data.status)?data:null)
+      setSessionsAvailable(true)
+      return data
+    }finally{sessionRevision.current++;sessionWritePending.current=false}
+  }
+
+  function canEditCurrentPlan(){
+    return Boolean(plan&&timezone&&!ownerChanged&&plan.status==='active'&&plan.local_date===localDateInTimezone(new Date(),timezone))
   }
 
   function itemKey(item: PlanItem) { return item.logical_id || item.id }
@@ -149,6 +169,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
   }
   async function load():Promise<boolean> {
     const sequence = ++loadSequence.current
+    const sessionSnapshotRevision=sessionRevision.current
     setLoading(true)
     try {
       const [planResponse, sessionResponse] = await Promise.allSettled([
@@ -156,16 +177,18 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
         ownedRequest<{items: WorkSession[]}>('/work-sessions'),
       ])
       if (sequence !== loadSequence.current) return false
-      if (sessionResponse.status === 'fulfilled') {
-        setSessionsAvailable(true)
-        setSessions(sessionResponse.value.data.items)
-        setSession(sessionResponse.value.data.items.find(s => ['running', 'paused'].includes(s.status)) || null)
-      } else {
-        // The PWA can retain a read-only plan while the online-only session
-        // endpoint is unavailable. Do not discard that plan or trust stale time.
-        setSessions([]); setSession(null)
-        setSessionsAvailable(false)
-        onNotice('专注记录暂时无法加载，累计时长待联网后确认')
+      if(sessionSnapshotRevision===sessionRevision.current&&!sessionWritePending.current){
+        if (sessionResponse.status === 'fulfilled') {
+          setSessionsAvailable(true)
+          setSessions(sessionResponse.value.data.items)
+          setSession(sessionResponse.value.data.items.find(s => ['running', 'paused'].includes(s.status)) || null)
+        } else {
+          // The PWA can retain a read-only plan while the online-only session
+          // endpoint is unavailable. Do not discard that plan or trust stale time.
+          setSessions([]); setSession(null)
+          setSessionsAvailable(false)
+          onNotice('专注记录暂时无法加载，累计时长待联网后确认')
+        }
       }
       if (planResponse.status === 'rejected') throw planResponse.reason
       setPlan(planResponse.value.data.plan); setItems(planResponse.value.data.today_items??planResponse.value.data.items)
@@ -186,7 +209,30 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
       return false
     } finally { if (sequence === loadSequence.current) setLoading(false) }
   }
-  useEffect(() => { void load(); void loadSettings();return()=>{loadSequence.current++;settingsSequence.current++} }, [refreshVersion,userId])
+  useEffect(() => { void load(); void loadSettings();return()=>{loadSequence.current++;settingsSequence.current++} }, [refreshVersion,userId,timezone])
+  const refreshOnReturn=useRef<()=>Promise<unknown>>(()=>Promise.resolve())
+  refreshOnReturn.current=()=>Promise.all([load(),loadSettings()])
+  useEffect(()=>{
+    if(!timezone)return
+    let day=localDateInTimezone(new Date(),timezone)
+    let pending:Promise<unknown>|null=null
+    setCalendarDay(day)
+    function refresh(force=false){
+      const next=localDateInTimezone(new Date(),timezone!)
+      const changed=next!==day
+      if(changed){day=next;setCalendarDay(next)}
+      if((!changed&&!force)||(pending&&!changed))return
+      const current=refreshOnReturn.current()
+      pending=current
+      void current.finally(()=>{if(pending===current)pending=null})
+    }
+    const foreground=()=>{if(document.visibilityState==='visible')refresh(true)}
+    const timer=window.setInterval(()=>refresh(),30_000)
+    document.addEventListener('visibilitychange',foreground)
+    window.addEventListener('focus',foreground)
+    window.addEventListener('online',foreground)
+    return()=>{window.clearInterval(timer);document.removeEventListener('visibilitychange',foreground);window.removeEventListener('focus',foreground);window.removeEventListener('online',foreground)}
+  },[timezone,userId])
   useEffect(()=>{
     if(!session){setFocusTask(null);return}
     let alive=true
@@ -201,7 +247,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
     if(!deletionAttempt.current.pending())setDeletionSelection({})
   },[plan?.id,plan?.revision,userId])
   async function deleteSelectedItems(){
-    if(ownerChanged||!plan||busyRef.current||!deletionAttempt.current.pending()&&(!canDeleteItems||!Object.keys(deletionSelection).length||Boolean(loadError)))return
+    if(ownerChanged||!plan||busyRef.current||!deletionAttempt.current.pending()&&(!canEditCurrentPlan()||!Object.keys(deletionSelection).length||Boolean(loadError)))return
     await guarded('delete-items',async()=>{
       setDeletionError('')
       try{
@@ -235,6 +281,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
   useEffect(()=>{if(!session)return;const tick=()=>setElapsed(activeFocusSeconds(session));tick();if(session.status!=='running')return;const timer=setInterval(tick,1000);return()=>clearInterval(timer)},[session])
   async function generate(replace=false) {
     if (!timezone) { onNotice('正在加载用户时区，请稍后重试'); return }
+    if(replace&&!canEditCurrentPlan()){onNotice('日期或安排已变化，请更新今日任务后重试');void load();return}
     const localDate = localDateInTimezone(new Date(), timezone)
     await guarded('plan', async () => {
       try {
@@ -278,7 +325,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
   async function satisfy(item: PlanItem) {
     const draft = draftOf(item)
     const evidence = focusEvidence(item, sessions)
-    if (!planEditable || item.kind!=='core'&&!supportUnlocked || loadError || !allowedCompletionTypes(item).includes(draft.type) || !draft.summary.trim() || (draft.type === 'time' && evidence.seconds < item.target_minutes * 60) || draft.completeTask&&(!item.can_complete_task||!item.task_etag||draft.type!=='result')) return
+    if (!canEditCurrentPlan() || item.kind!=='core'&&!supportUnlocked || loadError || !allowedCompletionTypes(item).includes(draft.type) || !draft.summary.trim() || (draft.type === 'time' && evidence.seconds < item.target_minutes * 60) || draft.completeTask&&(!item.can_complete_task||!item.task_etag||draft.type!=='result')) return
     await guarded('satisfy:'+item.id, async () => {
       try {
         await ownedRequest(`/daily-plans/${item.daily_plan_id}/items/${item.id}/completions`, {method:'POST', headers:{'If-Match':item.item_etag??etag('dpi',item.id,item.revision), 'Idempotency-Key':idem()}, body:JSON.stringify({type:draft.type, summary:draft.summary.trim(), ...(draft.type === 'time' ? {work_session_ids:evidence.sessionIds} : {}),...(draft.completeTask?{complete_task:true,task_if_match:draft.taskETag}:{})})})
@@ -290,7 +337,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
     })
   }
   async function reopen(item: PlanItem) {
-    if(loadError||!planEditable)return
+    if(loadError||!canEditCurrentPlan())return
     await guarded('reopen:'+item.id, async () => {
       try {
         await ownedRequest(`/daily-plans/${item.daily_plan_id}/items/${item.id}/reopenings`, {method:'POST', headers:{'If-Match':item.item_etag??etag('dpi',item.id,item.revision), 'Idempotency-Key':idem()}, body:JSON.stringify({summary:'撤销误标记'})})
@@ -302,11 +349,11 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
   }
   async function start(item: PlanItem) {
     const minutes = Number(draftOf(item).focusMinutes)
-    if (!planEditable || item.kind!=='core'&&!supportUnlocked || !item.task_id || !sessionsAvailable || loadError || !Number.isInteger(minutes) || minutes < 5 || minutes > 180) return
+    if (!canEditCurrentPlan() || item.kind!=='core'&&!supportUnlocked || !item.task_id || !sessionsAvailable || loadError || !Number.isInteger(minutes) || minutes < 5 || minutes > 180) return
     await guarded('start:'+item.id, async () => {
       try {
-        const {data} = await ownedRequest<WorkSession>('/work-sessions', {method:'POST', headers:{'Idempotency-Key':idem()}, body:JSON.stringify({task_id:item.task_id, daily_plan_item_id:item.id, session_type:'pomodoro', target_minutes:minutes, started_at:new Date().toISOString()})})
-        setSession(data); setSessionNote(''); onNotice('专注计时开始')
+        await writeSession('/work-sessions', {method:'POST', headers:{'Idempotency-Key':idem()}, body:JSON.stringify({task_id:item.task_id, daily_plan_item_id:item.id, session_type:'pomodoro', target_minutes:minutes, started_at:new Date().toISOString()})})
+        setSessionNote(''); onNotice('专注计时开始')
       } catch (error) { onNotice(errorText(error));if(error instanceof ApiError&&[409,412].includes(error.status))await load() }
     })
   }
@@ -315,8 +362,8 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
     const current=session,action=current.status==='paused'?'resume':'pause'
     await guarded(action,async()=>{
       try{
-        const {data}=await ownedRequest<WorkSession>(`/work-sessions/${current.id}/${action==='pause'?'pauses':'resumptions'}`,{method:'POST',headers:{'If-Match':etag('work',current.id,current.revision),'Idempotency-Key':idem()},body:JSON.stringify({at:new Date().toISOString()})})
-        setSession(data);onNotice(action==='pause'?'计时已暂停，暂停时间不会计入专注':'继续专注计时')
+        await writeSession(`/work-sessions/${current.id}/${action==='pause'?'pauses':'resumptions'}`,{method:'POST',headers:{'If-Match':etag('work',current.id,current.revision),'Idempotency-Key':idem()},body:JSON.stringify({at:new Date().toISOString()})})
+        onNotice(action==='pause'?'计时已暂停，暂停时间不会计入专注':'继续专注计时')
       }catch(error){onNotice(errorText(error));if(error instanceof ApiError&&[409,412].includes(error.status))await load()}
     })
   }
@@ -325,7 +372,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
     const activeSession = session
     await guarded('finish', async () => {
       try {
-        const {data:completed}=await ownedRequest<WorkSession>(`/work-sessions/${activeSession.id}/completions`, {method:'POST', headers:{'If-Match':etag('work',activeSession.id,activeSession.revision), 'Idempotency-Key':idem()}, body:JSON.stringify({ended_at:new Date().toISOString(), outcome:'progressed', note:sessionNote.trim()})})
+        const completed=await writeSession(`/work-sessions/${activeSession.id}/completions`, {method:'POST', headers:{'If-Match':etag('work',activeSession.id,activeSession.revision), 'Idempotency-Key':idem()}, body:JSON.stringify({ended_at:new Date().toISOString(), outcome:'progressed', note:sessionNote.trim()})})
         const activeItem = items.find(item => item.id === activeSession.daily_plan_item_id || item.logical_id&&item.logical_id===activeSession.daily_plan_item_logical_id)
         if (activeItem) {
           const evidence=focusEvidence(activeItem,sessions)
@@ -352,7 +399,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
   }
   async function addLearningItem(){
     const minutes=Number(learningDraft.minutes)
-    if(!plan||!supportUnlocked||loadError||learningConflict||!learningDraft.title.trim()||!learningDraft.commitment.trim()||!learningDraft.minimum_action.trim()||!Number.isInteger(minutes)||minutes<5||minutes>180)return
+    if(!plan||!canEditCurrentPlan()||loadError||learningConflict||!learningDraft.title.trim()||!learningDraft.commitment.trim()||!learningDraft.minimum_action.trim()||!Number.isInteger(minutes)||minutes<5||minutes>180)return
     const activePlan=plan
     const position=Math.max(0,...items.filter(item=>['input','support'].includes(item.kind)).map(item=>item.position??0))+1
     await guarded('add-learning',async()=>{
@@ -388,8 +435,8 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
   const coreItems = items.filter(i=>i.kind==='core'&&!['skipped','superseded','not_completed'].includes(i.status))
   const deletableItems=items.filter(item=>item.kind==='core'&&item.status!=='superseded')
   const supportItems=items.filter(item=>['input','support'].includes(item.kind)&&!['skipped','superseded','not_completed'].includes(item.status))
-  const planEditable=Boolean(plan&&timezone&&!ownerChanged&&plan.status==='active'&&plan.local_date<=localDateInTimezone(new Date(),timezone))
-  const canDeleteItems=Boolean(planEditable&&timezone&&plan?.local_date===localDateInTimezone(new Date(),timezone))
+  const planEditable=canEditCurrentPlan()
+  const canDeleteItems=planEditable
   const pendingDeletion=deletionAttempt.current.pending()
   const supportUnlocked=planEditable
   const pendingGeneration=Boolean(generationJob.current||generationAttempt.current.pending())
@@ -411,12 +458,13 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
     return list.map((item,index)=>{
       const draft=draftOf(item),evidence=focusEvidence(item,sessions),enoughTime=evidence.seconds>=item.target_minutes*60,focusMinutes=Number(draft.focusMinutes),open=expanded===itemKey(item),methods=allowedCompletionTypes(item)
       const canProgress=planEditable&&(!optional||supportUnlocked)
+      const title=item.title.trim(),commitment=item.commitment.trim(),minimumAction=item.minimum_action.trim()
       const workspace=item.workspace,url=workspaceURL(workspace?.url,workspace?.system)
-      const workspaceAction=workspace&&(url?<ModuleWorkspaceLink url={url} system={workspace.system} label={workspace.label} userId={userId} onNotice={onNotice}/>:<span className="meta">{workspace.label} 网页暂不可用</span>)
+      const workspaceAction=workspace&&<span className="today-item-workspace">{url?<ModuleWorkspaceLink url={url} system={workspace.system} label={workspace.label} userId={userId} onNotice={onNotice}/>:<span className="meta">{workspace.label} 网页暂不可用</span>}</span>
       return <article key={itemKey(item)} className={`today-item${item.status==='satisfied'?' done':''}`} aria-label={item.title}>
         <div className="today-item-head">
           <span className="today-item-number" aria-hidden="true">{item.status==='satisfied'?<mdui-icon name="check"/>:optional?<mdui-icon name="menu_book"/>:String(index+1).padStart(2,'0')}</span>
-          <div className="today-item-copy"><h2>{item.commitment||item.minimum_action||item.title}</h2>{item.title!==item.commitment&&<small>{item.title}</small>}<p>{item.minimum_action}</p><small>{item.task_id?`今日专注预算 ${item.target_minutes} 分钟 · 已记录 ${Math.floor(evidence.seconds/60)} 分钟`:`建议学习 ${item.target_minutes} 分钟 · 按实际收获记录`}</small></div>
+          <div className="today-item-copy"><h2>{title}</h2>{commitment&&commitment!==title&&<p className="today-item-commitment"><span>今日承诺</span>{commitment}</p>}{minimumAction&&minimumAction!==title&&minimumAction!==commitment&&<p className="today-item-minimum-action"><span>最小行动</span>{minimumAction}</p>}<small>{item.task_id?`今日专注预算 ${item.target_minutes} 分钟 · 已记录 ${Math.floor(evidence.seconds/60)} 分钟`:`建议学习 ${item.target_minutes} 分钟 · 按实际收获记录`}</small></div>
         </div>
         {item.status==='satisfied'?<>
           {item.completion_summary&&<p className="today-evidence">{item.completion_summary}</p>}
@@ -424,7 +472,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
         </>:<>
           <div className="today-item-actions">
             {workspaceAction}
-            {item.task_id&&<mdui-button variant="outlined" icon="play_arrow" onClick={()=>start(item)} disabled={!canProgress||!sessionsAvailable||Boolean(loadError)||Boolean(session)||Boolean(busy)||!Number.isInteger(focusMinutes)||focusMinutes<5||focusMinutes>180} loading={busy==='start:'+item.id}>开始专注</mdui-button>}
+            {item.task_id&&<mdui-button variant="filled" icon="play_arrow" onClick={()=>start(item)} disabled={!canProgress||!sessionsAvailable||Boolean(loadError)||Boolean(session)||Boolean(busy)||!Number.isInteger(focusMinutes)||focusMinutes<5||focusMinutes>180} loading={busy==='start:'+item.id}>开始专注</mdui-button>}
             <mdui-button variant="text" onClick={()=>setExpanded(open?null:itemKey(item))} aria-expanded={open} aria-controls={`completion-${itemKey(item)}`}>{open?'收起记录':'记录今日推进'}</mdui-button>
           </div>
           <div id={`completion-${itemKey(item)}`} className="today-completion" hidden={!open}>
@@ -449,6 +497,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
       <div className="title-block"><p className="eyebrow">{new Date().toLocaleDateString('zh-CN',{timeZone:timezone,month:'long',day:'numeric',weekday:'long'})}</p><h1>今日推进</h1>{currentGoal&&<p className="today-direction"><span>当前方向</span>{currentGoal.title}</p>}</div>
       <div className="head-side">
         {total>0&&<p className="head-stat"><strong>{done}<small>/{total}</small></strong><span>今日已推进</span></p>}
+        {onOpenPanel&&<mdui-button variant="outlined" icon="badge" onClick={onOpenPanel}>传到工牌</mdui-button>}
       </div>
     </header>
     {ownerChanged&&<p role="status" className="meta">{SESSION_OWNER_CHANGED} 原账号的草稿仍保留。</p>}
@@ -464,6 +513,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
     </section>}
     {pendingGeneration&&<div className="empty-state"><p role="status">{generationJob.current?.status==='succeeded'?'安排作业已完成，当前任务还需读取确认。':'上次安排的结果尚未确认，将沿用原请求或作业继续核对。'}</p><mdui-button variant="outlined" disabled={Boolean(busy)||ownerChanged} loading={busy==='plan'} onClick={()=>generate()}>核对上次安排</mdui-button></div>}
     {loadError&&<div role="alert" className="form-error"><p>今日任务暂时无法更新：{loadError}</p>{plan&&<p className="meta">下方保留上次成功读取的安排，请重新加载后再操作。</p>}{!pendingGeneration&&<mdui-button variant="text" disabled={loading||Boolean(busy)} onClick={()=>void load()}>重新加载今日任务</mdui-button>}</div>}
+    {plan&&calendarDay&&plan.local_date!==calendarDay&&<p role="status" className="today-stale-plan">当前显示 {plan.local_date} 的安排，仅可查看记录。{loading?'正在更新今天的安排…':<mdui-button variant="text" disabled={Boolean(busy)} onClick={()=>void load()}>更新今日安排</mdui-button>}</p>}
     {!sessionsAvailable&&plan&&!loading&&<p className="meta">专注记录暂时无法加载，重新加载今日任务后可继续计时。</p>}
     {session && <div className="focus-strip">
       <p className="focus-task-title"><span>正在推进</span><b>{focusTask?.taskID===session.task_id&&focusTask.title||'正在读取关联任务…'}</b></p>
@@ -473,7 +523,7 @@ export function Today({ userId,onNotice, timezone:profileTimezone, refreshVersio
       <mdui-button variant="filled" disabled={Boolean(busy)||ownerChanged||!sessionNote.trim()} loading={busy==='finish'} onClick={finish}>结束并记录</mdui-button>
     </div>}
     {loading&&!plan ? <div className="loading-block"><mdui-linear-progress/><p className="empty">正在整理今日任务…</p></div> : !plan ? !loadError&&<div className="empty-state"><h2>还没有今日安排</h2><p>可先核对已有目标和下一步，再明确生成今日安排。</p>{onOpenChat&&<mdui-button variant="filled" icon="forum" onClick={onOpenChat}>和助手聊聊</mdui-button>}{!pendingGeneration&&<mdui-button variant="text" disabled={busy==='plan'} loading={busy==='plan'} onClick={()=>generate(false)}>重新获取今日安排</mdui-button>}</div> : <>
-      {showAvailability&&<div className="empty-state"><h2>{availabilityTitle[availabilityStatus]||'今日安排待确认'}</h2><p>{availabilityReason}</p>{onOpenChat&&<mdui-button variant="text" icon="forum" onClick={onOpenChat}>和助手聊聊</mdui-button>}{canReplan&&!pendingGeneration&&<mdui-button variant="filled" icon="refresh" disabled={Boolean(busy)||Boolean(loadError)} loading={busy==='plan'} onClick={()=>generate(true)}>重新安排今天</mdui-button>}</div>}
+      {showAvailability&&<section className="today-availability" aria-label="今日安排状态"><p role="status"><strong>{availabilityTitle[availabilityStatus]||'今日安排待确认'}</strong>{coreItems.length>0&&<span>已有 {coreItems.length} 项核心安排</span>}</p><details><summary>原因与调整</summary><p>{availabilityReason}</p><div className="actions">{onOpenChat&&<mdui-button variant="text" icon="forum" onClick={onOpenChat}>和助手聊聊</mdui-button>}{canReplan&&!pendingGeneration&&<mdui-button variant="outlined" icon="refresh" disabled={Boolean(busy)||Boolean(loadError)} loading={busy==='plan'} onClick={()=>generate(true)}>重新安排今天</mdui-button>}</div></details></section>}
     <div className="today-list">{renderItems(coreItems)}</div>
       {(supportItems.length>0||supportUnlocked||retainedLearning)&&<section className="today-support" aria-label="可选阅读与补充">
         <header><h2>可选阅读与补充</h2><p className="meta">可选补充阅读或学习，不计入核心三项。</p></header>

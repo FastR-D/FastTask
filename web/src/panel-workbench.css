@@ -1,0 +1,54 @@
+/* Preserve the preview/tasks column and the visible profile/device sidebar. */
+.panel-page.panel-workbench {
+  container:panel-content / inline-size;
+  background:rgb(var(--mdui-color-surface));
+}
+html .research-page-viewport:has(> .panel-page.panel-workbench:not([hidden])) {
+  background:rgb(var(--mdui-color-surface));
+}
+html .panel-page.panel-workbench .panel-layout {
+  grid-template-columns:minmax(0,1fr) 340px;
+  gap:var(--ft-space-5);
+}
+html .panel-page.panel-workbench .panel-sidebar { grid-template-columns:minmax(0,1fr); }
+html .panel-page.panel-workbench .panel-primary,
+html .panel-page.panel-workbench .panel-sidebar { gap:var(--ft-space-5); }
+html .panel-page.panel-workbench .panel-preview-stage {
+  background:transparent;
+  padding:0;
+  border:0;
+  border-radius:0;
+}
+html .panel-page.panel-workbench .panel-section { --shape-corner:var(--mdui-shape-corner-medium); }
+html .panel-page.panel-workbench .panel-section h2,
+html .panel-page.panel-workbench .panel-tasks-section h2 {
+  font-size:var(--mdui-typescale-title-medium-size);
+  font-weight:500;
+  line-height:1.5;
+}
+html .panel-page.panel-workbench .panel-task-list li { padding:var(--ft-space-3) 0; }
+.panel-page.panel-workbench .panel-preview-footer,
+.panel-page.panel-workbench .panel-search-progress>div { flex-wrap:wrap; }
+.panel-page.panel-workbench .panel-last-success {
+  display:grid;
+  gap:4px;
+  margin:0;
+  color:var(--panel-muted);
+  font-size:var(--mdui-typescale-body-small-size);
+  line-height:1.6;
+}
+.panel-page.panel-workbench .panel-last-success time {
+  color:rgb(var(--mdui-color-on-surface));
+  font-variant-numeric:tabular-nums;
+  overflow-wrap:anywhere;
+}
+@container panel-content (max-width:680px) {
+  html .panel-page.panel-workbench .panel-layout { grid-template-columns:minmax(0,1fr); }
+  html .panel-page.panel-workbench .panel-sidebar { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@container panel-content (max-width:520px) {
+  html .panel-page.panel-workbench .panel-sidebar { grid-template-columns:minmax(0,1fr); }
+  .panel-page.panel-workbench .panel-task-list li { align-items:flex-start;flex-wrap:wrap; }
+  .panel-page.panel-workbench .panel-task-text { flex-basis:calc(100% - 34px); }
+  .panel-page.panel-workbench .panel-task-status { margin-left:26px; }
+}

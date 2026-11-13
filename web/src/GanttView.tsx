@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { localDateInTimezone } from './date'
 import { buildGanttRows, calendarDay, clipRange, monthRange, shiftMonth, visibleGanttRows } from './gantt'
@@ -15,6 +15,9 @@ export function GanttView({ goal, nodes, timezone, busy, onEdit, onAdd }: Props)
   const [month, setMonth] = useState(() => today.slice(0, 7))
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [selectedId, setSelectedId] = useState('')
+  const [revealRequest, setRevealRequest] = useState(0)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const revealPending = useRef(true)
   const markerId = `gantt-arrow-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
   useEffect(() => {
     const update = () => setToday(localDateInTimezone(new Date(), timezone))
@@ -29,6 +32,19 @@ export function GanttView({ goal, nodes, timezone, busy, onEdit, onAdd }: Props)
   const days = calendarDay(windowRange.end)! - calendarDay(windowRange.start)! + 1
   const width = days * DAY_WIDTH
   const todayOffset = calendarDay(today)! - calendarDay(windowRange.start)!
+  useLayoutEffect(() => {
+    const viewport = scrollRef.current
+    if (!viewport || !rows.length || !revealPending.current || todayOffset < 0 || todayOffset >= days) return
+    const day = viewport.querySelector<HTMLElement>('.gantt-day.today')
+    const label = viewport.querySelector<HTMLElement>('.gantt-heading')
+    if (!day || !label || !viewport.clientWidth) return
+    const dayRect = day.getBoundingClientRect()
+    const labelWidth = label.getBoundingClientRect().width
+    const offset = dayRect.left - viewport.getBoundingClientRect().left + viewport.scrollLeft
+    const visibleTimeline = Math.max(dayRect.width, viewport.clientWidth - labelWidth)
+    viewport.scrollTo({ left: Math.max(0, offset - labelWidth - (visibleTimeline - dayRect.width) / 2), behavior: 'instant' })
+    revealPending.current = false
+  }, [month, todayOffset, days, rows.length, revealRequest])
   const selected = byId.get(selectedId)
   const warningCount = rows.filter(row => row.warnings.length).length
   const index = new Map(visible.map((row, position) => [row.task.id, position]))
@@ -46,6 +62,12 @@ export function GanttView({ goal, nodes, timezone, busy, onEdit, onAdd }: Props)
     setCollapsed(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
   }
   function edit(task: Task) { setSelectedId(task.id); onEdit(task) }
+  function goToToday() {
+    revealPending.current = true
+    setMonth(today.slice(0, 7))
+    // Also navigate when this month is already selected.
+    setRevealRequest(value => value + 1)
+  }
 
   return <section className="gantt-view" aria-label={`${goal.title}甘特图`}>
     <div className="gantt-toolbar">
@@ -53,13 +75,12 @@ export function GanttView({ goal, nodes, timezone, busy, onEdit, onAdd }: Props)
         <mdui-button-icon icon="chevron_left" aria-label="上个月" disabled={month === '0001-01'} onClick={() => setMonth(shiftMonth(month, -1))}/>
         <h3 aria-live="polite">{month.slice(0, 4)} 年 {Number(month.slice(5))} 月</h3>
         <mdui-button-icon icon="chevron_right" aria-label="下个月" disabled={month === '9999-12'} onClick={() => setMonth(shiftMonth(month, 1))}/>
-        <mdui-button variant="text" onClick={() => setMonth(today.slice(0, 7))}>回到今天</mdui-button>
+        <mdui-button variant="text" onClick={goToToday}>回到今天</mdui-button>
       </div>
       <div className="actions"><mdui-button variant="text" onClick={() => setCollapsed(new Set())}>全部展开</mdui-button><mdui-button variant="outlined" icon="add" disabled={busy} onClick={() => onAdd()}>添加阶段</mdui-button></div>
     </div>
-    <p className="meta">先定阶段周期，再逐步安排任务。点击名称或时间条编辑。{goal.target_date ? `目标日期：${goal.target_date}。` : ''}</p>
-    <p className="gantt-summary" role="status">{rows.length} 项 · {rows.filter(row => !row.range).length} 项未排期{warningCount ? ` · ${warningCount} 项日期提示` : ''}</p>
-    {!rows.length ? <div className="empty-state"><h3>从一个阶段开始规划</h3><p>例如文献调研、实验验证或论文撰写，先填阶段周期，再补充子任务。</p></div> : <div className="gantt-scroll" role="region" aria-label="按月浏览甘特时间轴，可横向滚动" tabIndex={0}>
+    <p className="gantt-summary" role="status">{rows.length} 项 · {rows.filter(row => !row.range).length} 项未排期{warningCount ? ` · ${warningCount} 项日期提示` : ''}{goal.target_date ? ` · 截止 ${goal.target_date}` : ''}</p>
+    {!rows.length ? <div className="empty-state"><h3>从一个阶段开始规划</h3><p>例如文献调研、实验验证或论文撰写，先填阶段周期，再补充子任务。</p></div> : <div ref={scrollRef} className="gantt-scroll" role="region" aria-label="按月浏览甘特时间轴，可横向滚动" tabIndex={0}>
       <div className="gantt-table" role="table" aria-label="阶段与任务计划" style={{ width: `calc(var(--gantt-label-width) + ${width}px)`, '--gantt-timeline-width': `${width}px` } as CSSProperties}>
         <div className="gantt-header" role="row">
           <div className="gantt-label gantt-heading" role="columnheader">阶段与任务</div>
@@ -104,6 +125,6 @@ export function GanttView({ goal, nodes, timezone, busy, onEdit, onAdd }: Props)
       {selected.prerequisites.length > 0 && <div><b>前置成果（含上级继承）</b><ul>{selected.prerequisites.map(id => { const predecessor = byId.get(id); return <li key={id}>{predecessor ? `${predecessor.task.title} · ${STATUS[predecessor.task.status] || predecessor.task.status}` : '前置任务不可用'}</li> })}</ul></div>}
       {selected.warnings.length > 0 && <div className="gantt-warnings"><b>日期提示</b><ul>{selected.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul></div>}
     </section>}
-    <p className="meta">计划日期用于长期规划；每日安排按任务状态、真实前置成果和每日预算生成。</p>
+    <p className="meta">点击名称或时间条编辑计划；每日安排仍按任务状态、前置成果和预算生成。</p>
   </section>
 }

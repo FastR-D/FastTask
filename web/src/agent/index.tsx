@@ -21,6 +21,7 @@ import { DailyPlanProposalUI, GoalUpdateProposalUI, GoalWithTasksProposalUI, Tas
 import { OpenToolWorkspaceUI } from './tools/OpenToolWorkspace'
 import { VoiceButton } from './VoiceButton'
 import { ComposerDraftPersistence, ComposerDraftUserProvider } from './ComposerDraft'
+import { FailedMessageRecovery } from './FailedMessageRecovery'
 import '../agent.css'
 
 // The agent chat view (doc/frontend.md §2, doc/chat-features.md §2, §3, §4).
@@ -319,6 +320,7 @@ const Conversation = memo(function Conversation({
           </ThreadPrimitive.Empty>
           <ThreadPrimitive.Messages components={{ Message: AssistantMessage, UserMessage, AssistantMessage }} />
         </ThreadPrimitive.Viewport>
+        <FailedMessageRecovery thread={runtime.thread} />
         <Composer onNotice={onNotice} />
       </ThreadPrimitive.Root>
     </AssistantRuntimeProvider>

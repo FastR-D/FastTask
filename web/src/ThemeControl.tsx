@@ -59,6 +59,22 @@ function useThemePreference(): [ThemePreference, (value: ThemePreference) => voi
   return [preference, choose]
 }
 
+/** The top bar uses the same preference and events as the existing rail and drawer. */
+export function ThemeQuick() {
+  const [preference, choose] = useThemePreference()
+  return <div className="theme-quick" role="group" aria-label="颜色模式">
+    {(['light', 'dark', 'system'] as ThemePreference[]).map(value => <button
+      key={value}
+      type="button"
+      className="theme-quick-button"
+      aria-label={value === 'system' ? THEME_LABELS[value] : `${THEME_LABELS[value]}模式`}
+      title={THEME_LABELS[value]}
+      aria-pressed={preference === value}
+      onClick={() => choose(value)}
+    ><mdui-icon name={THEME_ICONS[value]} aria-hidden="true"/></button>)}
+  </div>
+}
+
 /** Desktop control: an icon in the navigation rail that opens the three choices. */
 export function ThemeMenu({ labelled = false }: { labelled?: boolean }) {
   const [preference, choose] = useThemePreference()

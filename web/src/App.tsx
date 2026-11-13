@@ -5,13 +5,12 @@ import { ApiError, completeFastCAS, completeFastResearch, ensureFreshAccessToken
 import type { Goal, Job, User } from './types'
 import type { GoalChatRequest } from './agent'
 import { fieldValue, useMduiEvent } from './mdui-react'
-import { Review } from './Lens'
+import { Review } from './Review'
 import { PwaUpdate } from './PwaUpdate'
 import { readResearchAssistantOpen, ResearchWorkspace } from './ResearchWorkspace'
 import { GoalManager } from './GoalManager'
 import { FastPanel } from './FastPanel'
-import { ThemeMenu, ThemeSelect, VisualThemeMenu, VisualThemeSelect } from './ThemeControl'
-import badgeConsoleIcon from './assets/badge-console.svg?no-inline'
+import { ThemeMenu, ThemeQuick, ThemeSelect, VisualThemeMenu, VisualThemeSelect } from './ThemeControl'
 import { timezoneOrDefault } from './date'
 import { assertAccessOwner } from './session-owner'
 import { watchTheme } from './theme'
@@ -22,7 +21,7 @@ type Tab = 'today' | 'goals' | 'panel' | 'jobs' | 'review' | 'account' | 'users'
 
 const NAV_ICONS: Record<Tab, string | undefined> = {
   today: 'today', goals: 'account_tree', jobs: 'pending',
-  panel: undefined, review: 'fact_check', account: 'verified_user', users: 'manage_accounts',
+  panel: 'badge', review: 'fact_check', account: 'verified_user', users: 'manage_accounts',
 }
 const BAR_TABS: Tab[] = ['today', 'goals', 'review', 'jobs']
 
@@ -146,12 +145,26 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
   const [notice, setNotice] = useState('')
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [assistantOpen, setAssistantOpen] = useState(readResearchAssistantOpen)
-  const showAssistant = useCallback(() => setAssistantOpen(true), [])
-  const hideAssistant = useCallback(() => setAssistantOpen(false), [])
-  const toggleAssistant = useCallback(() => setAssistantOpen(value => !value), [])
-  useEffect(() => {
-    try { window.localStorage.setItem('fasttask.research-assistant.open', String(assistantOpen)) } catch { /* local preferences are optional */ }
-  }, [assistantOpen])
+  const [assistantFocusRequest, setAssistantFocusRequest] = useState(0)
+  const showAssistant = useCallback(() => {
+    setAssistantOpen(true)
+    // Opening an already visible pane is still an explicit navigation action on phones.
+    setAssistantFocusRequest(value => value + 1)
+  }, [])
+  const hideAssistant = useCallback(() => {
+    const pane = document.getElementById('research-assistant')
+    if (pane?.contains(document.activeElement) || document.activeElement?.classList.contains('research-assistant-backdrop')) {
+      const trigger = Array.from(document.querySelectorAll<HTMLElement>('[aria-controls="research-assistant"]'))
+        .find(element => element.getBoundingClientRect().width > 0 && !pane?.contains(element))
+      const button = trigger?.shadowRoot?.querySelector<HTMLButtonElement>('button') ?? trigger
+      button?.focus({ preventScroll: true })
+    }
+    setAssistantOpen(false)
+  }, [])
+  const toggleAssistant = useCallback(() => {
+    if (assistantOpen) hideAssistant()
+    else showAssistant()
+  }, [assistantOpen, hideAssistant, showAssistant])
   const [businessRevision, setBusinessRevision] = useState(0)
   const chatSequence=useRef(0)
   const [goalChatRequest,setGoalChatRequest]=useState<GoalChatRequest>()
@@ -196,7 +209,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
         {items.map(([id,label]) => <button key={id} type="button" className="workbench-nav-item" aria-current={tab===id?'page':undefined} onClick={()=>setTab(id)}><mdui-icon name={NAV_ICONS[id]}/><span>{label}</span>{tab===id&&<span className="workbench-nav-dot"/>}</button>)}
       </nav>
       <div className="workbench-sidebar-bottom"><button type="button" className="workbench-nav-item" aria-label="账号认证" aria-current={tab==='account'?'page':undefined} onClick={()=>setTab('account')}><mdui-icon name="verified_user" aria-hidden="true"/><span>账号认证</span></button>
-        <button type="button" className="workbench-nav-item" aria-current={tab==='panel'?'page':undefined} onClick={()=>setTab('panel')}><mdui-icon src={badgeConsoleIcon}/><span>工牌更新</span><small>工具</small></button>
+        <button type="button" className="workbench-nav-item" aria-current={tab==='panel'?'page':undefined} onClick={()=>setTab('panel')}><mdui-icon name="badge"/><span>工牌更新</span><small>工具</small></button>
         <div className="workbench-profile"><span className="rail-avatar">{user.display_name?.slice(0,1)||'F'}</span><div><b>{user.display_name}</b><small>{timezone}</small></div></div>
         <VisualThemeMenu labelled/>
         <ThemeMenu labelled/>
@@ -205,13 +218,13 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
     </mdui-layout-item>
     <mdui-layout-item placement="top" className="workbench-topbar" role="banner">
       <div className="workbench-breadcrumb"><span>FastTask</span><span aria-hidden="true">/</span><strong>{currentLabel}</strong></div>
-      <div className="workbench-topbar-actions"><time>{new Intl.DateTimeFormat('zh-CN',{timeZone:timezone,month:'long',day:'numeric',weekday:'short'}).format(new Date())}</time><button type="button" className="workbench-assistant-toggle" aria-controls="research-assistant" aria-expanded={assistantOpen} onClick={toggleAssistant}><mdui-icon name="forum"/>{assistantOpen?'收起助手':'打开助手'}</button></div>
+      <div className="workbench-topbar-actions"><time>{new Intl.DateTimeFormat('zh-CN',{timeZone:timezone,month:'long',day:'numeric',weekday:'short'}).format(new Date())}</time><ThemeQuick/><button type="button" className="workbench-assistant-toggle" aria-controls="research-assistant" aria-expanded={assistantOpen} onClick={toggleAssistant}><mdui-icon name="forum"/>{assistantOpen?'收起助手':'打开助手'}</button></div>
     </mdui-layout-item>
     <mdui-navigation-drawer ref={drawerRef} className="app-drawer" modal close-on-esc close-on-overlay-click open={drawerOpen}>
       <div className="drawer-inner">
         <div className="drawer-head"><span className="brand-mark">3</span><div><b>FastTask</b><small>每天推进重要的事</small></div></div>
         <mdui-list className="drawer-nav">
-          {items.map(([id, label]) => <mdui-list-item key={id} icon={NAV_ICONS[id]} active={tab === id} onClick={() => { setTab(id); setDrawerOpen(false) }}>{id === 'panel' && <mdui-icon slot="icon" src={badgeConsoleIcon}/>} {label}</mdui-list-item>)}
+          {items.map(([id, label]) => <mdui-list-item key={id} icon={NAV_ICONS[id]} active={tab === id} onClick={() => { setTab(id); setDrawerOpen(false) }}>{id === 'panel' && <mdui-icon slot="icon" name="badge"/>} {label}</mdui-list-item>)}
         </mdui-list>
         <div className="drawer-foot">
           <mdui-list>
@@ -228,17 +241,17 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
     </mdui-navigation-drawer>
     <mdui-navigation-rail className="app-rail" value={tab} divider>
       <div slot="top" className="rail-brand"><span className="brand-mark">3</span></div>
-      {items.map(([id, label]) => <mdui-navigation-rail-item key={id} value={id} icon={NAV_ICONS[id]} onClick={() => setTab(id)}>{id === 'panel' && <><mdui-icon slot="icon" src={badgeConsoleIcon}/><mdui-icon slot="active-icon" src={badgeConsoleIcon}/></>}{label}</mdui-navigation-rail-item>)}
+      {items.map(([id, label]) => <mdui-navigation-rail-item key={id} value={id} icon={NAV_ICONS[id]} onClick={() => setTab(id)}>{id === 'panel' && <><mdui-icon slot="icon" name="badge"/><mdui-icon slot="active-icon" name="badge"/></>}{label}</mdui-navigation-rail-item>)}
       <div slot="bottom" className="rail-profile">
-        <mdui-tooltip content={assistantOpen ? '收起研究助手' : '打开研究助手'} placement="left">
-          <button className="rail-tool-button rail-assistant-toggle" type="button" aria-label={assistantOpen ? '收起研究助手' : '打开研究助手'} aria-controls="research-assistant" aria-expanded={assistantOpen} onClick={toggleAssistant}>
+        <mdui-tooltip content={assistantOpen ? '收起科研助手' : '打开科研助手'} placement="left">
+          <button className="rail-tool-button rail-assistant-toggle" type="button" aria-label={assistantOpen ? '收起科研助手' : '打开科研助手'} aria-controls="research-assistant" aria-expanded={assistantOpen} onClick={toggleAssistant}>
             <mdui-icon name="forum"/>
           </button>
         </mdui-tooltip>
         <mdui-button-icon icon="verified_user" aria-label="账号认证" onClick={()=>setTab('account')}/>
         <mdui-tooltip content="工牌更新" placement="left">
           <button className="rail-tool-button" type="button" aria-label="工牌更新" onClick={() => setTab('panel')}>
-            <mdui-icon src={badgeConsoleIcon}/>
+            <mdui-icon name="badge"/>
           </button>
         </mdui-tooltip>
         <mdui-tooltip content={`${user?.display_name || '加载中'} · ${user?.timezone || ''}`} placement="left">
@@ -252,13 +265,13 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
     <mdui-top-app-bar className="app-bar">
       <mdui-button-icon icon="menu" aria-label="打开导航" onClick={() => setDrawerOpen(true)}/>
       <mdui-top-app-bar-title>FastTask · {currentLabel}</mdui-top-app-bar-title>
-      <mdui-button-icon icon="forum" aria-label={assistantOpen ? '收起研究助手' : '打开研究助手'} aria-controls="research-assistant" aria-expanded={assistantOpen} onClick={toggleAssistant}/>
+      <mdui-button-icon icon="forum" aria-label={assistantOpen ? '收起科研助手' : '打开科研助手'} aria-controls="research-assistant" aria-expanded={assistantOpen} onClick={toggleAssistant}/>
       <mdui-button-icon icon="logout" aria-label="退出登录" onClick={onLogout}/>
     </mdui-top-app-bar>
     <mdui-layout-main className="app-main">
-      <ResearchWorkspace userId={user?.id} onNotice={setNotice} onBusinessChanged={businessChanged} assistantOpen={assistantOpen} onAssistantClose={hideAssistant} goalChatRequest={goalChatRequest}>
+      <ResearchWorkspace userId={user?.id} onNotice={setNotice} onBusinessChanged={businessChanged} assistantOpen={assistantOpen} assistantFocusRequest={assistantFocusRequest} onAssistantClose={hideAssistant} goalChatRequest={goalChatRequest}>
         <div className="research-today" hidden={tab!=='today'}>
-          <Today userId={user?.id} timezone={timezone} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} onOpenChat={() => openChat()}/>
+          <Today userId={user?.id} timezone={timezone} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} onOpenChat={() => openChat()} onOpenPanel={() => setTab('panel')}/>
         </div>
         <FastPanel active={tab==='panel'} userId={user.id} timezone={timezone} refreshVersion={businessRevision} onNotice={setNotice}/>
       <div className="page" hidden={tab==='today'||tab==='panel'}>
@@ -266,7 +279,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
         {tab==='users'&&user.role==='admin'&&<AdminUsers currentUser={user}/>}
         {tab==='goals' && <GoalManager timezone={timezone} userId={user?.id} onNotice={setNotice} refreshVersion={businessRevision} onBusinessChanged={businessChanged} onOpenChat={openChat}/>}
         {tab==='jobs' && <JobQueue onNotice={setNotice}/>}
-        {tab==='review' && <Review onNotice={setNotice}/>}
+        {tab==='review' && <Review userId={user.id} timezone={timezone||'Asia/Shanghai'} refreshVersion={businessRevision} onNotice={setNotice}/>}
         </div>
       </ResearchWorkspace>
     </mdui-layout-main>

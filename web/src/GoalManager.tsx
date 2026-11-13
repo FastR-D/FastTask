@@ -67,6 +67,9 @@ export function GoalManager({ timezone='Asia/Shanghai',userId,onNotice, refreshV
   const [collapsed,setCollapsed]=useState<Set<string>>(new Set())
   const [loading,setLoading]=useState(true)
   const [error,setError]=useState('')
+  const [readOnlyReason,setReadOnlyReason]=useState('')
+  const readOnlyRef=useRef('')
+  const readOnly=Boolean(readOnlyReason)
   const [busy,setBusy]=useState('')
   const busyRef=useRef(false)
   const currentUserId=useRef(userId)
@@ -109,17 +112,26 @@ export function GoalManager({ timezone='Asia/Shanghai',userId,onNotice, refreshV
 
   function ownedRequest<T>(path:string,init:RequestInit={},ownerId=dataOwner.current){
     if(ownerId&&currentUserId.current!==ownerId)throw new Error(SESSION_OWNER_CHANGED)
+    if(init.method&&init.method!=='GET'&&writesBlocked())throw new Error(readOnlyRef.current||'当前离线，仅可查看已缓存的目标与任务。')
     return request<T>(path,init,ownerId)
   }
+
+  function writesBlocked(){return Boolean(readOnlyRef.current)}
+  function markReadOnly(reason:string){readOnlyRef.current=reason;setReadOnlyReason(reason)}
 
   async function load(preferredId=selectedRef.current) {
     if(userId&&currentUserId.current!==userId)return
     const sequence=++loadSequence.current
     setLoading(true)
     try {
-      const [goalResponse,taskResponse]=await Promise.all([request<{items:Goal[]}>('/goals',{},userId),request<{items:Task[]}>('/tasks',{},userId)])
+      const [goalResult,taskResult]=await Promise.allSettled([request<{items:Goal[]}>('/goals',{},userId),request<{items:Task[]}>('/tasks',{},userId)])
       if(sequence!==loadSequence.current)return
-      dataOwner.current=userId;setGoals(goalResponse.data.items);setTasks(taskResponse.data.items)
+      if(goalResult.status==='rejected')throw goalResult.reason
+      const goalResponse=goalResult.value
+      const degraded=taskResult.status==='rejected'
+      if(degraded)markReadOnly('当前仅可查看已读取的目标与任务；联网并成功更新后可继续编辑。')
+      dataOwner.current=userId;setGoals(goalResponse.data.items)
+      setTasks(taskResult.status==='fulfilled'?taskResult.value.data.items:[])
       const next=goalResponse.data.items.find(goal=>goal.id===preferredId)??goalResponse.data.items[0]
       selectedRef.current=next?.id??''
       setSelectedId(next?.id??'')
@@ -129,9 +141,13 @@ export function GoalManager({ timezone='Asia/Shanghai',userId,onNotice, refreshV
         if(sequence!==loadSequence.current)return
         if(response.data.goal_id!==next.id)throw new Error('任务树与当前目标不匹配，请重新加载。')
         setTree(response.data);setTreeETag(response.etag||`"tree_${next.id}_rev_${response.data.revision}"`)
+        // The cached task tree is sufficient for navigation, dependency labels
+        // and Gantt inspection. The uncached task index is needed for writes.
+        if(taskResult.status==='rejected')setTasks(flatten(response.data.nodes))
       }else setTree(null)
+      if(!degraded)markReadOnly('')
       setError('')
-    }catch(cause){if(sequence===loadSequence.current)setError(errorText(cause))}
+    }catch(cause){if(sequence===loadSequence.current){markReadOnly('最新目标或任务暂时无法确认，仅可查看已读取的内容。');setError(errorText(cause))}}
     finally{if(sequence===loadSequence.current)setLoading(false)}
   }
   async function loadTrash() {
@@ -141,20 +157,30 @@ export function GoalManager({ timezone='Asia/Shanghai',userId,onNotice, refreshV
       setTrashGoals(goalResponse.data.items);setTrashTasks(taskResponse.data.items)
     }catch(cause){setError(errorText(cause))}
   }
-  useEffect(()=>{void load();if(showTrash)void loadTrash()},[refreshVersion,userId])
+  useEffect(()=>{void load();if(showTrash)void loadTrash();return()=>{loadSequence.current++}},[refreshVersion,userId])
+  useEffect(()=>{
+    // Browser connectivity can be false while a local or intranet API remains
+    // reachable. Only an actual uncached task read can confirm write readiness.
+    const offline=()=>{markReadOnly('连接状态已变化，正在核对服务；暂时仅可查看。');void load()}
+    const online=()=>{void load()}
+    if(navigator.onLine===false)markReadOnly('正在核对服务连接，暂时仅可查看。')
+    window.addEventListener('offline',offline);window.addEventListener('online',online)
+    return()=>{window.removeEventListener('offline',offline);window.removeEventListener('online',online)}
+  },[userId])
   useEffect(()=>{if(showTrash)void loadTrash()},[showTrash])
   useEffect(()=>{void request<{configured:boolean}>('/agent/availability',{},userId).then(({data})=>setModelAvailable(data.configured)).catch(()=>setModelAvailable(null))},[refreshVersion,userId])
 
   async function mutate(key:string, action:()=>Promise<void>, message:string) {
     if(busyRef.current)return
+    if(writesBlocked()){onNotice(readOnlyRef.current||'当前离线，请联网后再修改。');return}
     busyRef.current=true;setBusy(key);setError('')
     try {await action();onNotice(message);onBusinessChanged?.();await load();if(showTrash)await loadTrash()}
     catch(cause){const text=errorText(cause);onNotice(text);if(cause instanceof ApiError&&cause.status===412)await load();setError(text)}
     finally{busyRef.current=false;setBusy('')}
   }
-  function openGoal(goal?:Goal){if(busyRef.current)return;const ownerId=goal?dataOwner.current:userId;creationAttempts.current.goal=createCreationAttempt<Goal>(ownerId,()=>currentUserId.current);setGoalDraft(goal?goalFields(goal):{...emptyGoal});setEditor({kind:'goal',goal,ownerId})}
+  function openGoal(goal?:Goal){if(busyRef.current||writesBlocked())return;const ownerId=goal?dataOwner.current:userId;creationAttempts.current.goal=createCreationAttempt<Goal>(ownerId,()=>currentUserId.current);setGoalDraft(goal?goalFields(goal):{...emptyGoal});setEditor({kind:'goal',goal,ownerId})}
   function openTask(task?:Task,parent?:Task,type='task'){
-    if(busyRef.current||!visibleTree||!selected||parent&&!canParent(parent))return
+    if(busyRef.current||writesBlocked()||!visibleTree||!selected||parent&&!canParent(parent))return
     const ownerId=dataOwner.current
     creationAttempts.current.task=createCreationAttempt<Task>(ownerId,()=>currentUserId.current)
     setTaskDraft(task?taskFields(task):{...emptyTask,depends_on:[],parent_id:parent?.id||'',type:parent?(parent.type==='milestone'?'task':'action'):type})
@@ -268,17 +294,17 @@ export function GoalManager({ timezone='Asia/Shanghai',userId,onNotice, refreshV
         {Boolean(task.depends_on?.length)&&<div><b>前置成果</b><ul>{task.depends_on!.map(id=>{const dependency=tasks.find(value=>value.id===id&&value.goal_id===task.goal_id&&!value.deleted_at);return <li key={id}>{dependency?`${dependency.title} · ${TASK_STATUS[dependency.status]||dependency.status}`:'前置任务不可用'}</li>})}</ul>{task.depends_on!.some(id=>tasks.find(value=>value.id===id&&!value.deleted_at)?.status!=='completed')&&<p className="meta">前置任务尚未最终完成；今日的小步推进不代表前置成果已经满足。</p>}</div>}
         {task.status==='blocked'&&task.blocked_reason&&<p className="form-error">阻碍：{task.blocked_reason}</p>}
         <div className="actions">
-          <mdui-button variant="text" icon="edit" onClick={()=>openTask(task)} disabled={Boolean(busy)}>编辑与移动</mdui-button>
-          {task.status==='blocked'&&<mdui-button variant="outlined" onClick={()=>unblockTask(task)} disabled={Boolean(busy)}>解除受阻</mdui-button>}
-          {canParent(task)&&<mdui-button variant="text" icon="add" onClick={()=>openTask(undefined,task)} disabled={Boolean(busy)}>添加子任务</mdui-button>}
-          {['cancelled','superseded'].includes(task.status)?<mdui-button variant="text" onClick={()=>setTaskStatus(task,'ready')} disabled={Boolean(busy)}>重新启用任务</mdui-button>:task.status!=='completed'&&<mdui-button variant="text" onClick={()=>setTaskStatus(task,task.status==='paused'?'ready':'paused')} disabled={Boolean(busy)}>{task.status==='paused'?'恢复任务':'暂停任务'}</mdui-button>}
-          <mdui-button variant="text" icon="delete_outline" onClick={()=>setDeleteTarget({kind:'task',value:task,ownerId:dataOwner.current})} disabled={Boolean(busy)}>移入回收站</mdui-button>
+          <mdui-button variant="text" icon="edit" onClick={()=>openTask(task)} disabled={Boolean(busy)||readOnly}>编辑与移动</mdui-button>
+          {task.status==='blocked'&&<mdui-button variant="outlined" onClick={()=>unblockTask(task)} disabled={Boolean(busy)||readOnly}>解除受阻</mdui-button>}
+          {canParent(task)&&<mdui-button variant="text" icon="add" onClick={()=>openTask(undefined,task)} disabled={Boolean(busy)||readOnly}>添加子任务</mdui-button>}
+          {['cancelled','superseded'].includes(task.status)?<mdui-button variant="text" onClick={()=>setTaskStatus(task,'ready')} disabled={Boolean(busy)||readOnly}>重新启用任务</mdui-button>:task.status!=='completed'&&<mdui-button variant="text" onClick={()=>setTaskStatus(task,task.status==='paused'?'ready':'paused')} disabled={Boolean(busy)||readOnly}>{task.status==='paused'?'恢复任务':'暂停任务'}</mdui-button>}
+          <mdui-button variant="text" icon="delete_outline" onClick={()=>setDeleteTarget({kind:'task',value:task,ownerId:dataOwner.current})} disabled={Boolean(busy)||readOnly}>移入回收站</mdui-button>
         </div>
         {!['cancelled','superseded'].includes(task.status)&&<details className="task-result"><summary>{task.status==='completed'?'重新打开任务':'记录最终成果'}</summary>
           <p className="meta">今日推进与最终完成分别记录。这里用于{task.status==='completed'?'说明为什么需要继续做':'确认整个任务已有可验证成果'}。</p>
-          {outcomeChanged&&<><p role="status" className="meta">任务已更新，摘要已保留。请核对上方的任务和验收标准，再继续记录。</p><mdui-button variant="text" disabled={Boolean(busy)} onClick={()=>setOutcomeDrafts(current=>({...current,[outcomeKey(task)]:{...outcome,revision:task.revision}}))}>已核对最新任务</mdui-button></>}
-          <mdui-text-field disabled={Boolean(busy)} label={task.status==='completed'?'重新打开的原因':'最终成果摘要'} variant="outlined" rows={2} value={outcome.summary} onInput={event=>updateOutcome(task,fieldValue(event))}/>
-          <mdui-button variant="outlined" disabled={Boolean(busy)||!outcome.summary.trim()||outcomeChanged} onClick={()=>completeTask(task,task.status==='completed')}>{task.status==='completed'?'重新打开':'确认任务完成'}</mdui-button>
+          {outcomeChanged&&<><p role="status" className="meta">任务已更新，摘要已保留。请核对上方的任务和验收标准，再继续记录。</p><mdui-button variant="text" disabled={Boolean(busy)||readOnly} onClick={()=>setOutcomeDrafts(current=>({...current,[outcomeKey(task)]:{...outcome,revision:task.revision}}))}>已核对最新任务</mdui-button></>}
+          <mdui-text-field disabled={Boolean(busy)||readOnly} label={task.status==='completed'?'重新打开的原因':'最终成果摘要'} variant="outlined" rows={2} value={outcome.summary} onInput={event=>updateOutcome(task,fieldValue(event))}/>
+          <mdui-button variant="outlined" disabled={Boolean(busy)||readOnly||!outcome.summary.trim()||outcomeChanged} onClick={()=>completeTask(task,task.status==='completed')}>{task.status==='completed'?'重新打开':'确认任务完成'}</mdui-button>
         </details>}
       </div>}
       {children.length>0&&!collapsed.has(task.id)&&renderNodes(children)}
@@ -297,25 +323,27 @@ export function GoalManager({ timezone='Asia/Shanghai',userId,onNotice, refreshV
     return String(value||'未填写')
   }
   return <section className="goals-page">
-    <header className="page-head"><div className="title-block"><p className="eyebrow">长期方向 · 每日小步</p><h1>目标与任务</h1></div><div className="head-side"><mdui-button variant="text" icon="delete_outline" onClick={()=>setShowTrash(value=>!value)}>{showTrash?'返回目标':'回收站'}</mdui-button><mdui-button variant="outlined" icon="add" onClick={()=>openGoal()} disabled={Boolean(busy)}>新建目标</mdui-button></div></header>
+    <header className="page-head"><div className="title-block"><p className="eyebrow">长期方向 · 每日小步</p><h1>目标与任务</h1></div><div className="head-side"><mdui-button variant="text" icon="delete_outline" disabled={readOnly&&!showTrash} onClick={()=>setShowTrash(value=>!value)}>{showTrash?'返回目标':'回收站'}</mdui-button><mdui-button variant="outlined" icon="add" onClick={()=>openGoal()} disabled={Boolean(busy)||readOnly}>新建目标</mdui-button></div></header>
     {error&&<p role="alert" className="form-error">{error}</p>}
+    {readOnly&&<div className="goal-readonly-status" role="status"><p>{readOnlyReason} 草稿会保留。</p><mdui-button variant="text" disabled={loading||Boolean(busy)} onClick={()=>void load()}>重新更新</mdui-button></div>}
     {showTrash?<section className="recycle-bin"><h2>回收站</h2><p className="meta">恢复后保留原有进度；仍在回收站的上级目标或任务需要先恢复。</p>
-      {trashGoals.map(goal=><div className="recycle-row" key={goal.id}><div><b>{goal.title}</b><small>目标 · 包含所属任务</small></div><mdui-button variant="outlined" onClick={()=>restore('goal',goal)} disabled={Boolean(busy)}>恢复目标</mdui-button></div>)}
-      {trashTasks.filter(task=>!trashGoals.some(goal=>goal.id===task.goal_id)).map(task=><div className="recycle-row" key={task.id}><div><b>{task.title}</b><small>{TASK_TYPES[task.type]}</small></div><mdui-button variant="text" onClick={()=>restore('task',task)} disabled={Boolean(busy)}>恢复任务</mdui-button></div>)}
+      {trashGoals.map(goal=><div className="recycle-row" key={goal.id}><div><b>{goal.title}</b><small>目标 · 包含所属任务</small></div><mdui-button variant="outlined" onClick={()=>restore('goal',goal)} disabled={Boolean(busy)||readOnly}>恢复目标</mdui-button></div>)}
+      {trashTasks.filter(task=>!trashGoals.some(goal=>goal.id===task.goal_id)).map(task=><div className="recycle-row" key={task.id}><div><b>{task.title}</b><small>{TASK_TYPES[task.type]}</small></div><mdui-button variant="text" onClick={()=>restore('task',task)} disabled={Boolean(busy)||readOnly}>恢复任务</mdui-button></div>)}
       {!trashGoals.length&&!trashTasks.length&&<p className="empty">回收站是空的。</p>}
     </section>:<div className="goal-layout">
+      <label className="goal-selector-compact"><span>当前目标</span><select aria-label="选择目标" value={selectedId} disabled={Boolean(busy)||!goals.length} onChange={event=>selectGoal(event.target.value)}>{goals.map(goal=><option key={goal.id} value={goal.id}>{goal.title} · {GOAL_STATUS[goal.status]||goal.status}</option>)}</select></label>
       <nav className="goal-index" aria-label="长期目标">{goals.map(goal=><button key={goal.id} type="button" className={selectedId===goal.id?'active':''} disabled={Boolean(busy)} onClick={()=>selectGoal(goal.id)}><b>{goal.title}</b><small>{GOAL_STATUS[goal.status]||goal.status}</small></button>)}{!goals.length&&!loading&&<p className="empty">从一个重要目标开始。</p>}</nav>
       <div className="tree-panel">{selected?<>
-        <header className="tree-head"><div><p className="meta">{GOAL_STATUS[selected.status]||selected.status}{selected.target_date?` · ${selected.target_date}`:''}</p><h2>{selected.title}</h2><p>{selected.success_criteria}</p></div><mdui-button variant="text" icon="edit" onClick={()=>openGoal(selected)} disabled={Boolean(busy)}>编辑目标</mdui-button></header>
-        <div className="goal-toolbar"><div className="actions"><mdui-button variant={view==='tree'?'tonal':'text'} onClick={()=>setView('tree')}>任务树</mdui-button><mdui-button variant={view==='map'?'tonal':'text'} onClick={()=>setView('map')}>目标地图</mdui-button><mdui-button variant={view==='gantt'?'tonal':'text'} onClick={()=>setView('gantt')}>甘特图</mdui-button></div><mdui-button variant="outlined" icon="add" onClick={()=>openTask()} disabled={Boolean(busy)||!visibleTree}>添加任务</mdui-button></div>
-        {visibleTree?.proposals.map(proposal=><TreeProposal key={proposal.id} proposal={proposal} taskTitles={new Map([...tasks,...trashTasks].map(task=>[task.id,task.title]))} busy={Boolean(busy)} demo={modelAvailable===false} onDecide={apply=>decide(proposal,apply)}/>)}
-        {loading&&!visibleTree?<p className="empty">正在读取任务树…</p>:view==='gantt'?<GanttView key={`${userId}:${selected.id}`} goal={selected} nodes={visibleTree?.nodes??[]} timezone={timezone} busy={Boolean(busy)||!visibleTree} onEdit={task=>openTask(task)} onAdd={parent=>openTask(undefined,parent,parent?'task':'milestone')}/>:view==='map'?<GoalMapView goal={selected} onNotice={onNotice} onOpenTask={id=>{setSelectedTask(id);setView('tree')}}/>:visibleTree?.nodes.length?renderNodes(visibleTree.nodes):<div className="empty-state"><h3>找到一个能开始的小步骤</h3><p>在对话中描述目标，或手动添加任务。</p>{onOpenChat&&<mdui-button variant="filled" icon="forum" onClick={()=>{if(dataOwner.current&&dataOwner.current!==currentUserId.current){onNotice(SESSION_OWNER_CHANGED);return}onOpenChat(selected)}}>在对话中拆解</mdui-button>}</div>}
+        <header className="tree-head"><div><p className="meta">{GOAL_STATUS[selected.status]||selected.status}{selected.target_date?` · ${selected.target_date}`:''}</p><h2>{selected.title}</h2><details key={selected.id} className="goal-description"><summary>完成标准与背景</summary><p>{selected.success_criteria}</p>{selected.description&&<p>{selected.description}</p>}</details></div><mdui-button variant="text" icon="edit" onClick={()=>openGoal(selected)} disabled={Boolean(busy)||readOnly}>编辑目标</mdui-button></header>
+        <div className="goal-toolbar"><div className="actions"><mdui-button variant={view==='tree'?'tonal':'text'} onClick={()=>setView('tree')}>任务树</mdui-button><mdui-button variant={view==='map'?'tonal':'text'} disabled={readOnly} onClick={()=>setView('map')}>目标地图</mdui-button><mdui-button variant={view==='gantt'?'tonal':'text'} onClick={()=>setView('gantt')}>甘特图</mdui-button></div><mdui-button variant="outlined" icon="add" onClick={()=>openTask()} disabled={Boolean(busy)||readOnly||!visibleTree}>添加任务</mdui-button></div>
+        {visibleTree?.proposals.map(proposal=><TreeProposal key={proposal.id} proposal={proposal} taskTitles={new Map([...tasks,...trashTasks].map(task=>[task.id,task.title]))} busy={Boolean(busy)||readOnly} demo={modelAvailable===false} onDecide={apply=>decide(proposal,apply)}/>)}
+        {loading&&!visibleTree?<p className="empty">正在读取任务树…</p>:view==='gantt'?<GanttView key={`${userId}:${selected.id}`} goal={selected} nodes={visibleTree?.nodes??[]} timezone={timezone} busy={Boolean(busy)||readOnly||!visibleTree} onEdit={task=>openTask(task)} onAdd={parent=>openTask(undefined,parent,parent?'task':'milestone')}/>:view==='map'&&!readOnly?<GoalMapView goal={selected} onNotice={onNotice} onOpenTask={id=>{setSelectedTask(id);setView('tree')}}/>:visibleTree?.nodes.length?renderNodes(visibleTree.nodes):<div className="empty-state"><h3>找到一个能开始的小步骤</h3><p>在对话中描述目标，或手动添加任务。</p>{onOpenChat&&<mdui-button variant="filled" icon="forum" onClick={()=>{if(dataOwner.current&&dataOwner.current!==currentUserId.current){onNotice(SESSION_OWNER_CHANGED);return}onOpenChat(selected)}}>在对话中拆解</mdui-button>}</div>}
         <details className="workspace-disclosure"><summary>更多目标操作</summary><div className="actions">
-          <mdui-button variant="text" disabled={Boolean(busy)} onClick={()=>setGoalStatus(selected.status==='active'?'paused':'active')}>{selected.status==='active'?'暂停目标':'恢复目标'}</mdui-button>
-          {selected.status==='active'&&<mdui-button variant="text" disabled={Boolean(busy)} onClick={()=>setGoalStatus('completed')}>标记目标完成</mdui-button>}
-          {['active','paused','completed','abandoned'].includes(selected.status)&&<mdui-button variant="text" disabled={Boolean(busy)} onClick={()=>setGoalStatus('archived')}>归档目标</mdui-button>}
-          <mdui-button variant="text" icon="delete_outline" disabled={Boolean(busy)} onClick={()=>setDeleteTarget({kind:'goal',value:selected,ownerId:dataOwner.current})}>移入回收站</mdui-button>
-        </div><div className="form-stack"><p className="meta">也可以直接对助手说怎样调整任务。</p>{modelAvailable===false&&<p className="model-notice">尚未连接真实模型，下面仅提供演示示例，不会理解具体研究内容。</p>}{modelAvailable===null&&<p className="meta">暂时无法确认模型连接，请稍后重试。</p>}<mdui-text-field disabled={Boolean(busy)} label="任务树调整建议" variant="outlined" value={revisionInstruction} onInput={event=>setRevisionInstruction(fieldValue(event))}/><div className="actions"><mdui-button variant="outlined" onClick={()=>askAgent(true)} disabled={Boolean(busy)||!revisionInstruction.trim()||modelAvailable===null}>{modelAvailable===false?'查看演示调整提案':'生成调整提案'}</mdui-button><mdui-button variant="text" onClick={()=>askAgent(false)} disabled={Boolean(busy)||modelAvailable===null}>{modelAvailable===false?'查看演示拆解提案':'生成拆解提案'}</mdui-button></div></div></details>
+          <mdui-button variant="text" disabled={Boolean(busy)||readOnly} onClick={()=>setGoalStatus(selected.status==='active'?'paused':'active')}>{selected.status==='active'?'暂停目标':'恢复目标'}</mdui-button>
+          {selected.status==='active'&&<mdui-button variant="text" disabled={Boolean(busy)||readOnly} onClick={()=>setGoalStatus('completed')}>标记目标完成</mdui-button>}
+          {['active','paused','completed','abandoned'].includes(selected.status)&&<mdui-button variant="text" disabled={Boolean(busy)||readOnly} onClick={()=>setGoalStatus('archived')}>归档目标</mdui-button>}
+          <mdui-button variant="text" icon="delete_outline" disabled={Boolean(busy)||readOnly} onClick={()=>setDeleteTarget({kind:'goal',value:selected,ownerId:dataOwner.current})}>移入回收站</mdui-button>
+        </div><div className="form-stack"><p className="meta">也可以直接对助手说怎样调整任务。</p>{modelAvailable===false&&<p className="model-notice">尚未连接真实模型，下面仅提供演示示例，不会理解具体研究内容。</p>}{modelAvailable===null&&<p className="meta">暂时无法确认模型连接，请稍后重试。</p>}<mdui-text-field disabled={Boolean(busy)||readOnly} label="任务树调整建议" variant="outlined" value={revisionInstruction} onInput={event=>setRevisionInstruction(fieldValue(event))}/><div className="actions"><mdui-button variant="outlined" onClick={()=>askAgent(true)} disabled={Boolean(busy)||readOnly||!revisionInstruction.trim()||modelAvailable===null}>{modelAvailable===false?'查看演示调整提案':'生成调整提案'}</mdui-button><mdui-button variant="text" onClick={()=>askAgent(false)} disabled={Boolean(busy)||readOnly||modelAvailable===null}>{modelAvailable===false?'查看演示拆解提案':'生成拆解提案'}</mdui-button></div></div></details>
       </>:!loading&&<div className="empty-state"><h2>让研究有一个清晰的方向</h2><p>先告诉助手最想推进的研究目标，任务树会从这里生长。</p>{onOpenChat&&<mdui-button variant="filled" icon="forum" onClick={()=>onOpenChat()}>和助手聊聊</mdui-button>}</div>}</div>
     </div>}
 
@@ -324,38 +352,38 @@ export function GoalManager({ timezone='Asia/Shanghai',userId,onNotice, refreshV
         <p>内容已在另一处更新，你的草稿仍在。请核对最新修改，再选择保留自己的改动或载入最新内容。</p>
         <dl>{Object.entries(latestEditorFields).filter(([key,value])=>!equalDraftValue(value,originalEditorFields[key as keyof typeof originalEditorFields],key)).map(([key,value])=><div key={key}><dt>{labels[key]}</dt><dd>{editorFieldText(key,value)}</dd></div>)}</dl>
         <p className="meta">{latestEditTask?`任务当前状态：${TASK_STATUS[latestEditTask.status]||latestEditTask.status}`:latestEditGoal?`目标当前状态：${GOAL_STATUS[latestEditGoal.status]||latestEditGoal.status}`:''}。保留自己的改动时，其余内容采用最新版本。</p>
-        <div className="actions"><mdui-button variant="outlined" disabled={Boolean(busy)||editorOwnerChanged} onClick={()=>reviewLatestEditor(true)}>保留我的修改</mdui-button><mdui-button variant="text" disabled={Boolean(busy)||editorOwnerChanged} onClick={()=>reviewLatestEditor(false)}>载入最新内容</mdui-button></div>
+        <div className="actions"><mdui-button variant="outlined" disabled={Boolean(busy)||readOnly||editorOwnerChanged} onClick={()=>reviewLatestEditor(true)}>保留我的修改</mdui-button><mdui-button variant="text" disabled={Boolean(busy)||readOnly||editorOwnerChanged} onClick={()=>reviewLatestEditor(false)}>载入最新内容</mdui-button></div>
       </section>}{editor.kind==='goal'?<>
-        <mdui-text-field disabled={Boolean(busy)} label="目标标题" variant="outlined" value={goalDraft.title} onInput={event=>setGoalDraft(d=>({...d,title:fieldValue(event)}))}/>
-        <mdui-text-field disabled={Boolean(busy)} label="目标完成标准" variant="outlined" rows={2} value={goalDraft.success_criteria} onInput={event=>setGoalDraft(d=>({...d,success_criteria:fieldValue(event)}))}/>
-        <mdui-text-field disabled={Boolean(busy)} label="目标日期" type="date" variant="outlined" value={goalDraft.target_date} onInput={event=>setGoalDraft(d=>({...d,target_date:fieldValue(event)}))}/>
-        <mdui-text-field disabled={Boolean(busy)} label="背景与约束" variant="outlined" rows={2} value={goalDraft.description} onInput={event=>setGoalDraft(d=>({...d,description:fieldValue(event)}))}/>
+        <mdui-text-field disabled={Boolean(busy)||readOnly} label="目标标题" variant="outlined" value={goalDraft.title} onInput={event=>setGoalDraft(d=>({...d,title:fieldValue(event)}))}/>
+        <mdui-text-field disabled={Boolean(busy)||readOnly} label="目标完成标准" variant="outlined" rows={2} value={goalDraft.success_criteria} onInput={event=>setGoalDraft(d=>({...d,success_criteria:fieldValue(event)}))}/>
+        <mdui-text-field disabled={Boolean(busy)||readOnly} label="目标日期" type="date" variant="outlined" value={goalDraft.target_date} onInput={event=>setGoalDraft(d=>({...d,target_date:fieldValue(event)}))}/>
+        <mdui-text-field disabled={Boolean(busy)||readOnly} label="背景与约束" variant="outlined" rows={2} value={goalDraft.description} onInput={event=>setGoalDraft(d=>({...d,description:fieldValue(event)}))}/>
       </>:<>
         <p className="meta">所属目标：{editor.goalTitle}</p>
         {editorGoalMissing&&<p role="alert" className="form-error">原目标已移入回收站或暂不可用，草稿已保留；恢复原目标后再保存。</p>}
-        <mdui-text-field disabled={Boolean(busy)} label="任务标题" variant="outlined" value={taskDraft.title} onInput={event=>setTaskDraft(d=>({...d,title:fieldValue(event)}))}/>
-        <div className="form-row"><mdui-select disabled={Boolean(busy)} label="类型" variant="outlined" value={taskDraft.type} onChange={event=>setTaskDraft(d=>({...d,type:fieldValue(event)}))}>{Object.entries(TASK_TYPES).map(([value,label])=><mdui-menu-item key={value} value={value}>{label}</mdui-menu-item>)}</mdui-select>
-        <mdui-select disabled={Boolean(busy)} label="上级任务" variant="outlined" value={taskDraft.parent_id} onChange={event=>setTaskDraft(d=>({...d,parent_id:fieldValue(event)}))}><mdui-menu-item value="">直接属于目标</mdui-menu-item>{editorTasks.filter(task=>!excludedParents.has(task.id)&&(canParent(task)||task.id===editor.task?.parent_id)).map(task=><mdui-menu-item key={task.id} value={task.id} disabled={!canParent(task)}>{task.title}{!canParent(task)?` · ${TASK_STATUS[task.status]}（当前上级）`:''}</mdui-menu-item>)}</mdui-select></div>
+        <mdui-text-field disabled={Boolean(busy)||readOnly} label="任务标题" variant="outlined" value={taskDraft.title} onInput={event=>setTaskDraft(d=>({...d,title:fieldValue(event)}))}/>
+        <div className="form-row"><mdui-select disabled={Boolean(busy)||readOnly} label="类型" variant="outlined" value={taskDraft.type} onChange={event=>setTaskDraft(d=>({...d,type:fieldValue(event)}))}>{Object.entries(TASK_TYPES).map(([value,label])=><mdui-menu-item key={value} value={value}>{label}</mdui-menu-item>)}</mdui-select>
+        <mdui-select disabled={Boolean(busy)||readOnly} label="上级任务" variant="outlined" value={taskDraft.parent_id} onChange={event=>setTaskDraft(d=>({...d,parent_id:fieldValue(event)}))}><mdui-menu-item value="">直接属于目标</mdui-menu-item>{editorTasks.filter(task=>!excludedParents.has(task.id)&&(canParent(task)||task.id===editor.task?.parent_id)).map(task=><mdui-menu-item key={task.id} value={task.id} disabled={!canParent(task)}>{task.title}{!canParent(task)?` · ${TASK_STATUS[task.status]}（当前上级）`:''}</mdui-menu-item>)}</mdui-select></div>
         <fieldset className="gantt-date-fields"><legend>{taskDraft.type==='milestone'?'阶段计划周期':'计划日期'}</legend>
           {parentRow?.range&&<p className="meta">上级「{parentRow.task.title}」：{parentRow.range.start} → {parentRow.range.end}{parentRow.source==='derived'?'（自动汇总）':''}，可作为子任务排期参考。</p>}
-          <div className="form-row"><mdui-text-field disabled={Boolean(busy)} label="计划开始日期" type="date" variant="outlined" value={taskDraft.planned_start} onInput={event=>setTaskDraft(d=>({...d,planned_start:fieldValue(event)}))}/><mdui-text-field disabled={Boolean(busy)} label="计划结束日期" type="date" variant="outlined" value={taskDraft.planned_end} onInput={event=>setTaskDraft(d=>({...d,planned_end:fieldValue(event)}))}/></div>
+          <div className="form-row"><mdui-text-field disabled={Boolean(busy)||readOnly} label="计划开始日期" type="date" variant="outlined" value={taskDraft.planned_start} onInput={event=>setTaskDraft(d=>({...d,planned_start:fieldValue(event)}))}/><mdui-text-field disabled={Boolean(busy)||readOnly} label="计划结束日期" type="date" variant="outlined" value={taskDraft.planned_end} onInput={event=>setTaskDraft(d=>({...d,planned_end:fieldValue(event)}))}/></div>
           {!taskDraft.planned_start&&!taskDraft.planned_end&&editorRow?.hasChildren&&<p className="meta">留空时按已排期子任务自动汇总{editorRow.source==='derived'&&editorRow.range?`：${editorRow.range.start} → ${editorRow.range.end}`:'，没有可用日期时显示未排期'}。</p>}
-          {(taskDraft.planned_start||taskDraft.planned_end)&&<mdui-button variant="text" disabled={Boolean(busy)} onClick={()=>setTaskDraft(d=>({...d,planned_start:'',planned_end:''}))}>清空计划日期</mdui-button>}
+          {(taskDraft.planned_start||taskDraft.planned_end)&&<mdui-button variant="text" disabled={Boolean(busy)||readOnly} onClick={()=>setTaskDraft(d=>({...d,planned_start:'',planned_end:''}))}>清空计划日期</mdui-button>}
           {dateError&&<p role="alert" className="form-error">{dateError}</p>}
           <p className="meta">结束日期包含当天。计划日期用于长期规划，每日安排按现有规则生成。</p>
         </fieldset>
-        <mdui-select disabled={Boolean(busy)} label="前置任务（可多选）" variant="outlined" multiple value={taskDraft.depends_on} onChange={event=>setTaskDraft(d=>({...d,depends_on:dependencyValues(event)}))}>{editorTasks.filter(task=>task.id!==editor.task?.id&&(!['cancelled','superseded'].includes(task.status)||taskDraft.depends_on.includes(task.id))).map(task=><mdui-menu-item key={task.id} value={task.id}>{task.title} · {TASK_STATUS[task.status]||task.status}</mdui-menu-item>)}{taskDraft.depends_on.filter(id=>!editorTasks.some(task=>task.id===id)).map(id=><mdui-menu-item key={id} value={id}>前置任务不可用（保留原关系）</mdui-menu-item>)}</mdui-select>
+        <mdui-select disabled={Boolean(busy)||readOnly} label="前置任务（可多选）" variant="outlined" multiple value={taskDraft.depends_on} onChange={event=>setTaskDraft(d=>({...d,depends_on:dependencyValues(event)}))}>{editorTasks.filter(task=>task.id!==editor.task?.id&&(!['cancelled','superseded'].includes(task.status)||taskDraft.depends_on.includes(task.id))).map(task=><mdui-menu-item key={task.id} value={task.id}>{task.title} · {TASK_STATUS[task.status]||task.status}</mdui-menu-item>)}{taskDraft.depends_on.filter(id=>!editorTasks.some(task=>task.id===id)).map(id=><mdui-menu-item key={id} value={id}>前置任务不可用（保留原关系）</mdui-menu-item>)}</mdui-select>
         <p className="meta">仅在必须取得前置成果才能开始时设置依赖。通常的工作顺序用任务排列表示，准备工作可以并行。</p>
-        <mdui-text-field disabled={Boolean(busy)} label="任务完成标准" variant="outlined" rows={2} value={taskDraft.success_criteria} onInput={event=>setTaskDraft(d=>({...d,success_criteria:fieldValue(event)}))}/>
-        <mdui-text-field disabled={Boolean(busy)} label="最小行动" variant="outlined" rows={2} value={taskDraft.minimum_action} onInput={event=>setTaskDraft(d=>({...d,minimum_action:fieldValue(event)}))}/>
-        <details><summary>总工作量、优先级与说明</summary><div className="form-stack"><div className="form-row"><mdui-text-field disabled={Boolean(busy)} label="预计总用时（分钟）" type="number" min={1} max={1440} value={taskDraft.estimate_minutes} onInput={event=>setTaskDraft(d=>({...d,estimate_minutes:fieldValue(event)}))}/><mdui-text-field disabled={Boolean(busy)} label="优先级（0–100）" type="number" min={0} max={100} value={taskDraft.priority} onInput={event=>setTaskDraft(d=>({...d,priority:fieldValue(event)}))}/></div><p className="meta">这里记录整个任务的预计总工作量；每日专注预算由今日安排单独记录。</p><mdui-text-field disabled={Boolean(busy)} label="任务说明" rows={2} value={taskDraft.description} onInput={event=>setTaskDraft(d=>({...d,description:fieldValue(event)}))}/></div></details>
+        <mdui-text-field disabled={Boolean(busy)||readOnly} label="任务完成标准" variant="outlined" rows={2} value={taskDraft.success_criteria} onInput={event=>setTaskDraft(d=>({...d,success_criteria:fieldValue(event)}))}/>
+        <mdui-text-field disabled={Boolean(busy)||readOnly} label="最小行动" variant="outlined" rows={2} value={taskDraft.minimum_action} onInput={event=>setTaskDraft(d=>({...d,minimum_action:fieldValue(event)}))}/>
+        <details><summary>总工作量、优先级与说明</summary><div className="form-stack"><div className="form-row"><mdui-text-field disabled={Boolean(busy)||readOnly} label="预计总用时（分钟）" type="number" min={1} max={1440} value={taskDraft.estimate_minutes} onInput={event=>setTaskDraft(d=>({...d,estimate_minutes:fieldValue(event)}))}/><mdui-text-field disabled={Boolean(busy)||readOnly} label="优先级（0–100）" type="number" min={0} max={100} value={taskDraft.priority} onInput={event=>setTaskDraft(d=>({...d,priority:fieldValue(event)}))}/></div><p className="meta">这里记录整个任务的预计总工作量；每日专注预算由今日安排单独记录。</p><mdui-text-field disabled={Boolean(busy)||readOnly} label="任务说明" rows={2} value={taskDraft.description} onInput={event=>setTaskDraft(d=>({...d,description:fieldValue(event)}))}/></div></details>
       </>}{editor.kind==='task'&&taskNumberError&&<p role="alert" className="form-error">{taskNumberError}</p>}</div>
       <mdui-button slot="action" variant="text" onClick={()=>setEditor(null)} disabled={Boolean(busy)}>取消</mdui-button>
-      <mdui-button slot="action" variant="filled" loading={busy==='editor'} disabled={Boolean(busy)||editorOwnerChanged||(editor.kind==='goal'?(!goalDraft.title.trim()||!goalDraft.success_criteria.trim()):(editorGoalMissing||!taskDraft.title.trim()||!taskDraft.success_criteria.trim()||!taskDraft.minimum_action.trim()||!validEstimate||!validPriority||Boolean(dateError)))} onClick={saveEditor}>保存</mdui-button>
+      <mdui-button slot="action" variant="filled" loading={busy==='editor'} disabled={Boolean(busy)||readOnly||editorOwnerChanged||(editor.kind==='goal'?(!goalDraft.title.trim()||!goalDraft.success_criteria.trim()):(editorGoalMissing||!taskDraft.title.trim()||!taskDraft.success_criteria.trim()||!taskDraft.minimum_action.trim()||!validEstimate||!validPriority||Boolean(dateError)))} onClick={saveEditor}>保存</mdui-button>
     </mdui-dialog>}
     {deleteTarget&&<mdui-dialog ref={deleteRef} open close-on-esc headline="移入回收站" role="dialog" aria-label="删除影响预览">
       <div className="form-stack"><p>「{deleteTarget.value.title}」{deleteTarget.kind==='goal'?`及其 ${affected.length} 项任务`:`及其 ${Math.max(0,affected.length-1)} 项子任务`}将移入回收站。</p><p className="meta">未完成的今日安排会移出，历史推进和专注记录会保留。恢复后会重新安排未来任务。</p>{affected.length>1&&<ul className="delete-preview">{affected.slice(0,8).map(task=><li key={task.id}>{task.title}</li>)}{affected.length>8&&<li>还有 {affected.length-8} 项</li>}</ul>}{error&&<p role="alert" className="form-error">{error}</p>}</div>
-      <mdui-button slot="action" variant="text" disabled={Boolean(busy)} onClick={()=>setDeleteTarget(null)}>取消</mdui-button><mdui-button slot="action" variant="filled" disabled={Boolean(busy)} loading={busy==='delete'} onClick={remove}>确认移入回收站</mdui-button>
+      <mdui-button slot="action" variant="text" disabled={Boolean(busy)} onClick={()=>setDeleteTarget(null)}>取消</mdui-button><mdui-button slot="action" variant="filled" disabled={Boolean(busy)||readOnly} loading={busy==='delete'} onClick={remove}>确认移入回收站</mdui-button>
     </mdui-dialog>}
   </section>
 }

@@ -29,6 +29,19 @@ type integrationContentBody struct {
 }
 
 func (s integrationContentRoutes) RegisterRoutes(api huma.API) {
+	type externalOutcomesInput struct {
+		System string `query:"system" required:"true" enum:"fastread,fastwrite,fastnews,fastppt,fastlab"`
+		Week   string `query:"week" maxLength:"16" description:"ISO week, or all for records including those without a source date"`
+		Limit  int    `query:"limit" default:"5" minimum:"1" maximum:"10"`
+		Offset int    `query:"offset" default:"0" minimum:"0" maximum:"1000000"`
+	}
+	register(api, "get-external-review-outcomes", http.MethodGet, "/reviews/external", "Read saved outcomes from the current user's connected product", userSecurity(), func(ctx context.Context, input *externalOutcomesInput) (*itemResponse[integrationclient.OutcomePage], error) {
+		page, err := s.app.ExternalOutcomes(ctx, principal(ctx).UserID, input.System, input.Week, input.Limit, input.Offset)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &itemResponse[integrationclient.OutcomePage]{Body: page}, nil
+	})
 	type taskMaterialsInput struct {
 		TaskID string `path:"task_id" minLength:"1" maxLength:"100"`
 		Limit  int    `query:"limit" default:"20" minimum:"1" maximum:"100"`

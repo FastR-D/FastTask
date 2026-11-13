@@ -99,6 +99,20 @@ func (s lensRoutes) RegisterRoutes(api huma.API) {
 		return &itemResponse[application.WeeklyReview]{Body: *review}, nil
 	})
 
+	type activityInput struct {
+		Week     string `query:"week"`
+		Timezone string `query:"timezone"`
+		Limit    int    `query:"limit" default:"100" minimum:"1" maximum:"200"`
+		Offset   int    `query:"offset" default:"0" minimum:"0" maximum:"1000000"`
+	}
+	register(api, "get-review-activity", http.MethodGet, "/reviews/activity", "Read saved progress and outcome records", userSecurity(), func(ctx context.Context, input *activityInput) (*itemResponse[application.ReviewActivity], error) {
+		activity, err := s.app.ReviewActivity(ctx, principal(ctx).UserID, input.Week, input.Timezone, input.Limit, input.Offset)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &itemResponse[application.ReviewActivity]{Body: *activity}, nil
+	})
+
 	type mapInput struct {
 		GoalID string `path:"goal_id"`
 		Lens   string `query:"lens"`
