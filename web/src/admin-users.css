@@ -1,0 +1,36 @@
+.admin-users{display:grid;gap:16px;min-width:0;color:var(--fastui-text);font:var(--fastui-font-weight) 13px/1.5 var(--fastui-font)}
+.users-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.users-heading h1{margin:0;font-size:22px;line-height:1.5;font-weight:600;letter-spacing:-.02em}
+.users-heading p,.users-dialog header p{margin:4px 0 0;color:var(--fastui-secondary);font-size:13px}
+.admin-users mdui-icon{font-size:16px;flex:none}
+.users-panel{overflow:hidden}
+.users-toolbar{gap:8px}
+.users-search{position:relative;flex:1 1 220px;max-width:360px;min-width:0}
+.users-search>mdui-icon{position:absolute;left:8px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--fastui-muted)}
+.users-search input{width:100%;padding-left:30px}
+.users-refresh{margin-left:auto}
+.users-table{width:100%;min-width:660px;font-size:13px}
+.users-table :is(th,td){padding:12px 16px;vertical-align:middle}
+.users-table th{font-size:12px;color:var(--fastui-secondary);white-space:nowrap}
+.users-table tbody tr:hover{background:var(--fastui-hover)}
+.users-table tbody tr:last-child td{border-bottom:0}
+.users-table td:not(:first-child){white-space:nowrap}
+.users-identity{display:flex;align-items:center;gap:10px;min-width:180px;max-width:360px}
+.users-identity>div{min-width:0}
+.users-avatar{display:grid;place-items:center;flex:0 0 32px;height:32px;border-radius:var(--fastui-radius-control);background:var(--fastui-selected);color:var(--fastui-selected-text);font-weight:600}
+.users-name{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.users-name strong{font-weight:600;overflow-wrap:anywhere}
+.users-identity small{display:block;margin-top:2px;font-size:12px;color:var(--fastui-secondary);overflow-wrap:anywhere}
+.users-current{font-size:11px;color:var(--fastui-muted);white-space:nowrap}
+.users-row-actions{display:flex;align-items:center;gap:4px}
+.users-delete{color:var(--fastui-danger)}
+.users-placeholder{display:flex;justify-content:center;padding:64px 16px}
+.users-status{justify-content:space-between;gap:8px;min-height:30px;font-size:12px}
+.admin-users .fastui-table-scroll:focus-visible{outline:2px solid var(--fastui-focus);outline-offset:-2px}
+.users-dialog h2{margin:0;font-size:17px;font-weight:600}
+.users-dialog header p,.users-confirmation{overflow-wrap:anywhere}
+.users-form-fields{display:grid;gap:16px;min-width:0;margin:0;padding:0;border:0}
+.users-form-columns{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.users-help{margin:0;font-size:12px;color:var(--fastui-secondary)}
+.users-confirmation{margin:0}
+@media(max-width:600px){.users-heading{align-items:flex-start}.users-heading h1{font-size:20px}.users-heading p{max-width:220px}.users-heading>.fastui-button{flex:none}.users-search{max-width:none;flex-basis:100%}.users-toolbar>.fastui-select{flex:1}.users-form-columns{grid-template-columns:1fr}.users-table :is(th,td){padding:12px}.users-status{align-items:flex-start}}

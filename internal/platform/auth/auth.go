@@ -232,7 +232,17 @@ func (s *Service) refreshGraceSuccessor(tx *gorm.DB, session persistence.Session
 }
 
 func (s *Service) Logout(ctx context.Context, sessionID string) error {
-	return s.store.DB.WithContext(ctx).Model(&persistence.Session{}).Where("id = ?", sessionID).Updates(map[string]any{"status": "revoked", "updated_at": persistence.Now()}).Error
+	return s.store.Transaction(ctx, func(tx *gorm.DB) error {
+		// An already-admitted logout may carry a SID rotated by another request.
+		// Resolve its stable family inside the same write transaction as revocation.
+		var session persistence.Session
+		if err := tx.First(&session, "id = ?", sessionID).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.Session{}).
+			Where("family_id = ? AND user_id = ?", session.FamilyID, session.UserID).
+			Updates(map[string]any{"status": "revoked", "updated_at": persistence.Now()}).Error
+	})
 }
 
 func (s *Service) Authenticate(token string) (Principal, error) {

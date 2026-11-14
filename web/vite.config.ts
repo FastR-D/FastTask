@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from 'node:zlib'
 import { build, defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import UnoCSS from 'unocss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
 // The libfx runtime the browser host compiles (doc/harness.md §9.1). It is resolved from the installed
@@ -68,6 +69,7 @@ function selfHostFxCore(): Plugin {
 
 export default defineConfig({
   plugins: [
+    UnoCSS(),
     react(),
     themeBoot(),
     selfHostFxCore(),
