@@ -1,8 +1,7 @@
 {
   "schema_version": 1,
-  "status": "implemented_evaluated_with_documented_manual_qa_gaps",
-  "description": "科研助手行为评测场景。runner 支持底层回归和真实 DeepSeek + 隔离 SQLite + libfx Node/WASM 行为试验；实际结果见 verification-report.md。",
-  "baseline_commit": "90d0af74de1077c7270fa1299ed9fecbcc8eb435",
+  "status": "evaluation-cases",
+  "description": "科研助手行为评测场景。runner 支持底层回归和真实模型、隔离 SQLite、libfx Node/WASM 行为试验。",
   "trial_policy": {
     "real_model_trials_per_case": 3,
     "isolated_database_per_trial": true,

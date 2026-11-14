@@ -34,7 +34,7 @@ node evals/agent/rescore.mjs /tmp/fasttask-agent-new-run
 
 只接受 rationale 以 `review unavailable:` 开头的记录；拒绝重抽有效低分。旧不可用评审保留。修复产品或夹具后的定向复测应单独保留来源，不能覆盖旧失败并声称原运行通过。
 
-输出默认 `/tmp/fasttask-agent-eval`，目录 0700、证据文件 0600。原始证据含隔离业务数据、供应商 reasoning，不提交 Git；不保存密钥或请求授权头。Git 中仅保留 [脱敏结果与证据摘要](../../docs/agent-harness/evaluation-results.json)。本次最终每例三次共 60 项验收结果来自完整复跑与修复后定向复测，来源及覆盖边界见 [验收记录](../../docs/agent-harness/verification-report.md)。
+输出默认 `/tmp/fasttask-agent-eval`，目录 0700、证据文件 0600。原始证据含隔离业务数据与供应商 reasoning，不提交 Git；不保存密钥或请求授权头。Git 中保留 [脱敏结果与证据摘要](../../docs/agent-harness/evaluation-results.json)。
 
 ## 浏览器与人工 QA 边界
 

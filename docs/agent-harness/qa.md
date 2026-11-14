@@ -1,6 +1,6 @@
 # Agent / Harness 人工 QA 与发布验收
 
-状态：人工完整联调仍待执行；已执行的服务回归与真实 host 合约见 [验收报告](verification-report.md)。自动化测试不能替代下文所有 UI 步骤。
+本页定义人工 QA 和发布验收步骤。自动化测试与人工 UI 验收分别覆盖不同层次。
 
 关联：[实施设计](README.md)、[自动化测试规范](automated-tests.md)、[行为评测数据](eval-cases.json)。
 
