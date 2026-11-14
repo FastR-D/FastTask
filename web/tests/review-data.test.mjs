@@ -29,7 +29,7 @@ test('weekly reports accept only FastTask progress even when an older API includ
 });
 test('partial task loads and local warnings remain visible in exported report',()=>{
   const report=reportFromRecords(activity([],{has_more:true,complete:false,warnings:['扫描范围有限']}));
-  assert.match(report,/尚未全部载入/);assert.match(report,/扫描范围有限/);
+  assert.match(report,/部分任务记录尚未载入/);assert.match(report,/扫描范围有限/);
 });
 test('repeated reads replace a source record and preserve different source identities',()=>{
   const merged=mergeReviewEntries([event('same'),event('other')],[event('same',{summary:'新内容'}),event('same',{source:'fastread'})]);

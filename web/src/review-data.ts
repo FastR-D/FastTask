@@ -42,10 +42,10 @@ export function reportFromRecords(activity: ReviewActivity) {
   lines.push(...summarize(local.filter(item => entryGroup(item)==='step'), '暂无已记录的阶段进展。'))
   lines.push('', '## 实际投入', `- FastTask 已记录有效专注：${activity.focus_minutes} 分钟。`, '', '## 待解决问题', '- 待补充：记录当前实际遇到的阻碍。', '', '## 下周已有安排')
   lines.push(...(activity.upcoming.length ? activity.upcoming.map(item => `- ${item.date} · ${item.title}（计划 ${item.target_minutes} 分钟）`) : ['- 暂无已保存的下周安排。']))
-  lines.push('', '## 记录范围')
-  if (activity.has_more || activity.complete===false) lines.push('- FastTask 记录尚未全部载入，本稿只覆盖当前已载入内容。')
-  for (const warning of new Set(activity.warnings)) lines.push(`- ${warning}`)
-  lines.push('- 根据 FastTask 已保存的任务成果、阶段进展、专注记录及下周安排整理。')
-  lines.push('- 已撤销或重新打开的完成记录不计入成果；未记录的进展未作推测。')
+  if (activity.has_more || activity.complete===false || activity.warnings.length) {
+    lines.push('', '## 数据提示')
+    if (activity.has_more || activity.complete===false) lines.push('- 部分任务记录尚未载入，请载入后重新生成。')
+    for (const warning of new Set(activity.warnings)) lines.push(`- ${warning}`)
+  }
   return lines.join('\n')
 }
