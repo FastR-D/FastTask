@@ -336,7 +336,8 @@ func (s meRoutes) RegisterRoutes(api huma.API) {
 		if !matchETag(input.IfMatch, "user", user.ID, user.Revision) {
 			return nil, mapError(application.ErrRevision)
 		}
-		updates := map[string]any{"revision": user.Revision + 1, "updated_at": persistence.Now()}
+		expected := user.Revision
+		updates := map[string]any{"revision": expected + 1, "updated_at": persistence.Now()}
 		if input.Body.DisplayName != nil {
 			updates["display_name"] = *input.Body.DisplayName
 		}
@@ -353,10 +354,18 @@ func (s meRoutes) RegisterRoutes(api huma.API) {
 		if input.Body.Locale != nil {
 			updates["locale"] = *input.Body.Locale
 		}
-		if err := s.app.Store.DB.WithContext(ctx).Model(&user).Updates(updates).Error; err != nil {
+		if err := s.app.Store.Transaction(ctx, func(tx *gorm.DB) error {
+			result := tx.Model(&persistence.User{}).Where("id = ? AND revision = ?", p.UserID, expected).Updates(updates)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return application.ErrRevision
+			}
+			return tx.First(&user, "id = ?", user.ID).Error
+		}); err != nil {
 			return nil, mapError(err)
 		}
-		s.app.Store.DB.First(&user, "id = ?", user.ID)
 		return &resourceResponse[persistence.User]{ETag: application.StrongETag("user", user.ID, user.Revision), Body: user}, nil
 	})
 }
