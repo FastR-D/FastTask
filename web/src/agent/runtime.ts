@@ -4,7 +4,7 @@ import { asAsyncIterableStream, type ReadonlyJSONValue } from 'assistant-stream/
 import { useEffect, useRef } from 'react'
 import { ensureFreshAccessToken, offlineSessionAvailable, readOfflineUser, refreshAccessTokenAfterUnauthorized } from '../api'
 import { stopWithFeedback } from '../harness/cancellation'
-import { activeRunId, cancelActiveRun, driveRun, selectMode } from '../harness'
+import { isDrivingRun, cancelActiveRun, driveRun, selectMode } from '../harness'
 import { forcedModeOf, readModePreference } from './modePreference'
 import { convertState } from './converter'
 import type { ApprovalDecision, FasttaskState, ServerAgentState } from './state'
@@ -16,7 +16,7 @@ import { assertAccessOwner, SESSION_OWNER_CHANGED } from '../session-owner'
 export function agentErrorText(error: unknown): string {
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '请稍后重试'
   if (message.includes('HARNESS_UNAVAILABLE')) return '当前浏览器无法直接运行研究助手，备用服务也未连接。请更新浏览器或联系管理员启用备用服务。'
-  if (/\bRUN_ACTIVE\b/.test(message) || message.includes('an agent run is already active')) return '当前账号还有对话正在生成，请回到正在生成的对话完成或停止后重试。'
+  if (/\bRUN_ACTIVE\b/.test(message) || message.includes('an agent run is already active')) return '这条对话还有一轮正在生成或等待确认。处理或停止本轮后，可在这里继续发送。'
   if (message.includes('thread not found')) return '这段对话已不可用，请重新选择会话。'
   if (message.includes('run is not awaiting approval')) return '这次对话已停止等待确认。请重新载入对话核对提案状态，再继续研究。'
   if (message.includes('approval receipt already resolved')) return '这个提案已经处理过。请查看最新结果后继续研究。'
@@ -67,7 +67,7 @@ export async function sendProposalDecision(
 ): Promise<void> {
   const headers:Record<string,string>={ 'Content-Type': 'application/json', ...await authHeaders(options.ownerId, options.getUserId) }
   const restoredRunId=options.state?.fasttask?.runId
-  const detachHarness=Boolean(restoredRunId&&activeRunId()!==restoredRunId)
+  const detachHarness=Boolean(restoredRunId&&options.state?.fasttask?.harnessMode==='wasm'&&!isDrivingRun(restoredRunId))
   const controller=new AbortController()
   const timeout=setTimeout(()=>controller.abort(),20_000)
   let response:Response
@@ -213,7 +213,9 @@ export function useAgentRuntime(
   const sentAuth=useRef<{ownerId?:string;access:string}|null>(null)
   const drivenRuns=useRef(new Set<string>())
   const mounted=useRef(true)
-  const sentCommand=useRef<{text:string;mode:'wasm'|'sidecar'|'';outcome:'pending'|'failed'|'cancelled'|'finished'}|null>(null)
+  const sentCommand=useRef<{text:string;mode:'wasm'|'sidecar'|'';outcome:'pending'|'failed'|'cancelled'|'finished';runId?:string}|null>(null)
+  const { threadId: resumedThread, runId: resumedRun } = initialState.fasttask ?? {}
+  const resumeQuery = resumedThread ? `?threadId=${encodeURIComponent(resumedThread)}${resumedRun ? `&runId=${encodeURIComponent(resumedRun)}` : ''}` : ''
   const noticeRef=useRef(onNotice)
   noticeRef.current=onNotice
   useEffect(()=>{mounted.current=true;return()=>{mounted.current=false}},[])
@@ -224,7 +226,7 @@ export function useAgentRuntime(
     protocol: 'assistant-transport',
     api: '/api/v1/agent/commands',
     resumeApi: '/api/v1/agent/resume',
-    resumeStateApi: '/api/v1/agent/resume-state',
+    resumeStateApi: `/api/v1/agent/resume-state${resumeQuery}`,
     initialState,
     converter: convertState,
     headers: async()=>{
@@ -268,6 +270,8 @@ export function useAgentRuntime(
     // while the host works, so the UI needs no change (§13 phase D).
     onResponse: response => {
       if (!mounted.current || options.getUserId && options.getUserId() !== owner.current) return
+      const acceptedRunId = response.headers.get('X-Agent-Run')
+      if (acceptedRunId && sentCommand.current) sentCommand.current.runId = acceptedRunId
       const runId = harnessRunOf(response)
       if (!runId || drivenRuns.current.has(runId)) return
       drivenRuns.current.add(runId)
@@ -285,7 +289,7 @@ export function useAgentRuntime(
       // convertState exposes the business namespace directly as runtime.state.
       // Never fall back to the global host: it may belong to another conversation.
       const business = runtime.thread.getState().state as FasttaskState | undefined
-      const runId = typeof business?.runId==='string'&&business.runId ? business.runId : undefined
+      const runId = sentCommand.current?.runId || business?.runId
       if(!runId){noticeRef.current('暂时无法确认要停止的对话，请重新载入后核对生成状态。');return}
       void stopWithFeedback(() => cancelActiveRun(runId, owner.current), message => noticeRef.current(message), agentErrorText)
     },
@@ -329,7 +333,7 @@ export function useAgentRuntime(
       const business = state.state as FasttaskState|undefined
       if (business?.harnessMode !== 'wasm') return
       const runId = business.runId
-      if (!state.isRunning || !runId || drivenRuns.current.has(runId) || activeRunId() === runId) return
+      if (!state.isRunning || !runId || drivenRuns.current.has(runId) || isDrivingRun(runId)) return
       drivenRuns.current.add(runId)
       void driveRun({ ownerId: owner.current, getOwner: options.getUserId, runId, text: sentCommand.current.text, forcedMode: forcedModeOf(readModePreference()) }).catch(error => {
         if (!options.getUserId || options.getUserId() === owner.current) noticeRef.current(`对话驱动失败：${agentErrorText(error)}`)

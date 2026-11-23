@@ -176,11 +176,16 @@ export function createSidecarServer(options: SidecarServerOptions) {
         json(response, 400, { error: 'run_id, harness_token and thread_id are required' })
         return
       }
+      if (running.has(body.run_id)) {
+        json(response, 409, { error: 'run already executing' })
+        return
+      }
       const controller = new AbortController()
+      response.once('close', () => { if (!response.writableFinished) controller.abort() })
       running.set(body.run_id, controller)
       try {
         const report = await driveSidecarRun(
-          { serverOrigin: options.config.serverOrigin, createAgent: options.createAgent, call, signal: controller.signal, onEvent: options.onEvent },
+          { serverOrigin: options.config.serverOrigin, createAgent: options.createAgent, call, signal: controller.signal, onEvent: options.onEvent, parkOnApproval: true },
           body,
         )
         json(response, 200, report as unknown as Json)

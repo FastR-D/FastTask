@@ -219,8 +219,6 @@ func mapHarnessError(err error) error {
 		return huma.NewError(http.StatusServiceUnavailable, "HARNESS_UNAVAILABLE: no host can drive this run")
 	case errors.Is(err, application.ErrRunNotActive):
 		return huma.NewError(http.StatusConflict, "RUN_NOT_ACTIVE: the run already finished")
-	case errors.Is(err, application.ErrApprovalTimeout):
-		return huma.NewError(http.StatusConflict, "APPROVAL_TIMEOUT: no decision within the wait limit")
 	case errors.Is(err, application.ErrValidation):
 		return huma.Error422UnprocessableEntity(err.Error())
 	case errors.Is(err, application.ErrNotFound), persistence.IsNotFound(err):

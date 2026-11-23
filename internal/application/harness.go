@@ -66,8 +66,6 @@ const (
 	// approvalPollSegment bounds one long-poll segment so a proxy in between cannot cut the wait
 	// (§7).
 	approvalPollSegment = 30 * time.Second
-	// ApprovalWaitLimit is the whole approval wait (§7). It is not part of the run wall clock.
-	ApprovalWaitLimit = 15 * time.Minute
 )
 
 // Harness errors. Each maps to one documented error code (doc/interface.md §20).
@@ -82,9 +80,6 @@ var (
 	ErrHarnessToken = errors.New("harness token is not valid for this run")
 	// ErrRunNotActive means the run already reached a terminal state.
 	ErrRunNotActive = errors.New("agent run is not active")
-	// ErrApprovalTimeout is returned to a host whose long poll outlived the wait
-	// (§7); the run is failed with the same code.
-	ErrApprovalTimeout = errors.New("approval wait timed out")
 )
 
 // ModelCredentials are the upstream coordinates the model proxy injects. They never
@@ -316,7 +311,7 @@ func (s *harnessTokens) issueRunGrant(ctx context.Context, userID, runID, toolsE
 		if err != nil {
 			return err
 		}
-		if IsTerminalRunStatus(fresh.Status) || fresh.CancelRequested {
+		if IsTerminalRunStatus(fresh.Status) || fresh.CancelRequested || fresh.HarnessMode == HarnessModeSidecar && fresh.Status == persistence.RunAwaitingApproval {
 			return ErrRunNotActive
 		}
 		if _, err := repo.RevokeHarnessTokensForRun(ctx, run.ID); err != nil {
@@ -326,7 +321,10 @@ func (s *harnessTokens) issueRunGrant(ctx context.Context, userID, runID, toolsE
 			return err
 		}
 		if fresh.Status == persistence.RunQueued {
-			return repo.UpdateRun(ctx, userID, run.ID, map[string]any{"status": persistence.RunRunning, "started_at": now})
+			if fresh.StartedAt == nil {
+				return repo.UpdateRun(ctx, userID, run.ID, map[string]any{"status": persistence.RunRunning, "started_at": now})
+			}
+			return repo.SetApprovalStatus(ctx, userID, run.ID, persistence.RunRunning, now)
 		}
 		return nil
 	})

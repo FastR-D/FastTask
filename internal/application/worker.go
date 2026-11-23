@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FastR-D/FastTask/internal/agent"
@@ -82,6 +83,16 @@ func NewWorker(app *App, interval time.Duration, providers ...agent.Provider) *W
 }
 
 func (w *Worker) Run(ctx context.Context) {
+	const conversationWorkers = 4
+	var workers sync.WaitGroup
+	for range conversationWorkers {
+		workers.Go(func() { w.poll(ctx, true) })
+	}
+	w.poll(ctx, false)
+	workers.Wait()
+}
+
+func (w *Worker) poll(ctx context.Context, conversations bool) {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
@@ -89,8 +100,10 @@ func (w *Worker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = w.RunOnce(ctx)
-			w.drainNotifications(ctx)
+			_ = w.runOnce(ctx, &conversations)
+			if !conversations {
+				w.drainNotifications(ctx)
+			}
 		}
 	}
 }
@@ -115,7 +128,11 @@ func (w *Worker) drainNotifications(ctx context.Context) {
 }
 
 func (w *Worker) RunOnce(ctx context.Context) error {
-	job, token, err := w.claim(ctx)
+	return w.runOnce(ctx, nil)
+}
+
+func (w *Worker) runOnce(ctx context.Context, conversations *bool) error {
+	job, token, err := w.claimMatching(ctx, conversations)
 	if err != nil || job == nil {
 		return err
 	}
@@ -198,12 +215,26 @@ func (w *Worker) holdLease(ctx context.Context, job persistence.AgentJob, rawTok
 }
 
 func (w *Worker) claim(ctx context.Context) (*persistence.AgentJob, string, error) {
+	return w.claimMatching(ctx, nil)
+}
+
+func (w *Worker) claimMatching(ctx context.Context, conversations *bool) (*persistence.AgentJob, string, error) {
 	var claimed *persistence.AgentJob
 	var rawToken string
 	err := w.app.Store.Transaction(ctx, func(tx *gorm.DB) error {
 		var job persistence.AgentJob
 		now := persistence.Now()
-		if err := tx.Where("status = 'queued' AND run_after <= ?", now).Order("created_at").First(&job).Error; err != nil {
+		ready := tx.Where("status = 'queued' AND run_after <= ?", now).
+			Where(`type <> 'agent_run' OR NOT EXISTS (SELECT 1 FROM agent_jobs running
+				WHERE running.type = 'agent_run' AND running.subject_id = agent_jobs.subject_id AND running.status = 'running')`)
+		if conversations != nil {
+			if *conversations {
+				ready = ready.Where("type = 'agent_run'")
+			} else {
+				ready = ready.Where("type <> 'agent_run'")
+			}
+		}
+		if err := ready.Order("created_at").First(&job).Error; err != nil {
 			if persistence.IsNotFound(err) {
 				return nil
 			}

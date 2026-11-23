@@ -4,6 +4,8 @@ import {
   ComposerPrimitive,
   MessagePrimitive,
   ThreadPrimitive,
+  useAui,
+  useAuiState,
 } from '@assistant-ui/react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, request } from '../api'
@@ -13,14 +15,16 @@ import { createImageAttachmentAdapter } from './attachments'
 import { HarnessModeControl, HarnessStatusLine } from './HarnessStatus'
 import { MarkdownText, UserMarkdownText } from './Markdown'
 import { ReasoningPart } from './Reasoning'
-import { useAgentRuntime } from './runtime'
-import type { ServerAgentState } from './state'
+import { agentErrorText, useAgentRuntime } from './runtime'
+import type { FasttaskState, ServerAgentState } from './state'
 import { ThreadList } from './ThreadList'
 import { threadState } from './threads'
 import { DailyPlanProposalUI, GoalUpdateProposalUI, GoalWithTasksProposalUI, TaskTreeProposalUI } from './tools/ProposalApproval'
 import { OpenToolWorkspaceUI } from './tools/OpenToolWorkspace'
 import { VoiceButton } from './VoiceButton'
-import { ComposerDraftPersistence, ComposerDraftUserProvider } from './ComposerDraft'
+import { ComposerDraftPersistence, ComposerDraftUserProvider, useComposerDraftUserId } from './ComposerDraft'
+import { cancelActiveRun } from '../harness'
+import { stopWithFeedback } from '../harness/cancellation'
 import { FailedMessageRecovery } from './FailedMessageRecovery'
 import '../agent.css'
 
@@ -282,17 +286,21 @@ const Conversation = memo(function Conversation({
   const runtime = useAgentRuntime(initialState, onNotice, { attachments, onThreadChanged, onBusinessChanged, getUserId })
   const resumed = useRef(false)
   useEffect(() => {
-    // A run keeps executing after the client disconnects (agent-impl.md §2.8), so a restored conversation
-    // that is still running re-attaches its stream once. resumeRun is typed void: transport failures arrive
-    // through the runtime's onError, which already reports them, so only a synchronous throw is caught.
-    if (!initialState.isRunning || resumed.current) return
-    resumed.current = true
-    try {
-      runtime.thread.resumeRun({ parentId: null })
-    } catch (error) {
-      onNotice(`对话续流失败：${error instanceof Error ? error.message : '请稍后重试'}`)
+    const threadId = initialState.fasttask?.threadId
+    if (!initialState.isRunning || !threadId) return
+    const resume = () => {
+      // The SDK can expose an inert thread before installing its transport.
+      const state = runtime.thread.getState().state as FasttaskState | undefined
+      if (resumed.current || state?.threadId !== threadId) return
+      resumed.current = true
+      void Promise.resolve().then(() => runtime.thread.resumeRun({ parentId: null })).catch(error => {
+        onNotice(`对话续流失败：${error instanceof Error ? error.message : '请稍后重试'}`)
+      })
     }
-  }, [runtime, initialState.isRunning, onNotice])
+    const unsubscribe = runtime.thread.subscribe(resume)
+    resume()
+    return unsubscribe
+  }, [runtime, initialState, onNotice])
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -355,6 +363,29 @@ function AttachedImage({ image }: { image?: string }) {
 }
 
 function Composer({ onNotice }: { onNotice: (message: string) => void }) {
+  const aui = useAui()
+  const { runId, threadId, harnessMode, awaitingApproval } = useAuiState(value => value.thread.state as FasttaskState | undefined) ?? {}
+  const isRunning = useAuiState(value => value.thread.isRunning)
+  const ownerId = useComposerDraftUserId()
+  const [stopping, setStopping] = useState(false)
+  const live = useRef(true)
+  useEffect(() => { live.current = true; return () => { live.current = false } }, [])
+  const sidecar = harnessMode === 'sidecar' && Boolean(runId)
+
+  async function stopSidecar() {
+    if (!runId || stopping) return
+    setStopping(true)
+    try {
+      await stopWithFeedback(async () => {
+        await cancelActiveRun(runId, ownerId)
+        if (!awaitingApproval || !threadId || !live.current) return
+        const latest = await threadState(threadId, ownerId)
+        if (live.current) aui.thread.importExternalState(latest)
+      }, onNotice, agentErrorText)
+    } finally {
+      if (live.current) setStopping(false)
+    }
+  }
   // The browser's network flag does not establish whether a local FastTask
   // service is reachable. Keep drafts editable and let an explicit send use
   // the existing account and transport checks, which preserve failed text.
@@ -380,15 +411,22 @@ function Composer({ onNotice }: { onNotice: (message: string) => void }) {
         placeholder="说点什么…"
         rows={1}
         autoFocus
+        submitMode={awaitingApproval ? 'none' : 'enter'}
       />
       <ComposerPrimitive.AddAttachment className="agent-composer-btn agent-attach" aria-label="添加图片">
         <mdui-icon name="image" />
       </ComposerPrimitive.AddAttachment>
       <VoiceButton onNotice={onNotice} />
-      <ComposerPrimitive.Cancel className="agent-composer-btn agent-cancel" aria-label="停止生成">
-        <mdui-icon name="stop" />
-      </ComposerPrimitive.Cancel>
-      <ComposerPrimitive.Send className="agent-composer-btn agent-send" aria-label="发送">
+      {sidecar ? (isRunning || awaitingApproval) && (
+        <button type="button" className="agent-composer-btn agent-cancel" aria-label="停止本轮" disabled={stopping} onClick={() => void stopSidecar()}>
+          <mdui-icon name="stop" />
+        </button>
+      ) : (
+        <ComposerPrimitive.Cancel className="agent-composer-btn agent-cancel" aria-label="停止生成">
+          <mdui-icon name="stop" />
+        </ComposerPrimitive.Cancel>
+      )}
+      <ComposerPrimitive.Send className="agent-composer-btn agent-send" aria-label="发送" disabled={awaitingApproval}>
         <mdui-icon name="arrow_upward" />
       </ComposerPrimitive.Send>
     </ComposerPrimitive.Root>

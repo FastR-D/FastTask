@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
+import { useAuiState } from '@assistant-ui/react'
 import { fieldValue } from '../mdui-react'
 import { resetModeProbe, subscribeHarnessStatus, warmUpHarness, type HarnessStatus } from '../harness'
 import { readModePreference, writeModePreference, type ModePreference } from './modePreference'
+import type { FasttaskState } from './state'
 
 /** The browser's connectivity flag is advisory; local services can remain reachable. */
 export function useOnline(): boolean {
@@ -42,14 +44,15 @@ const REASON_LABEL: Record<string, string> = {
 
 export function HarnessStatusLine() {
   const [status, setStatus] = useState<HarnessStatus | null>(null)
+  const { runId, harnessMode } = useAuiState(value => value.thread.state as FasttaskState | undefined) ?? {}
   const online = useOnline()
 
   useEffect(() => {
     // The probe compiles 2 MB of wasm, so it belongs here — when the chat view mounts — and not on the
     // send path of the first message (§3.2).
     void warmUpHarness().catch(() => undefined)
-    return subscribeHarnessStatus(setStatus)
-  }, [])
+    return subscribeHarnessStatus(setStatus, runId)
+  }, [runId])
 
   const networkHint = !online
     ? <span className="agent-harness-reason">浏览器报告网络不可用；可继续写草稿，发送时将尝试连接 FastTask。</span>
@@ -62,11 +65,12 @@ export function HarnessStatusLine() {
       </div>
     )
   }
-  const degraded = status.mode !== 'wasm'
-  const reason = status.reason ? REASON_LABEL[status.reason] ?? status.reason : ''
+  const mode = harnessMode ?? status.mode
+  const degraded = mode !== 'wasm'
+  const reason = status.mode === mode && status.reason ? REASON_LABEL[status.reason] ?? status.reason : ''
   return (
-    <div className={`agent-harness${degraded ? ' degraded' : ''}`} data-testid="harness-status" data-mode={status.mode}>
-      <span className="agent-harness-mode">{MODE_LABEL[status.mode] ?? status.mode}</span>
+    <div className={`agent-harness${degraded ? ' degraded' : ''}`} data-testid="harness-status" data-mode={mode}>
+      <span className="agent-harness-mode">{MODE_LABEL[mode] ?? mode}</span>
       {degraded && reason && <span className="agent-harness-reason">{reason}</span>}
       {status.detail && <span className="agent-harness-detail">{status.detail}</span>}
       {status.contextDegraded && (

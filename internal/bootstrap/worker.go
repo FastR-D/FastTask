@@ -84,12 +84,11 @@ func registerWorkerLifecycle(lc fx.Lifecycle, worker *application.Worker, agent 
 	var done chan struct{}
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
-			// §4.2: v1 does not resume a run across a process restart. Runs left
-			// queued/running by a crashed predecessor are marked interrupted BEFORE
-			// the worker claims any job, so ExecuteRun short-circuits on them
-			// (terminal status) instead of re-executing a stale run. Their partial
-			// messages are preserved for the user to review and retry.
+			// Preserve queued sidecar work and restore decisions before claiming jobs.
 			if _, err := agent.Repository().MarkInterruptedRuns(ctx, "INTERRUPTED"); err != nil {
+				return err
+			}
+			if err := agent.RestoreSidecarApprovals(ctx); err != nil {
 				return err
 			}
 			var runCtx context.Context

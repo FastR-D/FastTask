@@ -40,6 +40,9 @@ func (s *harnessLifecycle) RequestCancellation(ctx context.Context, userID, runI
 	if !changed {
 		return nil
 	}
+	if run.Status == persistence.RunAwaitingApproval && run.HarnessMode == HarnessModeSidecar {
+		return s.finishRun(ctx, run, persistence.RunCancelled, "CANCELLED", "cancelled by user", protocol.ReasonCancelled)
+	}
 	// A run with no host to tell (nothing ever asked for a token) cannot confirm the
 	// cancellation, so finish it here instead of waiting for the reaper.
 	if _, err := s.repo().ActiveHarnessTokenForRun(ctx, runID); err != nil {
@@ -111,7 +114,12 @@ func (s *harnessLifecycle) saveCheckpoint(ctx context.Context, p HarnessPrincipa
 	if version == "" {
 		version = LibfxVersion
 	}
-	return s.repo().SaveThreadCheckpoint(ctx, p.UserID, p.ThreadID, in.Checkpoint, version, p.RunID)
+	err := s.repo().SaveThreadCheckpoint(ctx, p.UserID, p.ThreadID, in.Checkpoint, version, p.RunID)
+	if p.Mode == HarnessModeSidecar && persistence.IsNotFound(err) {
+		// A recovered, older run can finish without replacing a newer turn's checkpoint.
+		return nil
+	}
+	return err
 }
 
 // ThreadCheckpoint is the read half of §6.1: what a host restores a thread from.
@@ -171,11 +179,23 @@ func (s *harnessLifecycle) finishRun(ctx context.Context, run *persistence.Agent
 			code = "CANCELLED"
 			message = "cancelled by user"
 		}
+		var cancelledParts []persistence.AgentMessagePart
+		if status == persistence.RunCancelled && run.HarnessMode == HarnessModeSidecar {
+			cancelledParts, err = cancelPendingSidecarApprovals(tx, run)
+			if err != nil {
+				return err
+			}
+		}
 		if sess != nil {
 			svc := *s.svc
 			svc.repo = repo
 			sess.svc = &svc
 			sess.sink.repo = repo
+			for _, part := range cancelledParts {
+				if err := sess.emitSet(protocol.PartPath(sess.assistantIdx, part.Idx), partFromRow(&part)); err != nil {
+					return err
+				}
+			}
 			if reason == "" {
 				reason = protocol.ReasonError
 			}
@@ -191,6 +211,19 @@ func (s *harnessLifecycle) finishRun(ctx context.Context, run *persistence.Agent
 			}
 			if err := sess.emitSet(protocol.IsRunningPath(), false); err != nil {
 				return err
+			}
+			if run.HarnessMode == HarnessModeSidecar {
+				sess.state.FastTask.AwaitingApproval = false
+				sess.state.FastTask.PendingProposals, err = pendingProposalsTx(tx, run.UserID, run.ThreadID)
+				if err != nil {
+					return err
+				}
+				if err := sess.emitSet([]string{"fasttask", "awaitingApproval"}, false); err != nil {
+					return err
+				}
+				if err := sess.emitSet([]string{"fasttask", "pendingProposals"}, sess.state.FastTask.PendingProposals); err != nil {
+					return err
+				}
 			}
 		}
 		if err := repo.SetRunStatus(ctx, run.UserID, run.ID, status, code, message); err != nil {
@@ -210,17 +243,7 @@ func (s *harnessLifecycle) ReapHarnessRuns(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	var expired []persistence.AgentRun
-	_, approvalLimit := s.svc.approvalWait()
-	if err := s.svc.store.DB.WithContext(ctx).Where("status = ? AND approval_started_at < ?", persistence.RunAwaitingApproval, now.Add(-approvalLimit)).Find(&expired).Error; err != nil {
-		return 0, err
-	}
-	for _, run := range expired {
-		if err := s.finishRun(ctx, &run, persistence.RunFailed, "APPROVAL_TIMEOUT", "approval deadline exceeded", protocol.ReasonError); err != nil {
-			return 0, err
-		}
-	}
-	reaped := len(expired)
+	reaped := 0
 	seen := map[string]bool{}
 	for _, item := range stale {
 		if seen[item.RunID] {
@@ -236,6 +259,17 @@ func (s *harnessLifecycle) ReapHarnessRuns(ctx context.Context) (int, error) {
 		}
 		if IsTerminalRunStatus(run.Status) {
 			continue
+		}
+		if run.HarnessMode == HarnessModeSidecar {
+			if run.Status == persistence.RunAwaitingApproval {
+				if _, err := s.svc.parkSidecarRun(ctx, run.UserID, run.ID, run.JobID); err != nil {
+					return reaped, err
+				}
+				continue
+			}
+			if run.Status == persistence.RunQueued || item.Status == persistence.RunAwaitingApproval {
+				continue
+			}
 		}
 		message := "harness host stopped responding"
 		if item.Reason == "HARNESS_NEVER_STARTED" {
@@ -260,7 +294,7 @@ func (s *harnessLifecycle) ReapHarnessRuns(ctx context.Context) (int, error) {
 		}
 		reaped++
 	}
-	return reaped, nil
+	return reaped, s.svc.reconcileSidecarApprovals(ctx)
 }
 
 // PruneHarnessTokens removes tokens that can no longer be used. It runs on the same

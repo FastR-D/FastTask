@@ -13,7 +13,7 @@ async function setup({ runId = 'restored-sidecar', mode = 'sidecar', cancellatio
       '@assistant-ui/react': { useAssistantTransportRuntime: options => { transport = options; return runtime }, fromThreadMessageLike: value => value },
       'assistant-stream': {}, 'assistant-stream/utils': {},
       '../api': { ensureFreshAccessToken: async () => access, offlineSessionAvailable: () => false, readOfflineUser: () => ({ id: user }) },
-      '../harness': { selectMode: async () => ({ mode }), activeRunId: () => 'unrelated-local-run', cancelActiveRun: async id => { cancelled.push(id); if (cancellationError) throw cancellationError }, driveRun: async value => { driven.push(value) } },
+      '../harness': { selectMode: async () => ({ mode }), isDrivingRun: id => id === 'unrelated-local-run', cancelActiveRun: async id => { cancelled.push(id); if (cancellationError) throw cancellationError }, driveRun: async value => { driven.push(value) } },
       './ComposerDraft': { useComposerDraftUserId: () => user },
       './modePreference': { readModePreference: () => 'auto', forcedModeOf: () => null },
       './threads': { threadState: async () => initialState },

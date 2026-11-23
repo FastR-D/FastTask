@@ -129,6 +129,7 @@ func (s *Server) handleAgentCommands(c *gin.Context) {
 		agentSubmitError(c, err)
 		return
 	}
+	c.Header("X-Agent-Run", result.RunID)
 	if result.HarnessMode == application.HarnessModeWASM {
 		// The client must know which run a host has to drive, and the stream is not the place
 		// to say it: the preamble chunk carries the same id for a browser that cannot read
@@ -147,7 +148,7 @@ func (s *Server) handleAgentCommands(c *gin.Context) {
 		_ = writer.WriteDone()
 		return
 	}
-	s.streamRun(c, principal.UserID, result.RunID, result.FromSeq)
+	s.streamRun(c, principal.UserID, result.RunID, result.FromSeq, result.FollowApproval, nil)
 }
 
 // handleAgentResumeState implements POST /agent/resume-state (§2.8): 204 when no
@@ -165,17 +166,14 @@ func (s *Server) handleAgentResumeState(c *gin.Context) {
 		return
 	}
 	threadID := strings.TrimSpace(body.ThreadID)
-	var result application.ResumeStateResult
-	var found bool
-	var err error
 	if threadID == "" || strings.HasPrefix(threadID, agentLocalThreadPrefix) {
-		// A new or remounted chat can have no server thread id yet (the library posts
-		// an empty id or its temporary __LOCALID_ value). Resolve the resume against
-		// the authenticated user's own in-flight run instead (§2.8).
-		result, found, err = s.agent.ResumeCurrentState(c.Request.Context(), principal.UserID)
-	} else {
-		result, found, err = s.agent.ResumeState(c.Request.Context(), principal.UserID, threadID)
+		threadID = strings.TrimSpace(c.Query("threadId"))
 	}
+	if threadID == "" || strings.HasPrefix(threadID, agentLocalThreadPrefix) {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	result, found, err := s.agent.ResumeState(c.Request.Context(), principal.UserID, threadID, strings.TrimSpace(c.Query("runId")))
 	if err != nil {
 		if persistence.IsNotFound(err) {
 			agentAbort(c, http.StatusNotFound, "thread not found")
@@ -217,7 +215,14 @@ func (s *Server) handleAgentResume(c *gin.Context) {
 		agentAbort(c, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	s.streamRun(c, principal.UserID, run.ID, run.CheckpointSeq)
+	var snapshot *protocol.State
+	var state protocol.State
+	if err := json.Unmarshal([]byte(run.StateJSON), &state); err == nil && state.Messages != nil {
+		// A run can advance between /resume-state and this request. Start with the
+		// snapshot captured with this cursor, then replay only later events.
+		snapshot = &state
+	}
+	s.streamRun(c, principal.UserID, run.ID, run.CheckpointSeq, false, snapshot)
 }
 
 // streamRun writes the SSE response for a run, replaying persisted chunks from fromSeq and then
@@ -231,7 +236,7 @@ func (s *Server) handleAgentResume(c *gin.Context) {
 // continues after the decision, so ending the stream here would leave the client watching a
 // finished conversation while the server is still writing to it. The stream deadline is pushed
 // forward while the wait lasts, exactly as the wait is excluded from the run wall clock.
-func (s *Server) streamRun(c *gin.Context, userID, runID string, fromSeq int) {
+func (s *Server) streamRun(c *gin.Context, userID, runID string, fromSeq int, followApproval bool, snapshot *protocol.State) {
 	repo := s.agent.Repository()
 	ctx := c.Request.Context()
 
@@ -248,6 +253,14 @@ func (s *Server) streamRun(c *gin.Context, userID, runID string, fromSeq int) {
 	c.Writer.Flush()
 
 	writer := protocol.NewStreamWriter(c.Writer, c.Writer.Flush)
+	if snapshot != nil {
+		messages, _ := protocol.Set([]string{"messages"}, snapshot.Messages)
+		business, _ := protocol.Set(protocol.FastTaskPath(), snapshot.FastTask)
+		running, _ := protocol.Set(protocol.IsRunningPath(), snapshot.IsRunning)
+		if err := writer.WriteChunk(protocol.UpdateState(messages, business, running)); err != nil {
+			return
+		}
+	}
 	cursor := fromSeq
 	deadline := time.Now().Add(agentStreamMaxAge)
 	ticker := time.NewTicker(agentPollInterval)
@@ -267,10 +280,11 @@ func (s *Server) streamRun(c *gin.Context, userID, runID string, fromSeq int) {
 		if !s.drainChunks(ctx, writer, userID, runID, &cursor) {
 			return // client went away mid-write
 		}
-		if agentStreamTerminal(run.Status, run.HarnessMode != "") {
+		waitingForHandoff := followApproval && run.Status == persistence.RunAwaitingApproval && run.HarnessMode == application.HarnessModeSidecar && run.JobID != ""
+		if agentStreamTerminal(run.Status, run.HarnessMode) && !waitingForHandoff {
 			break
 		}
-		if run.Status == persistence.RunAwaitingApproval {
+		if run.Status == persistence.RunAwaitingApproval || run.Status == persistence.RunQueued {
 			// Waiting for a human is not the stream's business either (§7).
 			deadline = time.Now().Add(agentStreamMaxAge)
 		}
@@ -312,15 +326,14 @@ func (s *Server) drainChunks(ctx context.Context, writer *protocol.StreamWriter,
 
 // agentStreamTerminal reports whether a run status ends the current HTTP stream.
 //
-// For a job-driven run, awaiting_approval ends the stream: the flow sends [DONE] and a new
-// stream follows the continuation (agent-impl.md §4). For a harness-driven run it does not —
-// the host is still inside the same turn and the transcript keeps arriving (§7).
-func agentStreamTerminal(status string, harnessDriven bool) bool {
+// A sidecar yields on approval. The receipt starts a stream for its continuation.
+// A browser host can still receive a decision on its live stream.
+func agentStreamTerminal(status, mode string) bool {
 	switch status {
 	case persistence.RunSucceeded, persistence.RunFailed, persistence.RunCancelled, persistence.RunInterrupted:
 		return true
 	case persistence.RunAwaitingApproval:
-		return !harnessDriven
+		return mode != application.HarnessModeWASM
 	default:
 		return false
 	}
@@ -352,7 +365,7 @@ func agentSubmitError(c *gin.Context, err error) {
 	case errors.Is(err, application.ErrRevision):
 		agentAbort(c, http.StatusPreconditionFailed, "the proposal basis changed before this approval; the proposal was marked conflict")
 	case errors.Is(err, persistence.ErrActiveRunExists):
-		agentAbort(c, http.StatusConflict, "an agent run is already active")
+		agentAbort(c, http.StatusConflict, "RUN_ACTIVE: an agent run is already active for this thread")
 	case persistence.IsNotFound(err):
 		agentAbort(c, http.StatusNotFound, "thread not found")
 	default:
@@ -402,7 +415,7 @@ func (s *Server) registerAgentOpenAPI() {
 	api.Paths["/agent/commands"] = &huma.PathItem{Post: &huma.Operation{
 		OperationID: "agent-commands",
 		Summary:     "Submit agent commands and stream a run",
-		Description: "assistant-transport `api` endpoint. Creates a run from add-message commands and streams assistant-transport chunks. A standalone add-tool-result receipt may set detachHarness=true to settle an existing pending browser proposal while ending its old wasm turn; it must omit state and other commands. Sidecar turns continue normally. Request state/system/tools never provide authoritative business state (doc/agent-impl.md §2.2).",
+		Description: "Creates a run and streams assistant-transport chunks. Runs are independent across threads. A sidecar yields while awaiting a decision; the final receipt streams the continuation of the same run. A standalone browser receipt may set detachHarness=true and must omit state and other commands.",
 		Security:    bearer,
 		RequestBody: jsonBody("commands, threadId, parentId; standalone add-tool-result may set detachHarness=true and must omit state; system/tools are ignored"),
 		Responses:   withConflict(sseResponses),
@@ -421,7 +434,7 @@ func (s *Server) registerAgentOpenAPI() {
 	api.Paths["/agent/resume-state"] = &huma.PathItem{Post: &huma.Operation{
 		OperationID: "agent-resume-state",
 		Summary:     "Fetch retained state and runId for a thread",
-		Description: "assistant-transport `resumeStateApi` endpoint. Returns 204 when no run is in flight, otherwise 200 with {state, runId} (doc/agent-impl.md §2.8).",
+		Description: "Returns retained {state, runId} for the named thread. A server threadId may be supplied in the query if the SDK only has a temporary thread ID. An optional runId query names a specific run in that thread, including a run that just finished.",
 		Security:    bearer,
 		RequestBody: jsonBody("{threadId}"),
 		Responses: map[string]*huma.Response{

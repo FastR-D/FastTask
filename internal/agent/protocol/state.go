@@ -309,6 +309,7 @@ type FastTaskState struct {
 	// fetch that creates the run, so the browser learns the id from the stream
 	// rather than from a response header it cannot read.
 	RunID            string            `json:"runId,omitempty"`
+	AwaitingApproval bool              `json:"awaitingApproval,omitempty"`
 	PendingProposals []PendingProposal `json:"pendingProposals"`
 }
 

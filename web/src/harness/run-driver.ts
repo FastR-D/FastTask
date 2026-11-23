@@ -62,6 +62,7 @@ export type SidecarDeps = {
   signal?: AbortSignal
   onToken?: (token: string) => void
   onEvent?: (event: { type: string; [key: string]: unknown }) => void
+  parkOnApproval?: boolean
 }
 
 /** base64 decoding that works in Node and in a browser test environment. */
@@ -87,9 +88,8 @@ function encodeCheckpoint(bytes: Uint8Array | undefined): string | undefined {
  *
  * The shape is the browser host's shape: read the tool manifest, build the agent with the server's model and
  * instructions, prompt once, consume the turn's events (a turn has exactly one consumer and it must
- * consume, §3.6), keep heartbeating — including while an approval waits, or a 15 minute decision would be
- * cut short by the 45 second loss detector (§10.4) — then store the checkpoint, which is also what ends the
- * run (§5.1), and close the instance. No pooling: one agent per run, closed as soon as it is done (§3.7).
+ * consume, §3.6), keep heartbeating while executing, then close the instance.
+ * The sidecar yields on approval and the server can start a fresh host after the decision.
  */
 export async function driveSharedRun(deps: SidecarDeps, request: SidecarRunRequest): Promise<SidecarRunReport> {
   const rawCall = deps.call
@@ -100,6 +100,7 @@ export async function driveSharedRun(deps: SidecarDeps, request: SidecarRunReque
   deps = { ...deps, call: boundedCall }
   const token = { current: request.harness_token }
   let agent: SidecarAgent | null = null
+  let awaitingApproval = false
   const controller = new AbortController()
   const diagnostics = (event: { type: string; [key: string]: unknown }) => deps.onEvent?.(event)
 
@@ -138,9 +139,17 @@ export async function driveSharedRun(deps: SidecarDeps, request: SidecarRunReque
     const manifest = (await deps.call('GET', '/agent/tools', token.current, undefined, controller.signal)) as { tools?: ToolDef[] }
     diagnostics({ type: 'sidecar.manifest', tools: manifest.tools?.length ?? 0 })
     const bindings = new ToolCallBindings()
-    const tools = buildHostTools(manifest.tools ?? [], (name, input, signal, toolCallId) => callTool(deps, token, request.run_id, name, input, signal, toolCallId, diagnostics), {
+    const tools = buildHostTools(manifest.tools ?? [], (name, input, signal, toolCallId) => callTool(deps, token, request.run_id, name, input, signal, toolCallId, diagnostics, () => { awaitingApproval = true }), {
       bindings,
       onWarn: message => diagnostics({ type: 'sidecar.warning', message }),
+    })
+    const gatewayFetch = createGatewayFetch({
+      bindings,
+      runId: request.run_id,
+      harnessToken: () => token.current,
+      serverOrigin: deps.serverOrigin,
+      model: request.model,
+      onEvent: diagnostics,
     })
 
     agent = await deps.createAgent({
@@ -151,14 +160,15 @@ export async function driveSharedRun(deps: SidecarDeps, request: SidecarRunReque
       // Without it a turn that the runtime keeps retrying is indistinguishable from one that is thinking.
       onEvent: diagnostics,
       tools,
-      fetch: createGatewayFetch({
-        bindings,
-        runId: request.run_id,
-        harnessToken: () => token.current,
-        serverOrigin: deps.serverOrigin,
-        model: request.model,
-        onEvent: diagnostics,
-      }),
+      fetch: (input, init) => {
+        // Let libfx finish the current batch of tool calls. The next model
+        // step begins only after the settled results are in the server history.
+        if (awaitingApproval) {
+          controller.abort(new Error('awaiting approval'))
+          return Promise.reject(controller.signal.reason)
+        }
+        return gatewayFetch(input, init)
+      },
       ...(decodeCheckpoint(request.checkpoint) ? { checkpoint: decodeCheckpoint(request.checkpoint) } : {}),
     })
 
@@ -169,6 +179,7 @@ export async function driveSharedRun(deps: SidecarDeps, request: SidecarRunReque
       if (controller.signal.aborted) break
     }
     const result = await turn.result
+    if (awaitingApproval) return { stop_reason: 'awaiting_approval' }
     const checkpoint = encodeCheckpoint(await agent.checkpoint().catch(() => undefined))
     return {
       stop_reason: result.stopReason ?? 'unknown',
@@ -177,6 +188,7 @@ export async function driveSharedRun(deps: SidecarDeps, request: SidecarRunReque
       libfx_version: request.libfx_version,
     }
   } catch (error) {
+    if (awaitingApproval) return { stop_reason: 'awaiting_approval' }
     const message = error instanceof Error ? error.message : String(error)
     diagnostics({ type: 'sidecar.error', error: message })
     // The failure travels back in the report below, not in a checkpoint write: in sidecar mode the server
@@ -223,6 +235,7 @@ async function callTool(
   signal: AbortSignal,
   toolCallId: string,
   diagnostics?: (event: { type: string; [key: string]: unknown }) => void,
+  onPending?: () => void,
 ): Promise<ToolCallResult> {
   // A failed call goes back to the model as an ordinary tool error, so nothing else would ever record it —
   // and a host that keeps retrying a call the server refuses is indistinguishable from a slow model. That
@@ -242,6 +255,10 @@ async function callTool(
     return fail(error instanceof Error ? error.message : String(error))
   }
   if (outcome.status === 'pending' && typeof outcome.proposal_id === 'string') {
+    if (deps.parkOnApproval) {
+      onPending?.()
+      return { ok: true, value: { status: 'pending', proposal_id: outcome.proposal_id } }
+    }
     return waitForDecision(deps, token, runId, outcome.proposal_id, signal, fail)
   }
   if (outcome.status === 'error' || outcome.is_error === true) {

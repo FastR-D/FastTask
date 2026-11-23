@@ -29,7 +29,7 @@ var ErrToolCallIDCollision = errors.New("tool call id belongs to another run")
 
 // approvalPollInterval is how often a long poll re-reads the decision. It is short
 // enough that a cancellation reaches a waiting host well inside the 5 second budget §5.2
-// promises, and long enough that a 15 minute wait is not a spin loop.
+// promises.
 const approvalPollInterval = 250 * time.Millisecond
 
 // harnessTools is the tool execution surface and the approval long poll. It is its own
@@ -59,8 +59,7 @@ type HarnessToolOutcome struct {
 }
 
 // ApprovalWait is one segment of the approval long poll (§7). Status "pending" means the
-// segment ended without a decision and the host must poll again; the total wait is
-// enforced server-side, so a host that keeps polling still ends at "timeout".
+// segment ended without a decision and the host can poll again.
 type ApprovalWait struct {
 	Status     string `json:"status"`
 	ProposalID string `json:"proposal_id"`
@@ -370,14 +369,11 @@ func (s *harnessTools) parkForApproval(ctx context.Context, sess *runSession, ru
 // rather than a page-local event because two kinds of host share the code and a sidecar has
 // no page (§7).
 //
-// Four things end a wait: a decision, a cancellation (§5.2 channel 2), a run that is no
-// longer drivable, and the segment timer — which returns "pending" so an intermediate proxy
-// cannot cut a 15 minute wait in half. The total wait is measured across segments on the run
-// row; exceeding it fails the run with APPROVAL_TIMEOUT (§7).
+// A decision, cancellation or terminal run ends the wait. The segment timer
+// returns pending to keep each individual HTTP request bounded.
 func (s *harnessTools) WaitForApproval(ctx context.Context, p HarnessPrincipal, proposalID string, segment time.Duration) (ApprovalWait, error) {
-	maxSegment, waitLimit := s.svc.approvalWait()
-	if segment <= 0 || segment > maxSegment {
-		segment = maxSegment
+	if segment <= 0 || segment > approvalPollSegment {
+		segment = approvalPollSegment
 	}
 	if _, err := s.lifecycle().activeRun(ctx, p); err != nil {
 		return ApprovalWait{}, err
@@ -390,13 +386,14 @@ func (s *harnessTools) WaitForApproval(ctx context.Context, p HarnessPrincipal, 
 	if err != nil || message.RunID != p.RunID {
 		return ApprovalWait{}, ErrHarnessToken
 	}
-	deadline := s.clock().Add(segment)
-	started := s.clock()
+	timer := time.NewTimer(segment)
+	defer timer.Stop()
+	ticker := time.NewTicker(approvalPollInterval)
+	defer ticker.Stop()
 	for {
 		if decision, done, err := s.readApprovalDecision(ctx, p, part.ID, proposalID); err != nil {
 			return ApprovalWait{}, err
 		} else if done {
-			s.recordApprovalWait(ctx, p, started)
 			return decision, nil
 		}
 
@@ -405,60 +402,27 @@ func (s *harnessTools) WaitForApproval(ctx context.Context, p HarnessPrincipal, 
 			return ApprovalWait{}, err
 		}
 		if current.CancelRequested || current.Status == persistence.RunCancelling {
-			s.recordApprovalWait(ctx, p, started)
 			return ApprovalWait{Status: "cancelled", ProposalID: proposalID}, nil
 		}
 		if IsTerminalRunStatus(current.Status) {
-			s.recordApprovalWait(ctx, p, started)
 			return ApprovalWait{Status: current.Status, ProposalID: proposalID}, nil
 		}
 
-		now := s.clock()
-		if !now.Before(deadline) {
-			waited := s.recordApprovalWait(ctx, p, started)
-			total := waited
+		select {
+		case <-ctx.Done():
+			return ApprovalWait{}, ctx.Err()
+		case <-timer.C:
+			var total time.Duration
 			if current.ApprovalStartedAt != nil {
-				total = s.clock().Sub(*current.ApprovalStartedAt)
-			}
-			if total >= waitLimit {
-				// The user never decided. The run cannot stay parked forever (§7): it fails
-				// with a code the model is not blamed for, and the proposal stays pending so
-				// the user can still see what was asked.
-				if err := s.timeoutApproval(ctx, current, part, proposalID); err != nil {
-					return ApprovalWait{}, err
-				}
-				return ApprovalWait{
-					Status: "timeout", ProposalID: proposalID, IsError: true,
-					Result:        map[string]any{"error": "APPROVAL_TIMEOUT: no decision within the wait limit"},
-					WaitedSeconds: int(total.Seconds()),
-				}, nil
+				total = max(0, s.clock().Sub(*current.ApprovalStartedAt))
 			}
 			return ApprovalWait{
 				Status: "pending", ProposalID: proposalID,
 				WaitedSeconds: int(total.Seconds()),
 			}, nil
-		}
-		select {
-		case <-ctx.Done():
-			// The host went away mid-wait. The proposal stays pending: the run is left to the
-			// heartbeat reaper and the user can still decide later (§7, §11).
-			s.recordApprovalWait(ctx, p, started)
-			return ApprovalWait{}, ctx.Err()
-		case <-time.After(approvalPollInterval):
+		case <-ticker.C:
 		}
 	}
-}
-
-// timeoutApproval fails a run whose approval wait outlived the limit (§7).
-func (s *harnessTools) timeoutApproval(ctx context.Context, run *persistence.AgentRun, part *persistence.AgentMessagePart, proposalID string) error {
-	payload, _ := json.Marshal(map[string]any{"error": "APPROVAL_TIMEOUT", "proposal_id": proposalID})
-	if err := s.repo().UpdatePartResult(ctx, part.UserID, part.ID, string(payload), true); err != nil {
-		return err
-	}
-	if err := s.repo().UpdatePartApproval(ctx, part.UserID, part.ID, "timeout", nil); err != nil {
-		return err
-	}
-	return s.lifecycle().finishRun(ctx, run, persistence.RunFailed, "APPROVAL_TIMEOUT", "approval wait exceeded the limit", protocol.ReasonError)
 }
 
 // readApprovalDecision reports whether the user has decided. A conflict counts as a
@@ -499,12 +463,4 @@ func (s *harnessTools) readApprovalDecision(ctx context.Context, p HarnessPrinci
 		return outcome, true, nil
 	}
 	return outcome, false, nil
-}
-
-// recordApprovalWait adds the time just spent waiting to the run's excluded total, so the
-// wall clock the model proxy enforces does not include time spent waiting for a human (§7).
-// It returns the wait it recorded.
-func (s *harnessTools) recordApprovalWait(ctx context.Context, p HarnessPrincipal, started time.Time) time.Duration {
-	// Waiting belongs to the run state interval, not to overlapping HTTP polls.
-	return 0
 }

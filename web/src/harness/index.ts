@@ -1,7 +1,7 @@
 export {
   driveRun,
   cancelActiveRun,
-  activeRunId,
+  isDrivingRun,
   harnessStatus,
   subscribeHarnessStatus,
   forgetManifest,

@@ -186,21 +186,21 @@ UI 点击停止：先对当前 owner / runId 发用户认证的 cancellation API
 
 所有等待均受 context / signal 限制。运行预算到期、取消请求确认或 run 进入终态时，要主动关闭上游 body / 取消请求，即使 Read 正阻塞或供应商还没有响应头。数据库状态轮询需独立于流收到字节；本地通知可提速，持久化条件仍兜底。
 
-审批等待从进入 awaiting_approval 到最后一个 pending 提案得到终态按 run 记一次；并行两个等待不双倍扣除。长轮询断开不重置 15 分钟审批期限；reaper 可独立发现超时，不能只有 host 持续轮询才超时。
+待确认提案持久化，无期限。sidecar 在最后一批工具执行结束后释放 Worker 和宿主。最后一个提案得到终态后，后台为同一个 run 入队并从已保存的工具结果继续。审批等待和续跑排队时间合并计入一次排除区间，服务重启后从数据库恢复。
 
 状态转换：
 
 ```text
 queued -> running -> succeeded / failed / interrupted
              |
-             +-> awaiting_approval -> running
+             +-> awaiting_approval -> queued -> running
 
 queued / running / awaiting_approval -> cancelling -> cancelled
 ```
 
 终态不可被晚到上报改成别的状态；`CompleteRun` 的未知 stop reason 不可默认成功。映射 libfx 的已验证成功、取消和预算结束原因，并保留诊断原值；无法识别的结果用明确失败 / interrupted 原因处理。预算耗尽可保留现有可读收尾，但记录 budget 结束原因，不伪装任务完成。
 
-取消与业务提交竞态以数据库提交顺序裁定：动作先提交则保留；取消先提交则不得开始新动作。不能要求取消撤销已完成的事务或外部副作用。新建 run 检查应统一包含 cancelling，保持当前“每用户一个活跃 run”的约束。
+取消与业务提交竞态以数据库提交顺序裁定：动作先提交则保留；取消先提交则不得开始新动作。每条对话有一个活跃 run，包括 awaiting_approval 和 cancelling。同一账号的多个对话可独立并发，恢复和取消按对话及 run 定位。
 
 ### 3.6 有序事件、结果与完成上报（H05）
 

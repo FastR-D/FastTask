@@ -42,8 +42,7 @@ type AgentService struct {
 	// ≤15 methods). Its own app/repo/store fields shadow nothing at depth 0.
 	*approvalService
 	// threadStateService carries the persisted-state readers, embedded for the
-	// same reason: s.toProtocolMessage, s.LatestThreadState and
-	// s.ResumeCurrentState all resolve by promotion.
+	// same reason: s.toProtocolMessage and s.LatestThreadState resolve by promotion.
 	*threadStateService
 	// harness carries the host-facing runtime (doc/harness.md): capability tokens, the tool manifest,
 	// the model proxy, the tool execution surface and the run lifecycle. It is embedded so the HTTP
@@ -69,11 +68,6 @@ type AgentService struct {
 	reasoningPersisted bool
 	// nowFn is the injectable clock the harness lifecycle paths are tested with.
 	nowFn func() time.Time
-	// approvalSegment and approvalLimit bound the approval long poll (doc/harness.md §7). They
-	// are fields rather than constants so the timeout path can be tested without waiting a
-	// quarter of an hour.
-	approvalSegment time.Duration
-	approvalLimit   time.Duration
 }
 
 // SidecarDriver drives one run in the Node sidecar (doc/harness.md §8.3). The Worker calls
@@ -207,24 +201,6 @@ func WithAttachmentDir(dir string) AgentOption {
 // Attachments exposes the attachment store for the HTTP layer's upload, read and delete endpoints.
 func (s *AgentService) Attachments() *AttachmentStore { return s.attachments }
 
-// WithApprovalWait overrides the approval long poll's segment and total limit
-// (doc/harness.md §7, §15).
-func WithApprovalWait(segment, limit time.Duration) AgentOption {
-	return func(s *AgentService) { s.approvalSegment, s.approvalLimit = segment, limit }
-}
-
-// approvalWait returns the configured long-poll segment and total wait limit.
-func (s *AgentService) approvalWait() (time.Duration, time.Duration) {
-	segment, limit := s.approvalSegment, s.approvalLimit
-	if segment <= 0 {
-		segment = approvalPollSegment
-	}
-	if limit <= 0 {
-		limit = ApprovalWaitLimit
-	}
-	return segment, limit
-}
-
 // reasoningLevels are the values a host may ask for (doc/chat-features.md §3.2).
 var reasoningLevels = map[string]bool{
 	"provider-default": true, "none": true, "minimal": true,
@@ -263,8 +239,6 @@ func NewAgentService(app *App, opts ...AgentOption) *AgentService {
 		systemPrompt:       defaultSystemPrompt,
 		reasoningLevel:     "provider-default",
 		reasoningPersisted: true,
-		approvalSegment:    approvalPollSegment,
-		approvalLimit:      ApprovalWaitLimit,
 		// The approval flow shares the same repo/store/app so a receipt resolves
 		// against identical state (§7).
 		approvalService:    &approvalService{app: app, repo: repo, store: app.Store},
@@ -392,10 +366,11 @@ type SubmitResult struct {
 	// "wasm" means the caller must hand the run to a browser host, and the response carries
 	// X-Harness-Run so a client that can read headers does not have to wait for the stream.
 	HarnessMode string `json:"harnessMode,omitempty"`
-	// NoStream marks a receipt that must not open a second stream: during a harness run the
-	// approval decision is delivered to the host's long poll and the transcript continues on
-	// the stream that is already open (§7).
+	// NoStream marks a receipt with no separate continuation stream.
 	NoStream bool `json:"-"`
+	// FollowApproval waits for the previous sidecar execution to yield if a
+	// decision arrived while its last tool batch was still finishing.
+	FollowApproval bool `json:"-"`
 }
 
 // ErrEmptyCommand is returned when a commands request carries no usable
@@ -403,7 +378,7 @@ type SubmitResult struct {
 var ErrEmptyCommand = errors.New("agent command has no message text")
 
 // SubmitCommands performs the transactional half of POST /agent/commands: resolve-or-create
-// the thread, enforce one active run per user, persist the user message and create the
+// the thread, enforce one active run per thread, persist the user message and create the
 // agent_run. It writes no assistant output; that streams later.
 //
 // Whether an AgentJob is created depends on who drives the run (doc/harness.md §1.2, which
@@ -425,7 +400,7 @@ func (s *AgentService) SubmitCommands(ctx context.Context, userID string, req Co
 		}
 	}
 	if cmd, ok := firstToolResult(req.Commands); ok {
-		if cmd.DetachHarness && req.ThreadID != nil {
+		if req.ThreadID != nil {
 			part, err := s.repo.GetPartByToolCallID(ctx, userID, cmd.ToolCallID)
 			if err != nil {
 				return SubmitResult{}, err
@@ -482,17 +457,6 @@ func (s *AgentService) SubmitCommands(ctx context.Context, userID string, req Co
 			result.NewThread = true
 		}
 
-		// One active run per user (§9.3). The per-thread DB index is a backstop.
-		var active int64
-		if err := tx.WithContext(ctx).Model(&persistence.AgentRun{}).
-			Where("user_id = ? AND status IN ?", userID, []string{persistence.RunQueued, persistence.RunRunning, persistence.RunAwaitingApproval, persistence.RunCancelling}).
-			Count(&active).Error; err != nil {
-			return err
-		}
-		if active > 0 {
-			return persistence.ErrActiveRunExists
-		}
-
 		now := persistence.Now()
 		run := &persistence.AgentRun{
 			UserID: userID, ThreadID: threadID, Status: persistence.RunQueued,
@@ -508,11 +472,7 @@ func (s *AgentService) SubmitCommands(ctx context.Context, userID string, req Co
 		// A browser-driven run gets no job (§1.2): the Worker must not execute what the host
 		// is already executing.
 		if mode != HarnessModeWASM {
-			job := persistence.AgentJob{
-				ID: persistence.NewID("job"), UserID: userID, Type: "agent_run", Status: "queued",
-				SubjectType: "agent_run", SubjectID: run.ID, BaseRevision: 0, InputJSON: "{}",
-				MaxAttempts: 1, RunAfter: now, Revision: 1, CreatedAt: now, UpdatedAt: now,
-			}
+			job := newAgentRunJob(run, now)
 			if err := tx.WithContext(ctx).Create(&job).Error; err != nil {
 				return err
 			}
@@ -588,7 +548,10 @@ func (s *AgentService) resolveHarnessMode(ctx context.Context, requested string)
 	mode := strings.ToLower(strings.TrimSpace(requested))
 	switch mode {
 	case "":
-		return "", nil
+		if !s.sidecarPreferred {
+			return "", nil
+		}
+		mode = HarnessModeSidecar
 	case HarnessModeWASM, HarnessModeSidecar:
 	default:
 		return "", fmt.Errorf("%w: harness_mode must be wasm or sidecar", ErrValidation)
@@ -600,7 +563,7 @@ func (s *AgentService) resolveHarnessMode(ctx context.Context, requested string)
 	if creds == nil || creds.BaseURL == "" || creds.APIKey == "" || creds.Model == "" {
 		return "", nil
 	}
-	if mode == HarnessModeWASM && s.sidecarPreferred && s.sidecar != nil && s.sidecar.Healthy(ctx) {
+	if mode == HarnessModeWASM && s.sidecarPreferred {
 		mode = HarnessModeSidecar
 	}
 	if mode == HarnessModeSidecar && (s.sidecar == nil || !s.sidecar.Healthy(ctx)) {
@@ -716,6 +679,9 @@ func (s *AgentService) ExecuteRun(ctx context.Context, job persistence.AgentJob)
 		return map[string]any{"run_id": runID, "status": run.Status, "replayed": true}, nil
 	}
 	if run.HarnessMode == HarnessModeSidecar {
+		if run.JobID != job.ID || run.Status == persistence.RunAwaitingApproval {
+			return map[string]any{"run_id": runID, "status": run.Status, "replayed": true}, nil
+		}
 		return s.driveViaSidecar(ctx, job, run)
 	}
 	if run.HarnessMode == HarnessModeWASM {
@@ -751,7 +717,7 @@ func (s *AgentService) driveViaSidecar(ctx context.Context, job persistence.Agen
 	if err != nil {
 		return nil, s.failHarnessRun(ctx, run, "STATE_ERROR", err.Error())
 	}
-	if err := s.BeginHarnessRun(ctx, run.UserID, run.ID); err != nil {
+	if err := s.prepareSidecarRun(ctx, run); err != nil {
 		return nil, s.failHarnessRun(ctx, run, "STATE_ERROR", err.Error())
 	}
 	grant, err := s.IssueRunGrant(ctx, run.UserID, run.ID, "")
@@ -767,6 +733,18 @@ func (s *AgentService) driveViaSidecar(ctx context.Context, job persistence.Agen
 		Checkpoint: nil, LibfxVersion: LibfxVersion,
 		Model: grant.Model, Instructions: grant.Instructions, ThreadID: run.ThreadID,
 	})
+	// The database decides whether this execution yielded for approval. The host
+	// can disconnect after persisting the proposal or after a receipt queued its
+	// replacement, so the HTTP result alone cannot settle the run.
+	cleanup, done := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer done()
+	parked, parkErr := s.parkSidecarRun(cleanup, run.UserID, run.ID, job.ID)
+	if parkErr != nil {
+		return nil, parkErr
+	}
+	if parked {
+		return map[string]any{"run_id": run.ID, "status": persistence.RunAwaitingApproval}, nil
+	}
 	if err != nil {
 		return nil, s.failHarnessRun(ctx, run, "PROVIDER_ERROR", err.Error())
 	}
@@ -791,7 +769,6 @@ func (s *AgentService) driveViaSidecar(ctx context.Context, job persistence.Agen
 	if err := s.CompleteRun(ctx, principal, completion); err != nil {
 		return nil, err
 	}
-	_ = job.ID
 	current, err := s.repo.GetRun(ctx, run.UserID, run.ID)
 	if err != nil {
 		return nil, err
@@ -928,15 +905,23 @@ type ResumeStateResult struct {
 	RunID string          `json:"runId"`
 }
 
-// ResumeState returns the retained state and runId for a thread's active run, or
-// found=false when there is none (the handler answers 204). threadId ownership
-// is enforced; a cross-user thread yields not-found (§2.8, §10).
-func (s *AgentService) ResumeState(ctx context.Context, userID, threadID string) (ResumeStateResult, bool, error) {
+// ResumeState returns retained state for a run in the named thread. An explicit
+// run may have finished between the initial thread read and reconnecting.
+func (s *AgentService) ResumeState(ctx context.Context, userID, threadID string, runIDs ...string) (ResumeStateResult, bool, error) {
 	// A cross-user or missing thread is indistinguishable from not-found (§2.2).
 	if _, err := s.repo.GetThread(ctx, userID, threadID); err != nil {
 		return ResumeStateResult{}, false, err
 	}
-	run, err := s.repo.GetActiveRunByThread(ctx, userID, threadID)
+	var run *persistence.AgentRun
+	var err error
+	if len(runIDs) > 0 && runIDs[0] != "" {
+		run, err = s.repo.GetRun(ctx, userID, runIDs[0])
+		if err == nil && run.ThreadID != threadID {
+			return ResumeStateResult{}, false, gorm.ErrRecordNotFound
+		}
+	} else {
+		run, err = s.repo.GetActiveRunByThread(ctx, userID, threadID)
+	}
 	if err != nil {
 		if persistence.IsNotFound(err) {
 			return ResumeStateResult{}, false, nil

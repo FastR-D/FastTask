@@ -17,12 +17,14 @@ func (s *harnessProxy) modelContext(ctx context.Context, run *persistence.AgentR
 		return nil, err
 	}
 	out := []any{map[string]any{"role": "system", "content": instructions}}
+	currentUserSeen := false
 	for _, m := range messages {
 		parts, err := s.repo().ListMessageParts(ctx, run.UserID, m.ID)
 		if err != nil {
 			return nil, err
 		}
 		if m.Role == "user" {
+			currentUserSeen = currentUserSeen || m.ID == derefString(run.ParentMessageID)
 			content := []any{}
 			for _, p := range parts {
 				switch p.Type {
@@ -108,6 +110,11 @@ func (s *harnessProxy) modelContext(ctx context.Context, run *persistence.AgentR
 		}
 		if text.Len() > 0 {
 			assistant(text.String(), nil)
+		}
+		// A recovered approval can belong to a run before newer completed turns.
+		// Continue the original input and its tools with the history at that point.
+		if currentUserSeen && m.RunID == run.ID {
+			break
 		}
 	}
 	if err := s.canonicalInput(ctx, run, out); err != nil {

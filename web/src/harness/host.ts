@@ -8,7 +8,7 @@ import { requestRunCancellation } from './cancellation'
 
 // The browser harness host (doc/harness.md §3, §5, §6, §7, §10).
 //
-// What this file owns: one run at a time, driven from the capability the server issued, with the
+// This file drives browser runs with their individual server capabilities and keeps the
 // heartbeat that proves it is alive, the long poll that waits out an approval, and the checkpoint that
 // makes the conversation portable. What it does NOT own: rendering (the UI reads the server's stream),
 // persistence (nothing is written to localStorage or IndexedDB, §3.1 rule 2), and credentials (the token
@@ -33,7 +33,7 @@ export type HarnessStatus = {
 
 type Listener = (status: HarnessStatus) => void
 
-/** One driven run. Exactly one may exist at a time (§3.7). */
+/** One browser-driven run and the status for its own conversation. */
 type ActiveRun = {
   runId: string
   ownerId: string
@@ -46,17 +46,19 @@ type ActiveRun = {
   libfxVersion: string
   heartbeat: ReturnType<typeof setInterval> | null
   controller: AbortController
+  status: HarnessStatus
 }
 
-let active: ActiveRun | null = null
+const active = new Map<string, ActiveRun>()
 let status: HarnessStatus = { mode: cachedMode()?.mode ?? 'idle', reason: cachedMode()?.reason, running: false }
-const listeners = new Set<Listener>()
+const listeners = new Set<() => void>()
 
 /** subscribeHarnessStatus registers a UI listener and returns its unsubscribe. */
-export function subscribeHarnessStatus(listener: Listener): () => void {
-  listeners.add(listener)
-  listener(status)
-  return () => listeners.delete(listener)
+export function subscribeHarnessStatus(listener: Listener, runId?: string): () => void {
+  const emit = () => listener((runId ? active.get(runId)?.status : undefined) ?? status)
+  listeners.add(emit)
+  emit()
+  return () => listeners.delete(emit)
 }
 
 /** harnessStatus is the current snapshot, for a component that mounts mid-run. */
@@ -64,14 +66,14 @@ export function harnessStatus(): HarnessStatus {
   return status
 }
 
-/** activeRunId is the run a host is driving, or null. */
-export function activeRunId(): string | null {
-  return active?.runId ?? null
+export function isDrivingRun(runId: string): boolean {
+  return active.has(runId)
 }
 
-function publish(patch: Partial<HarnessStatus>): void {
-  status = { ...status, ...patch }
-  for (const listener of listeners) listener(status)
+function publish(patch: Partial<HarnessStatus>, run?: ActiveRun): void {
+  if (run) run.status = { ...run.status, ...patch }
+  else status = { ...status, ...patch }
+  for (const emit of listeners) emit()
 }
 
 /** diagnostics receives libfx events. They are logged, never rendered (§3.1 rule 3). */
@@ -97,9 +99,6 @@ export type DriveRunOptions = {
 /**
  * driveRun drives one run to completion: grant → agent → prompt → checkpoint → completion. It is the
  * whole host loop, and it is the only place a libfx agent instance is created.
- *
- * One run at a time (§3.7, §15): a second call cancels and closes the first, because leaving a turn
- * running in the background is exactly what the instance budget forbids.
  */
 export async function driveRun(options: DriveRunOptions): Promise<void> {
   const ownerId = options.ownerId ?? readOfflineUser()?.id ?? ''
@@ -119,16 +118,16 @@ export async function driveRun(options: DriveRunOptions): Promise<void> {
     options.onDone?.('unavailable')
     return
   }
-  await teardownActive('a new run replaced it')
-  checkOwner()
+  if (active.has(options.runId)) return
 
   const controller = new AbortController()
   const run: ActiveRun = {
     runId: options.runId, ownerId, getOwner, agent: null, turn: null, token: '',
     threadId: '', libfxVersion: '', heartbeat: null, controller,
+    status: { mode: selection.mode, reason: selection.reason, detail: selection.detail, running: true, runId: options.runId },
   }
-  active = run
-  publish({ running: true, runId: run.runId, error: undefined })
+  active.set(run.runId, run)
+  publish({}, run)
 
   try {
     const manifest = await readManifest(ownerId)
@@ -139,7 +138,7 @@ export async function driveRun(options: DriveRunOptions): Promise<void> {
     run.token = grant.harness_token
     run.threadId = grant.thread_id
     run.libfxVersion = grant.libfx_version
-    publish({ contextDegraded: grant.context_degraded || undefined })
+    publish({ contextDegraded: grant.context_degraded || undefined }, run)
 
     const checkpoint = await readCheckpoint(run)
     checkOwner()
@@ -162,12 +161,12 @@ export async function driveRun(options: DriveRunOptions): Promise<void> {
       ...report, checkpoint: report.checkpoint ?? '',
     })
     checkOwner()
-    if (report.error_message) publish({ error: report.error_message })
+    if (report.error_message) publish({ error: report.error_message }, run)
     options.onDone?.()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (getOwner() === ownerId) {
-      publish({ error: message })
+      publish({ error: message }, run)
       await reportCompletion(run, 'error', message)
       options.onDone?.(message)
     }
@@ -179,25 +178,14 @@ export async function driveRun(options: DriveRunOptions): Promise<void> {
 
 /** cancelActiveRun is the user's stop button: it tells the server first — cancelling is the user's
  *  power, and a host may not cancel its own run (§5.2, §10.2) — then breaks the turn. */
-export async function cancelActiveRun(runId = active?.runId, ownerId?: string): Promise<void> {
-  const run = active?.runId === runId ? active : null
+export async function cancelActiveRun(runId: string, ownerId?: string): Promise<void> {
+  const run = active.get(runId)
   await requestRunCancellation(runId, id => request(`/agent/runs/${encodeURIComponent(id)}/cancellation`, {
     method: 'POST', body: JSON.stringify({}),
   }, ownerId ?? run?.ownerId ?? readOfflineUser()?.id), () => {
     run?.turn?.cancel()
     run?.controller.abort()
   })
-}
-
-/** teardownActive cancels and closes whatever is running, so at most one agent instance exists (§3.7). */
-async function teardownActive(reason: string): Promise<void> {
-  const previous = active
-  if (!previous) return
-  active = null
-  previous.turn?.cancel()
-  previous.controller.abort()
-  diagnostics({ type: 'harness.teardown', reason })
-  await closeRun(previous)
 }
 
 async function closeRun(run: ActiveRun): Promise<void> {
@@ -210,10 +198,8 @@ async function closeRun(run: ActiveRun): Promise<void> {
   }
   run.agent = null
   run.turn = null
-  const ownedActive = active === run
-  if (ownedActive) active = null
-  if (run.getOwner() === run.ownerId) publish({ running: active !== null, runId: active?.runId })
-  else if (ownedActive) publish({ mode: 'idle', running: false, runId: undefined, reason: undefined, detail: undefined, error: undefined, contextDegraded: undefined })
+  if (active.get(run.runId) === run) active.delete(run.runId)
+  for (const emit of listeners) emit()
 }
 
 // --- the server surface a host uses ---

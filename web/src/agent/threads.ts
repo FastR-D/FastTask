@@ -118,7 +118,7 @@ export async function deleteThread(threadId: string): Promise<void> {
 
 /** threadState reads one thread's transcript in the shape the SSE stream pushes (§2.7), which is what lets
  *  a switched-to or reloaded conversation render before its next run. */
-export async function threadState(threadId: string): Promise<ServerAgentState> {
-  const { data } = await request<{ state: ServerAgentState }>(`${threadPath(threadId)}/state`)
+export async function threadState(threadId: string, ownerId?: string): Promise<ServerAgentState> {
+  const { data } = await request<{ state: ServerAgentState }>(`${threadPath(threadId)}/state`, {}, ownerId)
   return data.state
 }

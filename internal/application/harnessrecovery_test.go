@@ -79,22 +79,101 @@ func TestHarnessMultipleApprovalsAndDetachedReceipt(t *testing.T) {
 		})
 	}
 }
-func TestHarnessApprovalDeadlineReaper(t *testing.T) {
-	svc, p, _, _, _ := approvalFixture(t)
+func TestHarnessApprovalWaitDoesNotExpire(t *testing.T) {
+	svc, p, _, proposal, part := approvalFixture(t)
 	ctx := context.Background()
 	now := persistence.Now()
-	started := now.Add(-20 * time.Minute)
+	started := now.Add(-48 * time.Hour)
 	svc.nowFn = func() time.Time { return now }
 	if err := svc.repo.UpdateRun(ctx, p.UserID, p.RunID, map[string]any{"approval_started_at": started}); err != nil {
 		t.Fatal(err)
 	}
 	count, err := svc.ReapHarnessRuns(ctx)
-	if err != nil || count != 1 {
+	if err != nil || count != 0 {
 		t.Fatalf("reaper %d %v", count, err)
 	}
 	run, _ := svc.repo.GetRun(ctx, p.UserID, p.RunID)
-	if run.Status != persistence.RunFailed || run.ErrorCode != "APPROVAL_TIMEOUT" {
-		t.Fatalf("approval timeout: %+v", run)
+	if run.Status != persistence.RunAwaitingApproval {
+		t.Fatalf("approval ended: %+v", run)
+	}
+	wait, err := svc.WaitForApproval(ctx, p, proposal.ID, time.Millisecond)
+	if err != nil || wait.Status != "pending" || wait.WaitedSeconds != int((48*time.Hour).Seconds()) {
+		t.Fatalf("late poll: %+v %v", wait, err)
+	}
+	if _, err := svc.ResolveApproval(ctx, p.UserID, Command{ToolCallID: *part.ToolCallID, Result: json.RawMessage(`{"decision":"approve"}`)}); err != nil {
+		t.Fatalf("late decision: %v", err)
+	}
+}
+
+func TestSidecarApprovalHandoffWaitsForOldToolBatch(t *testing.T) {
+	svc, p, _, _, part := approvalFixture(t)
+	ctx := context.Background()
+	const oldJob = "yielding-job"
+	if err := svc.repo.UpdateRun(ctx, p.UserID, p.RunID, map[string]any{"job_id": oldJob, "harness_mode": HarnessModeSidecar}); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := svc.ResolveApproval(ctx, p.UserID, Command{ToolCallID: *part.ToolCallID, Result: json.RawMessage(`{"decision":"reject"}`)})
+	if err != nil || !receipt.FollowApproval || receipt.NoStream {
+		t.Fatalf("early receipt: %+v %v", receipt, err)
+	}
+	run, err := svc.repo.GetRun(ctx, p.UserID, p.RunID)
+	if err != nil || run.Status != persistence.RunAwaitingApproval || run.JobID != oldJob {
+		t.Fatalf("another host started before the tool batch finished: %+v %v", run, err)
+	}
+	if parked, err := svc.parkSidecarRun(ctx, p.UserID, p.RunID, oldJob); err != nil || !parked {
+		t.Fatalf("park: %v %v", parked, err)
+	}
+	if err := svc.RestoreSidecarApprovals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run, err = svc.repo.GetRun(ctx, p.UserID, p.RunID)
+	if err != nil || run.Status != persistence.RunQueued || run.JobID == oldJob || run.JobID == "" {
+		t.Fatalf("continuation was lost: %+v %v", run, err)
+	}
+	var jobs int64
+	if err := svc.store.DB.Model(&persistence.AgentJob{}).Where("subject_id = ? AND status = 'queued'", p.RunID).Count(&jobs).Error; err != nil || jobs != 1 {
+		t.Fatalf("expected one continuation, got %d: %v", jobs, err)
+	}
+}
+
+func TestSidecarApprovalRecoveryPreservesNewerTranscript(t *testing.T) {
+	svc, p, _, _, part := approvalFixture(t)
+	ctx := context.Background()
+	start := persistence.Now().Add(-48 * time.Hour)
+	if err := svc.repo.UpdateRun(ctx, p.UserID, p.RunID, map[string]any{
+		"harness_mode": HarnessModeSidecar, "status": persistence.RunFailed, "error_code": "PROVIDER_ERROR",
+		"error_message": `sidecar call: Post "http://sidecar/run": Client.Timeout exceeded while awaiting headers`,
+		"started_at":    start.Add(-time.Second), "approval_started_at": start, "finished_at": start.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newer, err := svc.SubmitCommands(ctx, p.UserID, CommandsRequest{ThreadID: &p.ThreadID, Commands: []Command{{
+		Type: "add-message", Message: &CommandMessage{Role: "user", Parts: []CommandPart{{Type: "text", Text: "later message"}}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.repo.SetRunStatus(ctx, p.UserID, newer.RunID, persistence.RunSucceeded, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RestoreSidecarApprovals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, err := svc.ThreadState(ctx, p.UserID, p.ThreadID)
+	if err != nil || state.IsRunning || !state.FastTask.AwaitingApproval || state.FastTask.RunID != p.RunID || len(state.Messages) != 3 || state.Messages[2].Parts[0].Text != "later message" {
+		t.Fatalf("restored transcript: %+v %v", state, err)
+	}
+	if _, err := svc.ResolveApproval(ctx, p.UserID, Command{ToolCallID: *part.ToolCallID, Result: json.RawMessage(`{"decision":"approve"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := svc.repo.GetRun(ctx, p.UserID, p.RunID)
+	if err != nil || run.Status != persistence.RunQueued {
+		t.Fatalf("restored continuation: %+v %v", run, err)
+	}
+	modelInput, err := svc.modelContext(ctx, run, "rules")
+	encoded, _ := json.Marshal(modelInput)
+	if err != nil || !strings.Contains(string(encoded), `\"applied\":true`) || strings.Contains(string(encoded), "later message") {
+		t.Fatalf("restored model history: %s %v", encoded, err)
 	}
 }
 func TestHarnessTerminalWriteFailureRollsBack(t *testing.T) {

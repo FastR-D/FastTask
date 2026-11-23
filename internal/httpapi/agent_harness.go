@@ -27,7 +27,7 @@ const (
 	// image data has to be readable in order to be discarded (doc/harness.md §4.3).
 	agentProxyMaxBodyBytes = 16 << 20
 	// agentApprovalSegment is one long-poll segment (§7). Short enough that an intermediate
-	// proxy does not cut the wait, long enough that a 15 minute wait is 30 requests.
+	// proxy does not cut the wait.
 	agentApprovalSegment = 30 * time.Second
 )
 
@@ -132,8 +132,7 @@ func writeProxyError(c *gin.Context, err error) {
 
 // handleAgentApprovalPoll implements GET /agent/runs/{run_id}/approvals/{proposal_id}
 // (doc/harness.md §7): one segment of the wait for a user decision. A "pending" answer is not
-// a failure — the host polls again until the total wait limit, which the server enforces, is
-// reached.
+// a failure. A browser host can continue polling in bounded requests.
 func (s *Server) handleAgentApprovalPoll(c *gin.Context) {
 	principal, ok := s.authenticateHarness(c)
 	if !ok {
@@ -209,7 +208,7 @@ func (s *Server) registerAgentHarnessOpenAPI() {
 	api.Paths["/agent/runs/{run_id}/approvals/{proposal_id}"] = &huma.PathItem{Get: &huma.Operation{
 		OperationID: "poll-agent-approval",
 		Summary:     "Wait for an approval decision",
-		Description: "One segment of the approval long poll that keeps a host's tool call open while the user decides (doc/harness.md §7). Returns status=pending when the segment elapsed without a decision, so the host polls again; approved, rejected, conflict, cancelled and timeout are final. Segments are 30 seconds and the total wait is capped at 15 minutes, which the server enforces and which does not count against the run wall clock.",
+		Description: "One bounded segment of an approval long poll. A pending decision remains valid across requests. Time waiting for a decision is excluded from the model execution budget.",
 		Security:    harness,
 		Responses: map[string]*huma.Response{
 			"200": {

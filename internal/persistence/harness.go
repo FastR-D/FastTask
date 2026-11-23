@@ -145,6 +145,7 @@ func (r *AgentRepository) ListStaleHarnessRuns(ctx context.Context, heartbeatCut
 		JOIN agent_harness_tokens t ON t.run_id = r.id AND t.revoked_at IS NULL
 		WHERE r.harness_mode <> ''
 		  AND r.status IN ('queued', 'running', 'awaiting_approval', 'cancelling')
+		  AND NOT (r.harness_mode = 'sidecar' AND r.status = 'queued')
 		  AND COALESCE(t.last_heartbeat_at, t.created_at) < ?
 		UNION ALL
 		SELECT r.id, r.user_id, r.thread_id, r.status,
@@ -152,6 +153,7 @@ func (r *AgentRepository) ListStaleHarnessRuns(ctx context.Context, heartbeatCut
 		FROM agent_runs r
 		WHERE r.harness_mode <> ''
 		  AND r.status IN ('queued', 'running')
+		  AND NOT (r.harness_mode = 'sidecar' AND r.status = 'queued')
 		  AND r.created_at < ?
 		  AND NOT EXISTS (SELECT 1 FROM agent_harness_tokens t WHERE t.run_id = r.id)`,
 		heartbeatCutoff, pickupCutoff).

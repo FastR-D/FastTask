@@ -44,10 +44,18 @@ func (s *AgentService) BeginHarnessRun(ctx context.Context, userID, runID string
 // nil session when the run has no assistant message yet, which callers treat as "status
 // only, nothing to stream into".
 func (s *harnessLifecycle) loadRunSession(ctx context.Context, run *persistence.AgentRun) (*runSession, error) {
-	sink := &dbSink{repo: s.repo(), userID: run.UserID, run: run.ID}
+	sess, err := s.loadRunSessionFrom(ctx, s.repo(), run)
+	if sess != nil {
+		sess.state.FastTask.PendingProposals = s.svc.pendingProposals(ctx, run.UserID, run.ThreadID)
+	}
+	return sess, err
+}
+
+func (s *harnessLifecycle) loadRunSessionFrom(ctx context.Context, repo *persistence.AgentRepository, run *persistence.AgentRun) (*runSession, error) {
+	sink := &dbSink{repo: repo, userID: run.UserID, run: run.ID}
 	// Continue the chunk log where it ended so the resume cursor stays correct even when this
 	// session emits nothing.
-	if count, err := s.repo().CountChunks(ctx, run.UserID, run.ID); err == nil {
+	if count, err := repo.CountChunks(ctx, run.UserID, run.ID); err == nil {
 		sink.lastSeq = int(count)
 	}
 	sess := &runSession{sessionStream: &sessionStream{
@@ -60,10 +68,11 @@ func (s *harnessLifecycle) loadRunSession(ctx context.Context, run *persistence.
 		sess.state.FastTask.RunID = run.ID
 	}
 
-	messages, err := s.repo().ListThreadMessages(ctx, run.UserID, run.ThreadID)
+	messages, err := repo.ListThreadMessages(ctx, run.UserID, run.ThreadID)
 	if err != nil {
 		return nil, err
 	}
+	reader := threadStateService{repo: repo, svc: s.svc}
 	for i, m := range messages {
 		status := protocol.CompleteStatus("")
 		if m.RunID == run.ID && m.Role == "assistant" {
@@ -71,7 +80,7 @@ func (s *harnessLifecycle) loadRunSession(ctx context.Context, run *persistence.
 			sess.assistantID = m.ID
 			sess.assistantIdx = i
 		}
-		pm, err := s.svc.toProtocolMessage(ctx, run.UserID, m, status)
+		pm, err := reader.toProtocolMessage(ctx, run.UserID, m, status)
 		if err != nil {
 			return nil, err
 		}
@@ -80,7 +89,6 @@ func (s *harnessLifecycle) loadRunSession(ctx context.Context, run *persistence.
 	if sess.assistantID == "" {
 		return nil, nil
 	}
-	sess.state.FastTask.PendingProposals = s.svc.pendingProposals(ctx, run.UserID, run.ThreadID)
 	sess.userText = lastUserText(sess.state.Messages)
 	return sess, nil
 }

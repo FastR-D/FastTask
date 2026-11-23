@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/FastR-D/FastTask/internal/agent/protocol"
 	"github.com/FastR-D/FastTask/internal/persistence"
@@ -28,12 +27,9 @@ var (
 // >15 methods) as a cohesive unit and embedded back, so AgentService.ResolveApproval
 // resolves by promotion and SubmitCommands routes add-tool-result receipts to it unchanged.
 type approvalService struct {
-	// Receipt requests can arrive twice (two tabs or a retry). Serialize their
-	// read/apply/record sequence so a duplicate never overwrites the first result.
-	receipts sync.Mutex
-	app      *App
-	repo     *persistence.AgentRepository
-	store    *persistence.Store
+	app   *App
+	repo  *persistence.AgentRepository
+	store *persistence.Store
 	// svc reaches the harness units a resolved proposal has to notify: under a host the same
 	// turn continues instead of a new job being queued (doc/harness.md §7).
 	svc *AgentService
@@ -67,8 +63,6 @@ func firstToolResult(commands []Command) (Command, bool) {
 // Ordering (§7.3): auth (done by the caller) → apply/reject → record tool result
 // → wake Worker. On apply failure the run is NOT resumed and the error is returned.
 func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cmd Command) (SubmitResult, error) {
-	s.receipts.Lock()
-	defer s.receipts.Unlock()
 	toolCallID := strings.TrimSpace(cmd.ToolCallID)
 	if toolCallID == "" {
 		return SubmitResult{}, ErrEmptyCommand
@@ -288,6 +282,10 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 
 	}
 
+	if run.HarnessMode == HarnessModeSidecar && !detached {
+		follow, err := s.svc.continueSidecarApproval(ctx, userID, run.ID)
+		return SubmitResult{ThreadID: run.ThreadID, RunID: run.ID, FromSeq: fromSeq, NoStream: !follow, FollowApproval: follow}, err
+	}
 	if current, err := s.repo.GetRun(ctx, userID, run.ID); err != nil {
 		return SubmitResult{}, err
 	} else if IsTerminalRunStatus(current.Status) {
@@ -318,6 +316,10 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 // not stay parked, and the model learns the outcome from the recorded conflict
 // (doc/harness.md §7).
 func (s *approvalService) releaseHarnessRun(ctx context.Context, userID string, run *persistence.AgentRun, partID string) {
+	if run.HarnessMode == HarnessModeSidecar && run.Status == persistence.RunAwaitingApproval {
+		_, _ = s.svc.continueSidecarApproval(ctx, userID, run.ID)
+		return
+	}
 	if run.HarnessMode == "" {
 		return
 	}
@@ -434,11 +436,7 @@ func (s *approvalService) recordApproval(ctx context.Context, userID, partID, st
 func (s *approvalService) requeueRun(ctx context.Context, userID string, run *persistence.AgentRun) error {
 	return s.store.Transaction(ctx, func(tx *gorm.DB) error {
 		now := persistence.Now()
-		job := persistence.AgentJob{
-			ID: persistence.NewID("job"), UserID: userID, Type: "agent_run", Status: "queued",
-			SubjectType: "agent_run", SubjectID: run.ID, InputJSON: "{}",
-			MaxAttempts: 1, RunAfter: now, Revision: 1, CreatedAt: now, UpdatedAt: now,
-		}
+		job := newAgentRunJob(run, now)
 		if err := tx.WithContext(ctx).Create(&job).Error; err != nil {
 			return err
 		}

@@ -235,22 +235,6 @@ func (r *AgentRepository) LatestRun(ctx context.Context, userID string) (*AgentR
 	return &run, nil
 }
 
-// GetActiveRunForUser returns the user's in-flight run without naming a thread.
-// assistant-ui's in-memory thread list hands a freshly mounted chat a temporary
-// __LOCALID_... remoteId, so a resuming client has no server thread id to
-// present; the authenticated user is the only stable scope. updated_at ordering
-// keeps the newest run for an account that has more than one thread.
-func (r *AgentRepository) GetActiveRunForUser(ctx context.Context, userID string) (*AgentRun, error) {
-	var run AgentRun
-	err := r.db(ctx).
-		Where("user_id = ? AND status IN ?", userID, activeRunStatuses).
-		Order("updated_at DESC").First(&run).Error
-	if err != nil {
-		return nil, err
-	}
-	return &run, nil
-}
-
 // GetRunByJobID finds the run currently carried by an AgentJob.
 func (r *AgentRepository) GetRunByJobID(ctx context.Context, userID, jobID string) (*AgentRun, error) {
 	var run AgentRun
@@ -610,14 +594,13 @@ func (r *AgentRepository) CountChunks(ctx context.Context, userID, runID string)
 	return count, err
 }
 
-// MarkInterruptedRuns transitions any queued/running runs to interrupted. It is
-// called on startup: v1 does not resume across a process restart, so runs left
-// in flight by a crashed process are terminal-failed while their partial
-// messages are preserved (doc/agent-impl.md §4.2).
+// MarkInterruptedRuns ends work that lost its host during restart. The Worker
+// can still claim queued sidecar jobs, including approved continuations.
 func (r *AgentRepository) MarkInterruptedRuns(ctx context.Context, errorCode string) (int64, error) {
 	now := Now()
 	res := r.db(ctx).Model(&AgentRun{}).
 		Where("status IN ?", []string{RunQueued, RunRunning}).
+		Where("NOT (status = ? AND harness_mode = 'sidecar')", RunQueued).
 		Updates(map[string]any{
 			"status":        RunInterrupted,
 			"error_code":    errorCode,

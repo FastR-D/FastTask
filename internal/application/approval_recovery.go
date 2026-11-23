@@ -129,6 +129,13 @@ func (s *harnessTools) commitPendingApproval(ctx context.Context, sess *runSessi
 		if err := stream.emitSet(protocol.MessageStatusPath(assistantIdx), protocol.RequiresActionStatus()); err != nil {
 			return err
 		}
+		if run.HarnessMode == HarnessModeSidecar {
+			stream.state.FastTask.AwaitingApproval = true
+			stream.state.IsRunning = false
+			if err := stream.emitSet(protocol.IsRunningPath(), false); err != nil {
+				return err
+			}
+		}
 		if err := stream.emitSet(protocol.FastTaskPath(), stream.state.FastTask); err != nil {
 			return err
 		}

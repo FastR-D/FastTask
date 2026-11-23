@@ -11,9 +11,8 @@ import (
 
 // threadStateService turns persisted agent rows back into wire state
 // (doc/agent-impl.md §2.7): rebuilding one message from its parts, restoring a
-// user's latest conversation for a chat view that was unmounted, and resolving
-// the in-flight run behind a client that can only present assistant-ui's
-// temporary thread id. It is split out of AgentService and embedded back, so the
+// user's latest conversation for a chat view that was unmounted. It is split
+// out of AgentService and embedded back, so the
 // promoted methods keep their existing call sites (wiring.md §9: no struct in
 // application declares more than 15 methods).
 type threadStateService struct {
@@ -106,6 +105,7 @@ func (s *threadStateService) LatestThreadState(ctx context.Context, userID strin
 	state.FastTask.ThreadID = run.ThreadID
 	state.FastTask.HarnessMode = run.HarnessMode
 	state.FastTask.RunID = run.ID
+	state.FastTask.AwaitingApproval = run.HarnessMode == HarnessModeSidecar && run.Status == persistence.RunAwaitingApproval
 	state.IsRunning = run.Status == persistence.RunQueued || run.Status == persistence.RunRunning
 	return state, true, nil
 }
@@ -135,9 +135,8 @@ func (s *threadStateService) ThreadState(ctx context.Context, userID, threadID s
 	}
 	if runErr == nil {
 		state.FastTask.HarnessMode = run.HarnessMode
-		if run.HarnessMode != "" {
-			state.FastTask.RunID = run.ID
-		}
+		state.FastTask.RunID = run.ID
+		state.FastTask.AwaitingApproval = run.HarnessMode == HarnessModeSidecar && run.Status == persistence.RunAwaitingApproval
 		state.IsRunning = run.Status == persistence.RunQueued || run.Status == persistence.RunRunning ||
 			run.Status == persistence.RunCancelling
 		if strings.TrimSpace(run.StateJSON) != "" && run.StateJSON != "{}" {
@@ -173,22 +172,4 @@ func (s *threadStateService) ThreadState(ctx context.Context, userID, threadID s
 		state.Messages = append(state.Messages, wire)
 	}
 	return state, nil
-}
-
-// ResumeCurrentState resolves a browser's temporary local thread ID to the
-// authenticated user's single active run. This is only used for the library's
-// __LOCALID_... identity; normal thread IDs still receive ownership checks.
-func (s *threadStateService) ResumeCurrentState(ctx context.Context, userID string) (ResumeStateResult, bool, error) {
-	run, err := s.repo.GetActiveRunForUser(ctx, userID)
-	if err != nil {
-		if persistence.IsNotFound(err) {
-			return ResumeStateResult{}, false, nil
-		}
-		return ResumeStateResult{}, false, err
-	}
-	stateJSON := run.StateJSON
-	if strings.TrimSpace(stateJSON) == "" {
-		stateJSON = "{}"
-	}
-	return ResumeStateResult{State: json.RawMessage(stateJSON), RunID: run.ID}, true, nil
 }

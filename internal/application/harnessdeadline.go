@@ -26,6 +26,9 @@ func (s *harnessProxy) OpenModelProxy(parent context.Context, p HarnessPrincipal
 	if run.CancelRequested {
 		return nil, &ProxyError{Code: "CANCELLED", Status: 409, Detail: "run cancelled", Fatal: true}
 	}
+	if run.Status == persistence.RunAwaitingApproval {
+		return nil, &ProxyError{Code: "APPROVAL_PENDING", Status: 409, Detail: "the run is awaiting a decision", Fatal: true}
+	}
 	if limit := s.svc.limits.MaxTurns; limit > 0 && run.ModelCalls >= limit {
 		if err := s.emitTurnLimitNotice(parent, run); err != nil {
 			return nil, err
