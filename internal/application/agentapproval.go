@@ -115,6 +115,7 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 	// The client has already rendered chunks [0, CheckpointSeq); the continuation
 	// streams from there so no append-text is re-applied (§2.8).
 	fromSeq := run.CheckpointSeq
+	schedule := scheduleFromToolResult(part.ResultJSON)
 
 	if decision.Decision == "approve" {
 		if part.ProposalID == nil {
@@ -202,18 +203,10 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 			if proposal.Kind != "task_tree_patch" {
 				return SubmitResult{}, ErrValidation
 			}
-			var patches []map[string]any
-			if err := json.Unmarshal([]byte(proposal.PatchJSON), &patches); err != nil {
-				if conflictErr := s.recordConflict(ctx, userID, part.ID, "the task tree proposal could not be read; read the current tree and submit a corrected proposal"); conflictErr != nil {
-					return SubmitResult{}, conflictErr
-				}
-				s.releaseHarnessRun(ctx, userID, run, part.ID)
-				return SubmitResult{}, fmt.Errorf("%w: malformed task tree proposal", ErrValidation)
-			}
 			// ApplyProposal re-validates ownership, base revision, parent/child and
 			// cycles inside its transaction (invariant 4). A moved base revision yields
 			// ErrRevision → 412, and the proposal is marked conflict, never overwritten.
-			newRevision, applyErr := s.app.ApplyProposal(ctx, userID, &proposal, patches, proposal.BaseRevision)
+			newRevision, applyErr := s.app.ApplyProposal(ctx, userID, &proposal, nil, proposal.BaseRevision)
 			if applyErr != nil {
 				if errors.Is(applyErr, ErrApprovalNotAwaiting) || errors.Is(applyErr, ErrApprovalDuplicate) {
 					return SubmitResult{}, applyErr
@@ -247,7 +240,12 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 		if createdGoal, ok := receipt["goal_id"].(string); ok {
 			goalID = createdGoal
 		}
-		receipt["today_summary"] = s.app.approvalTodaySummary(ctx, userID, goalID)
+		if schedule != nil {
+			receipt["schedule"] = schedule
+		}
+		if schedule == nil || !schedule.DateOnly {
+			receipt["today_summary"] = s.app.approvalTodaySummary(ctx, userID, goalID)
+		}
 		if part.ToolName == "propose_task_tree_patch" {
 			var treeRevision int
 			if err := s.store.DB.WithContext(ctx).Model(&persistence.TaskTreeRevision{}).Where("goal_id = ? AND user_id = ?", goalID, userID).Select("COALESCE(MAX(revision),0)").Scan(&treeRevision).Error; err == nil {
@@ -261,7 +259,11 @@ func (s *approvalService) ResolveApproval(ctx context.Context, userID string, cm
 	} else {
 		// Reject: the reason is recorded as the tool result so the model sees it on
 		// resume and can re-propose (§7: "拒绝是有价值的信号").
-		resultJSON, _ := json.Marshal(map[string]any{"decision": "reject", "reason": decision.Reason, "applied": false})
+		receipt := map[string]any{"decision": "reject", "reason": decision.Reason, "applied": false}
+		if schedule != nil {
+			receipt["schedule"] = schedule
+		}
+		resultJSON, _ := json.Marshal(receipt)
 		if err := s.store.Transaction(ctx, func(tx *gorm.DB) error {
 			if err := guardApprovalTx(ctx, tx, userID); err != nil {
 				return err
@@ -373,13 +375,17 @@ func (s *approvalService) continueHarnessRun(ctx context.Context, userID string,
 // on the long poll learns the proposal basis moved instead of waiting for a decision that will never
 // come (§7.4). For a server-driven run it is a no-op: nothing is waiting.
 func (s *approvalService) recordConflict(ctx context.Context, userID, partID, reason string) error {
-	payload, _ := json.Marshal(map[string]any{"decision": "conflict", "applied": false, "error": "the approved change could not be applied; read the current state before proposing a corrected change", "detail": reason})
 	return s.store.Transaction(ctx, func(tx *gorm.DB) error {
 		repo := s.repo.WithTx(tx)
 		part, err := repo.GetPart(ctx, userID, partID)
 		if err != nil {
 			return err
 		}
+		receipt := map[string]any{"decision": "conflict", "applied": false, "error": "the approved change could not be applied; read the current state before proposing a corrected change", "detail": reason}
+		if schedule := scheduleFromToolResult(part.ResultJSON); schedule != nil {
+			receipt["schedule"] = schedule
+		}
+		payload, _ := json.Marshal(receipt)
 		result := tx.Model(&persistence.AgentMessagePart{}).Where("id = ? AND user_id = ? AND approval_status = 'pending'", partID, userID).Updates(map[string]any{"result_json": string(payload), "is_error": true, "approval_status": "conflict", "updated_at": persistence.Now()})
 		if result.Error != nil {
 			return result.Error

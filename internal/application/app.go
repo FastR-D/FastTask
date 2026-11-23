@@ -1184,6 +1184,16 @@ func (a *GoalService) applyProposalTx(tx *gorm.DB, userID string, proposal *pers
 		if current.BaseRevision > 0 && current.BaseRevision != treeRevision {
 			return ErrRevision
 		}
+		if patches == nil {
+			payload, err := decodeTaskTreeProposal(current.PatchJSON)
+			if err != nil {
+				return err
+			}
+			if payload.Schedule != nil && (payload.GoalRevision != goal.Revision || current.BaseRevision != treeRevision) {
+				return ErrRevision
+			}
+			patches = payload.Patch
+		}
 		now := persistence.Now()
 		byID := map[string]persistence.Task{}
 		parents := map[string]string{}
@@ -1213,6 +1223,9 @@ func (a *GoalService) applyProposalTx(tx *gorm.DB, userID string, proposal *pers
 			switch op {
 			case "create":
 				task := persistence.Task{ID: persistence.NewID("task"), UserID: userID, GoalID: current.GoalID, Type: textValue(patch["type"]), Title: textValue(patch["title"]), Description: textValue(patch["description"]), SuccessCriteria: textValue(patch["success_criteria"]), MinimumAction: textValue(patch["minimum_action"]), Priority: intValue(patch["priority"]), EstimateMinutes: intValue(patch["estimate_minutes"]), Position: i, Status: "ready", Revision: 1, CreatedAt: now, UpdatedAt: now}
+				if _, err := proposedDates(patch, &task); err != nil {
+					return ErrValidation
+				}
 				if (task.Type != "milestone" && task.Type != "task" && task.Type != "action") || task.Title == "" || task.SuccessCriteria == "" || task.MinimumAction == "" {
 					return ErrValidation
 				}
@@ -1312,6 +1325,11 @@ func (a *GoalService) applyProposalTx(tx *gorm.DB, userID string, proposal *pers
 							updates[field] = value
 						}
 					}
+					if scheduled, err := proposedDates(patch, &task); err != nil {
+						return ErrValidation
+					} else if scheduled {
+						updates["planned_start"], updates["planned_end"] = *task.PlannedStart, *task.PlannedEnd
+					}
 					if status := textValue(patch["status"]); status != "" {
 						if status != "ready" && status != "in_progress" && status != "blocked" && status != "paused" && status != "cancelled" {
 							return ErrValidation
@@ -1393,8 +1411,10 @@ func (a *GoalService) applyProposalTx(tx *gorm.DB, userID string, proposal *pers
 		if err := a.snapshotTaskTree(tx, userID, current.GoalID, "agent proposal applied", "agent"); err != nil {
 			return err
 		}
-		if err := refreshLifecycleScheduleTx(tx, userID, now); err != nil {
-			return err
+		if !scheduleOnlyPatch(patches) {
+			if err := refreshLifecycleScheduleTx(tx, userID, now); err != nil {
+				return err
+			}
 		}
 		result := tx.Model(&persistence.Proposal{}).Where("id = ? AND revision = ? AND status = 'pending'", current.ID, current.Revision).Updates(map[string]any{"status": "applied", "revision": current.Revision + 1, "updated_at": now})
 		if result.Error != nil {

@@ -68,6 +68,7 @@ func (p proposalTool) Execute(ctx context.Context, tc ToolContext, args map[stri
 		Result: map[string]any{
 			"proposal_id": proposal.ID, "status": "pending", "base_revision": proposal.BaseRevision,
 			"summary": ref.Summary, "kind": p.kind, "diff": ref.Diff, "restore_scope": ref.RestoreScope, "note": "需用户确认后才会落库",
+			"schedule": ref.Schedule,
 		},
 	}, nil
 }
@@ -88,9 +89,11 @@ func NewProposalTools(app *App) []Tool {
 				Name:        "propose_task_tree_patch",
 				Description: "Propose a task-tree change (create/update/move/supersede/delete/restore) for an existing goal, including adding research steps in continued conversation. Use one batch of concrete steps with distinct outputs. Read the current tree before adding: reuse or update equivalent unfinished work; describe a real independent round's distinct material or context in description/output. Delete moves a task subtree to the recoverable recycle bin; restore requires the original task ID. User approval is required. Read the tree first for target_id and tree_revision; preserve started work and evidence.",
 				Parameters: objectSchema(map[string]any{
-					"goal_id":       stringProp("The goal whose task tree to change."),
-					"instruction":   stringProp("Short human-readable rationale for the change."),
-					"base_revision": integerProp("The tree_revision from get_task_tree this patch is based on; omit only to reuse this run's verified observation.", 0, 0),
+					"goal_id":              stringProp("The goal whose task tree to change."),
+					"instruction":          stringProp("Short human-readable rationale for the change."),
+					"base_revision":        integerProp("The tree_revision from get_task_tree this patch is based on; omit only to reuse this run's verified observation.", 0, 0),
+					"schedule_assumptions": stringProp("For Gantt planning, disclose the proposed start, availability or other scheduling assumptions in plain language."),
+					"reschedule_existing":  map[string]any{"type": "boolean", "description": "Set true only if the user asked to change existing dates or dates of work already started. Defaults to filling eligible undated tasks."},
 					"patch": map[string]any{
 						"type":        "array",
 						"description": "Ordered operations. create requires type/title/success_criteria/minimum_action; update requires target_id and at least one changed field; move requires target_id and an explicit parent_id (null for root) or earlier parent_ref; supersede/delete/restore only accept op and target_id. estimate_minutes is TOTAL work, not today's budget. Parent is tree structure; array order recommends sequence. depends_on/depends_on_refs is only for required finished artifacts; explain that artifact in description. Omitted dependencies stay unchanged; an empty depends_on array explicitly removes them. Do not invent quantitative research targets the user did not request.",
@@ -144,22 +147,25 @@ func taskTreePatchOperationSchema() map[string]any {
 			"description": "Existing parent task ID; explicitly use null to move to the root.",
 			"anyOf":       []any{map[string]any{"type": "string"}, map[string]any{"type": "null"}},
 		},
-		"parent_ref":       stringProp("Temporary reference of an earlier created parent; do not combine with parent_id."),
-		"type":             stringProp("Task kind.", "milestone", "task", "action"),
-		"title":            stringProp("Task title, up to 300 characters."),
-		"description":      stringProp("Execution advice and real required artifacts, up to 8000 characters."),
-		"success_criteria": stringProp("Observable final output, up to 2000 characters."),
-		"minimum_action":   stringProp("Concrete next small action, up to 2000 characters."),
-		"status":           stringProp("Editable open status; final completion requires evidence through the completion action.", "ready", "in_progress", "blocked", "paused", "cancelled"),
-		"blocked_reason":   stringProp("Why a blocked task cannot start, up to 2000 characters."),
-		"priority":         integerProp("Priority, 0..100.", 0, 100),
-		"estimate_minutes": integerProp("Total task work minutes, 1..1440, separate from today's budget.", 1, 1440),
-		"position":         integerProp("Sibling order for update/move, starting at zero.", 0, 1<<31-1),
-		"depends_on":       map[string]any{"type": "array", "items": stringProp("Existing task ID for a truly required finished artifact; empty array clears dependencies.")},
-		"depends_on_refs":  map[string]any{"type": "array", "items": stringProp("Temporary reference of an earlier new prerequisite.")},
-		"uncertainty":      integerProp("Research uncertainty coordinate for create/update, 0..100.", 0, 100),
-		"contribution":     integerProp("Research contribution coordinate for create/update, 0..100.", 0, 100),
-		"coord_rationale":  stringProp("Reason for a supplied research coordinate."),
+		"parent_ref":               stringProp("Temporary reference of an earlier created parent; do not combine with parent_id."),
+		"type":                     stringProp("Task kind.", "milestone", "task", "action"),
+		"title":                    stringProp("Task title, up to 300 characters."),
+		"description":              stringProp("Execution advice and real required artifacts, up to 8000 characters."),
+		"success_criteria":         stringProp("Observable final output, up to 2000 characters."),
+		"minimum_action":           stringProp("Concrete next small action, up to 2000 characters."),
+		"status":                   stringProp("Editable open status; final completion requires evidence through the completion action.", "ready", "in_progress", "blocked", "paused", "cancelled"),
+		"blocked_reason":           stringProp("Why a blocked task cannot start, up to 2000 characters."),
+		"priority":                 integerProp("Priority, 0..100.", 0, 100),
+		"estimate_minutes":         integerProp("Total task work minutes, 1..1440, separate from today's budget.", 1, 1440),
+		"planned_start":            stringProp("First planned calendar date for the Gantt chart (YYYY-MM-DD). Supply with planned_end on create or update."),
+		"planned_end":              stringProp("Last planned calendar date, inclusive (YYYY-MM-DD). Supply with planned_start on create or update."),
+		"leave_unscheduled_reason": stringProp("For a new task with no dates, explain the user's request or the unknown prerequisite that prevents assigning dates."),
+		"position":                 integerProp("Sibling order for update/move, starting at zero.", 0, 1<<31-1),
+		"depends_on":               map[string]any{"type": "array", "items": stringProp("Existing task ID for a truly required finished artifact; empty array clears dependencies.")},
+		"depends_on_refs":          map[string]any{"type": "array", "items": stringProp("Temporary reference of an earlier new prerequisite.")},
+		"uncertainty":              integerProp("Research uncertainty coordinate for create/update, 0..100.", 0, 100),
+		"contribution":             integerProp("Research contribution coordinate for create/update, 0..100.", 0, 100),
+		"coord_rationale":          stringProp("Reason for a supplied research coordinate."),
 	})
 }
 
@@ -172,14 +178,6 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 		if goalID == "" {
 			return PendingProposalRef{}, nil, "", nil
 		}
-		// The goal must belong to the caller; a stranger's goal is not-found.
-		var goal persistence.Goal
-		if err := a.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ? AND deleted_at IS NULL AND status = 'active'", goalID, tc.UserID).First(&goal).Error; err != nil {
-			if persistence.IsNotFound(err) {
-				return PendingProposalRef{}, nil, "", nil // empty GoalID -> structured error
-			}
-			return PendingProposalRef{}, nil, "", err
-		}
 		patch, problem := normalizePatch(args["patch"])
 		if problem != "" {
 			return PendingProposalRef{}, nil, "", patchError(problem)
@@ -187,11 +185,19 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 		if problem := validateNewTaskPatchIntent(patch); problem != "" {
 			return PendingProposalRef{}, nil, "", patchError(problem)
 		}
+		base, goalBase, observationErr := observedTreeRevisions(ctx, a, tc, goalID)
 		var current int
 		var restoreScope *RestoreScope
+		var goal persistence.Goal
+		var schedule *proposedSchedule
+		stagedPatch := patch
+		reschedule, _ := args["reschedule_existing"].(bool)
 		// The identity check and implicit base revision must describe the same
 		// tree. Apply keeps its revision guard if the tree changes after staging.
 		if err := a.Store.Transaction(ctx, func(tx *gorm.DB) error {
+			if err := tx.Where("id = ? AND user_id = ? AND deleted_at IS NULL AND status = 'active'", goalID, tc.UserID).First(&goal).Error; err != nil {
+				return err
+			}
 			var tasks []persistence.Task
 			if err := tx.Where("goal_id = ? AND user_id = ?", goalID, tc.UserID).Order("id").Find(&tasks).Error; err != nil {
 				return err
@@ -204,13 +210,26 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 			}
 			var err error
 			restoreScope, err = previewRestoreScope(patch, tasks)
+			if err != nil {
+				return err
+			}
+			assumptions := stringArg(args, "schedule_assumptions")
+			if goalBase > 0 {
+				stagedPatch, assumptions, err = defaultNewTaskDates(tx, tc.UserID, patch, tasks, assumptions)
+				if err != nil {
+					return err
+				}
+			}
+			schedule, err = schedulePreview(stagedPatch, tasks, goal.TargetDate, assumptions, reschedule)
 			return err
 		}); err != nil {
+			if persistence.IsNotFound(err) && goal.ID == "" {
+				return PendingProposalRef{}, nil, "", nil // empty GoalID -> structured error
+			}
 			return PendingProposalRef{}, nil, "", err
 		}
-		base, err := observedTreeRevision(ctx, a, tc, goalID)
-		if err != nil {
-			return PendingProposalRef{}, nil, "", patchError(err.Error())
+		if observationErr != nil {
+			return PendingProposalRef{}, nil, "", patchError(observationErr.Error())
 		}
 		if raw, provided := args["base_revision"]; provided && raw != nil {
 			var revision int
@@ -226,9 +245,19 @@ func buildTaskTreePatchProposal(app *App) func(context.Context, *App, ToolContex
 		}
 		ref := PendingProposalRef{
 			GoalID: goalID, BaseRevision: base,
-			Diff: patch, Summary: summarizePatch(patch), RestoreScope: restoreScope,
+			Diff: stagedPatch, Summary: summarizePatch(stagedPatch), RestoreScope: restoreScope, Schedule: schedule,
 		}
-		return ref, patch, strings.TrimSpace(stringArg(args, "instruction")), nil
+		var payload any = stagedPatch
+		if schedule != nil {
+			if goalBase == 0 {
+				return PendingProposalRef{}, nil, "", patchError("read the current task tree and goal deadline before proposing dates")
+			}
+			if goalBase != goal.Revision {
+				return PendingProposalRef{}, nil, "", ErrRevision
+			}
+			payload = taskTreeSchedulePayload{Patch: stagedPatch, GoalRevision: goalBase, Schedule: schedule}
+		}
+		return ref, payload, strings.TrimSpace(stringArg(args, "instruction")), nil
 	}
 }
 
@@ -255,6 +284,8 @@ func validateNewTaskPatchIntent(patch []map[string]any) string {
 			for _, key := range []string{"uncertainty", "contribution", "coord_rationale"} {
 				allowed[key] = op != "move"
 			}
+			allowed["planned_start"], allowed["planned_end"] = op != "move", op != "move"
+			allowed["leave_unscheduled_reason"] = op == "create"
 		}
 		for key, value := range node {
 			if !allowed[key] {

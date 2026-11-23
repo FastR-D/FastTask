@@ -51,11 +51,14 @@ func NewRouteDeps(app *application.App, auth *platformauth.Service, cfg *config.
 // The per-domain registrars. Each embeds RouteDeps and implements RegisterRoutes;
 // the route definitions live in the corresponding registerX-derived method.
 type (
-	authRoutes              struct{ RouteDeps }
-	meRoutes                struct{ RouteDeps }
-	goalRoutes              struct{ RouteDeps }
-	taskRoutes              struct{ RouteDeps }
-	taskTreeRoutes          struct{ RouteDeps }
+	authRoutes     struct{ RouteDeps }
+	meRoutes       struct{ RouteDeps }
+	goalRoutes     struct{ RouteDeps }
+	taskRoutes     struct{ RouteDeps }
+	taskTreeRoutes struct {
+		RouteDeps
+		agent *application.AgentService
+	}
 	lensRoutes              struct{ RouteDeps }
 	planRoutes              struct{ RouteDeps }
 	sessionRoutes           struct{ RouteDeps }
@@ -78,11 +81,13 @@ type (
 )
 
 // Constructors returning the interface, one per domain, for the fx "routes" group.
-func NewAuthRoutes(d RouteDeps) RouteRegistrar              { return authRoutes{d} }
-func NewMeRoutes(d RouteDeps) RouteRegistrar                { return meRoutes{d} }
-func NewGoalRoutes(d RouteDeps) RouteRegistrar              { return goalRoutes{d} }
-func NewTaskRoutes(d RouteDeps) RouteRegistrar              { return taskRoutes{d} }
-func NewTaskTreeRoutes(d RouteDeps) RouteRegistrar          { return taskTreeRoutes{d} }
+func NewAuthRoutes(d RouteDeps) RouteRegistrar { return authRoutes{d} }
+func NewMeRoutes(d RouteDeps) RouteRegistrar   { return meRoutes{d} }
+func NewGoalRoutes(d RouteDeps) RouteRegistrar { return goalRoutes{d} }
+func NewTaskRoutes(d RouteDeps) RouteRegistrar { return taskRoutes{d} }
+func NewTaskTreeRoutes(d RouteDeps, agent *application.AgentService) RouteRegistrar {
+	return taskTreeRoutes{RouteDeps: d, agent: agent}
+}
 func NewLensRoutes(d RouteDeps) RouteRegistrar              { return lensRoutes{d} }
 func NewPlanRoutes(d RouteDeps) RouteRegistrar              { return planRoutes{d} }
 func NewSessionRoutes(d RouteDeps) RouteRegistrar           { return sessionRoutes{d} }
@@ -106,7 +111,7 @@ func NewHarnessRoutes(d RouteDeps, agent *application.AgentService) RouteRegistr
 // rule 4); the fx composition root supplies the same registrars via group:"routes".
 func BuiltinRouteRegistrars(d RouteDeps, agent *application.AgentService) []RouteRegistrar {
 	return append([]RouteRegistrar{
-		authRoutes{d}, meRoutes{d}, goalRoutes{d}, taskRoutes{d}, taskTreeRoutes{d},
+		authRoutes{d}, meRoutes{d}, goalRoutes{d}, taskRoutes{d}, NewTaskTreeRoutes(d, agent),
 		lensRoutes{d}, planRoutes{d}, sessionRoutes{d}, conversationRoutes{d},
 		jobRoutes{d}, deviceRoutes{d}, panelRoutes{d}, importRoutes{d},
 		integrationStatusRoutes{d}, adminRoutes{d}, notificationRoutes{d},

@@ -12,7 +12,7 @@ import (
 )
 
 func planningContextTool(app *App) Tool {
-	return funcTool{def: agent.ToolDefinition{Name: "get_planning_context", Description: "Read a compact consistent snapshot of the main research goal, task tree revision, up to 30 tasks and today's commitments. Read further task-tree pages when has_more=true before inferring absence or adding duplicate work. No writes.", Parameters: objectSchema(map[string]any{"goal_id": stringProp("Optional explicit goal; defaults to primary or newest active goal.")})}, fn: app.toolPlanningContext}
+	return funcTool{def: agent.ToolDefinition{Name: "get_planning_context", Description: "Read a compact consistent snapshot of the current research goal, task tree revision, up to 30 tasks and today's commitments. Read further task-tree pages when has_more=true before inferring absence or adding duplicate work. No writes.", Parameters: objectSchema(map[string]any{"goal_id": stringProp("Optional explicit goal; defaults to the goal linked to this conversation, then the primary or newest active goal.")})}, fn: app.toolPlanningContext}
 }
 func (a *App) toolPlanningContext(ctx context.Context, tc ToolContext, args map[string]any) (ToolResult, error) {
 	result := map[string]any{}
@@ -26,6 +26,9 @@ func (a *App) toolPlanningContext(ctx context.Context, tc ToolContext, args map[
 			return err
 		}
 		id := stringArg(args, "goal_id")
+		if id == "" {
+			id = tc.ActiveGoalID
+		}
 		if id == "" {
 			id = derefString(settings.PrimaryGoalID)
 		}
@@ -90,20 +93,24 @@ func (a *App) toolPlanningContext(ctx context.Context, tc ToolContext, args map[
 	return ToolResult{Result: result}, err
 }
 
-func observedTreeRevision(ctx context.Context, a *App, tc ToolContext, goalID string) (int, error) {
+func observedTreeRevisions(ctx context.Context, a *App, tc ToolContext, goalID string) (int, int, error) {
 	var rows []persistence.AgentMessagePart
 	err := a.Store.DB.WithContext(ctx).Table("agent_message_parts p").Select("p.*").Joins("JOIN agent_messages m ON m.id = p.message_id AND m.user_id = p.user_id").Where("m.run_id = ? AND p.user_id = ? AND p.tool_name IN ? AND p.is_error = 0 AND p.result_json <> ''", tc.RunID, tc.UserID, []string{"get_task_tree", "get_planning_context"}).Order("p.updated_at DESC").Find(&rows).Error
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	for _, p := range rows {
 		var v struct {
 			GoalID       string `json:"goal_id"`
 			TreeRevision int    `json:"tree_revision"`
+			GoalRevision int    `json:"goal_revision"`
+			Goal         struct {
+				Revision int `json:"revision"`
+			} `json:"goal"`
 		}
 		if json.Unmarshal([]byte(p.ResultJSON), &v) == nil && v.GoalID == goalID {
-			return v.TreeRevision, nil
+			return v.TreeRevision, max(v.GoalRevision, v.Goal.Revision), nil
 		}
 	}
-	return 0, fmt.Errorf("read the current task tree or planning context before proposing a change")
+	return 0, 0, fmt.Errorf("read the current task tree or planning context before proposing a change")
 }

@@ -818,14 +818,19 @@ func (s taskTreeRoutes) RegisterRoutes(api huma.API) {
 		}
 		var current int
 		s.app.Store.DB.Model(&persistence.TaskTreeRevision{}).Where("goal_id = ?", input.GoalID).Select("COALESCE(MAX(revision),0)").Scan(&current)
-		if current != expected || proposal.BaseRevision != 0 && proposal.BaseRevision != current {
+		if current != expected {
 			return nil, mapError(application.ErrRevision)
 		}
-		var patches []map[string]any
-		if err := json.Unmarshal([]byte(proposal.PatchJSON), &patches); err != nil {
-			return nil, mapError(application.ErrValidation)
+		if isTaskTreeSchedule(proposal) {
+			if err := s.decideTaskTreeSchedule(ctx, p.UserID, proposal.ID, "approve"); err != nil {
+				return nil, mapError(err)
+			}
+			return &itemResponse[map[string]any]{Body: map[string]any{"proposal_id": proposal.ID}}, nil
 		}
-		created, err := s.app.ApplyProposal(ctx, p.UserID, &proposal, patches, expected)
+		if proposal.BaseRevision != 0 && proposal.BaseRevision != current {
+			return nil, mapError(application.ErrRevision)
+		}
+		created, err := s.app.ApplyProposal(ctx, p.UserID, &proposal, nil, expected)
 		if err != nil {
 			return nil, mapError(err)
 		}
@@ -836,12 +841,47 @@ func (s taskTreeRoutes) RegisterRoutes(api huma.API) {
 		if e != nil {
 			return nil, mapError(e)
 		}
-		proposal, err := s.app.RejectProposal(ctx, principal(ctx).UserID, input.GoalID, input.ProposalID, rev)
+		userID := principal(ctx).UserID
+		var staged persistence.Proposal
+		if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND goal_id = ? AND user_id = ?", input.ProposalID, input.GoalID, userID).First(&staged).Error; err != nil {
+			return nil, mapError(err)
+		}
+		if isTaskTreeSchedule(staged) {
+			if staged.Revision != rev {
+				return nil, mapError(application.ErrRevision)
+			}
+			if err := s.decideTaskTreeSchedule(ctx, userID, staged.ID, "reject"); err != nil {
+				return nil, mapError(err)
+			}
+			if err := s.app.Store.DB.WithContext(ctx).Where("id = ? AND user_id = ?", staged.ID, userID).First(&staged).Error; err != nil {
+				return nil, mapError(err)
+			}
+			return &itemResponse[persistence.Proposal]{Body: staged}, nil
+		}
+		proposal, err := s.app.RejectProposal(ctx, userID, input.GoalID, input.ProposalID, rev)
 		if err != nil {
 			return nil, mapError(err)
 		}
 		return &itemResponse[persistence.Proposal]{Body: *proposal}, nil
 	})
+}
+
+func isTaskTreeSchedule(proposal persistence.Proposal) bool {
+	return proposal.Kind == "task_tree_patch" && strings.HasPrefix(strings.TrimSpace(proposal.PatchJSON), "{")
+}
+
+// Both review surfaces deliver the same receipt for a chat-staged schedule.
+func (s taskTreeRoutes) decideTaskTreeSchedule(ctx context.Context, userID, proposalID, decision string) error {
+	part, err := s.agent.Repository().GetPartByProposalID(ctx, userID, proposalID)
+	if err != nil {
+		return err
+	}
+	if part.ToolCallID == nil || part.ToolName != "propose_task_tree_patch" {
+		return application.ErrApprovalNotAwaiting
+	}
+	result, _ := json.Marshal(map[string]string{"decision": decision})
+	_, err = s.agent.ResolveApproval(ctx, userID, application.Command{ToolCallID: *part.ToolCallID, Result: result})
+	return err
 }
 
 func (s planRoutes) RegisterRoutes(api huma.API) {
@@ -2165,7 +2205,7 @@ func mapError(err error) error {
 		return huma.NewError(http.StatusPreconditionFailed, "resource revision does not match")
 	case errors.Is(err, application.ErrPrecondition):
 		return huma.NewError(http.StatusPreconditionRequired, "If-Match is required")
-	case errors.Is(err, application.ErrConflict), errors.Is(err, application.ErrActiveSession), errors.Is(err, application.ErrExternalImportExists), errors.Is(err, domain.ErrCoreLimit), errors.Is(err, domain.ErrSupportBeforeCoreDone):
+	case errors.Is(err, application.ErrConflict), errors.Is(err, application.ErrApprovalDuplicate), errors.Is(err, application.ErrApprovalNotAwaiting), errors.Is(err, application.ErrActiveSession), errors.Is(err, application.ErrExternalImportExists), errors.Is(err, domain.ErrCoreLimit), errors.Is(err, domain.ErrSupportBeforeCoreDone):
 		return huma.Error409Conflict(err.Error())
 	case errors.Is(err, application.ErrValidation), errors.Is(err, domain.ErrCycle),
 		errors.Is(err, domain.ErrCoord), errors.Is(err, domain.ErrLens), errors.Is(err, domain.ErrValidation):

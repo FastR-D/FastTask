@@ -50,7 +50,7 @@ func NewReadonlyTools(app *App) []Tool {
 
 		funcTool{def: agent.ToolDefinition{
 			Name:        "get_task_tree",
-			Description: "Get the task tree and current tree revision for one goal. Use the revision as the base for any task-tree proposal. To find an existing task the user explicitly wants to recover, pass include_deleted=true and inspect deleted_at/deletion_id. Restoring a selected task also restores its descendants from that same deletion batch; explain that scope before approval and do not recover unrelated deleted subtrees.",
+			Description: "Get the task tree, existing planned dates, goal deadline and revision for one goal. Use this snapshot as the base for task-tree and Gantt schedule proposals. To find an existing task the user explicitly wants to recover, pass include_deleted=true and inspect deleted_at/deletion_id. Restoring a selected task also restores its descendants from that same deletion batch; explain that scope before approval and do not recover unrelated deleted subtrees.",
 			Parameters: objectSchema(map[string]any{
 				"goal_id":         stringProp("The goal whose task tree to read."),
 				"limit":           integerProp("Maximum tasks per page; default 200.", 1, 200),
@@ -191,10 +191,12 @@ func (a *App) readTaskTree(ctx context.Context, tc ToolContext, args map[string]
 			"status": task.Status, "description": task.Description, "success_criteria": task.SuccessCriteria, "minimum_action": task.MinimumAction,
 			"depends_on": task.DependsOn, "blocked_reason": task.BlockedReason, "deleted_at": task.DeletedAt, "deletion_id": task.DeletionID,
 			"priority": task.Priority, "estimate_minutes": task.EstimateMinutes, "position": task.Position, "revision": task.Revision,
+			"planned_start": task.PlannedStart, "planned_end": task.PlannedEnd,
 		})
 	}
 	result := map[string]any{
 		"goal_id": goal.ID, "goal_title": goal.Title, "goal_status": goal.Status,
+		"goal_revision": goal.Revision, "target_date": goal.TargetDate,
 		"tree_revision": revision, "task_count": len(nodes), "deleted_task_count": deletedCount, "include_deleted": includeDeleted,
 		"has_more": hasMore, "offset": offset, "next_offset": offset + len(tasks), "scope": "page",
 	}

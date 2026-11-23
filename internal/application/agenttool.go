@@ -62,13 +62,14 @@ type RestoreScope struct {
 }
 
 type PendingProposalRef struct {
-	RestoreScope *RestoreScope `json:"restore_scope,omitempty"`
-	ProposalID   string        `json:"id"`
-	GoalID       string        `json:"goalId"`
-	BaseRevision int           `json:"baseRevision"`
-	Summary      string        `json:"summary"`
-	Kind         string        `json:"kind"`
-	Diff         any           `json:"diff,omitempty"`
+	RestoreScope *RestoreScope     `json:"restore_scope,omitempty"`
+	Schedule     *proposedSchedule `json:"schedule,omitempty"`
+	ProposalID   string            `json:"id"`
+	GoalID       string            `json:"goalId"`
+	BaseRevision int               `json:"baseRevision"`
+	Summary      string            `json:"summary"`
+	Kind         string            `json:"kind"`
+	Diff         any               `json:"diff,omitempty"`
 }
 
 // Tool is a controlled projection of an application use case (§5). The Execute

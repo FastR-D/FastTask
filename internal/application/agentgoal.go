@@ -13,11 +13,13 @@ import (
 )
 
 type goalWithTasksPayload struct {
-	Title           string           `json:"title"`
-	Description     string           `json:"description"`
-	SuccessCriteria string           `json:"success_criteria"`
-	ShortfallReason string           `json:"shortfall_reason,omitempty"`
-	Nodes           []map[string]any `json:"nodes"`
+	Title               string           `json:"title"`
+	Description         string           `json:"description"`
+	SuccessCriteria     string           `json:"success_criteria"`
+	ShortfallReason     string           `json:"shortfall_reason,omitempty"`
+	TargetDate          *string          `json:"target_date,omitempty"`
+	ScheduleAssumptions string           `json:"schedule_assumptions,omitempty"`
+	Nodes               []map[string]any `json:"nodes"`
 }
 
 type goalUpdatePayload struct {
@@ -27,27 +29,32 @@ type goalUpdatePayload struct {
 func newGoalWithTasksTool(app *App) Tool {
 	return proposalTool{app: app, kind: "goal_with_tasks", def: agent.ToolDefinition{
 		Name:        "propose_goal_with_tasks",
-		Description: "Propose a new research goal with concrete, distinct work steps, including for a user with no goals. Usually include at least three steps that can start now, each with an observable local output. If fewer are genuinely meaningful or ready, explain shortfall_reason instead of padding or bypassing real prerequisites. Stages only a proposal: a user must approve before the goal, tasks or schedule exist. Each node is create-only, with optional client_ref/parent_ref to an earlier node.",
+		Description: "Propose a new research goal with concrete, distinct work steps and their Gantt schedule. Usually include at least three steps that can start now, each with an observable local output. If fewer are genuinely meaningful or ready, explain shortfall_reason instead of padding or bypassing real prerequisites. User approval applies the goal, tasks and dates together. Each node is create-only, with optional client_ref/parent_ref to an earlier node.",
 		Parameters: objectSchema(map[string]any{
-			"title":            stringProp("Research goal title."),
-			"description":      stringProp("Context and explicit assumptions, not unrelated personal errands."),
-			"success_criteria": stringProp("Observable outcome that makes the research goal complete."),
-			"shortfall_reason": stringProp("When fewer than three meaningful steps can start now, explain the real reason (for example one genuinely atomic task, a missing required artifact, or insufficient scope). First try useful decomposition; never invent filler steps or remove true dependencies to reach three."),
-			"instruction":      stringProp("Brief explanation of this proposed research plan."),
+			"title":                stringProp("Research goal title."),
+			"description":          stringProp("Context and explicit assumptions, not unrelated personal errands."),
+			"success_criteria":     stringProp("Observable outcome that makes the research goal complete."),
+			"target_date":          stringProp("Goal deadline in YYYY-MM-DD, only when supplied by the user."),
+			"schedule_assumptions": stringProp("Explain the availability, planned start and other assumptions used for the proposed dates."),
+			"shortfall_reason":     stringProp("When fewer than three meaningful steps can start now, explain the real reason (for example one genuinely atomic task, a missing required artifact, or insufficient scope). First try useful decomposition; never invent filler steps or remove true dependencies to reach three."),
+			"instruction":          stringProp("Brief explanation of this proposed research plan."),
 			"nodes": map[string]any{
 				"type": "array", "minItems": 1, "maxItems": 40,
 				"description": "Create-only nodes in parent-before-child order. Array order gives the recommended work sequence; it does not create hard dependencies. Split a large deliverable into distinct, useful outputs with concrete next actions. Use numeric priority and estimate_minutes, never high/medium/low labels.",
 				"items": objectSchema(map[string]any{
-					"type":             stringProp("Node type. Only task/action leaves are scheduled.", "milestone", "task", "action"),
-					"title":            stringProp("Concrete task title, up to 300 characters."),
-					"success_criteria": stringProp("Observable outcome, up to 2000 characters."),
-					"minimum_action":   stringProp("First small action that can be started now, up to 2000 characters."),
-					"description":      stringProp("Execution advice and assumptions."),
-					"client_ref":       stringProp("Unique temporary reference for this new node."),
-					"parent_ref":       stringProp("Temporary reference of an earlier parent node; omit for a root node."),
-					"depends_on_refs":  map[string]any{"type": "array", "maxItems": 40, "items": stringProp("Only a truly required finished artifact: temporary client_ref of an earlier prerequisite node. Explain the required artifact in description. It must reach final Task completion before this node is executable. Ordinary research order, drafting with explicit assumptions, or preparation work must not be encoded as a hard dependency.")},
-					"priority":         integerProp("Numeric priority, 0..100; default 50.", 0, 100),
-					"estimate_minutes": integerProp("Estimated TOTAL work minutes for the task; distinct from today's focus budget and minimum action. Do not invent word/paper/case counts the user did not request.", 1, 1440),
+					"type":                     stringProp("Node type. Only task/action leaves are scheduled.", "milestone", "task", "action"),
+					"title":                    stringProp("Concrete task title, up to 300 characters."),
+					"success_criteria":         stringProp("Observable outcome, up to 2000 characters."),
+					"minimum_action":           stringProp("First small action that can be started now, up to 2000 characters."),
+					"description":              stringProp("Execution advice and assumptions."),
+					"client_ref":               stringProp("Unique temporary reference for this new node."),
+					"parent_ref":               stringProp("Temporary reference of an earlier parent node; omit for a root node."),
+					"depends_on_refs":          map[string]any{"type": "array", "maxItems": 40, "items": stringProp("Only a truly required finished artifact: temporary client_ref of an earlier prerequisite node. Explain the required artifact in description. It must reach final Task completion before this node is executable. Ordinary research order, drafting with explicit assumptions, or preparation work must not be encoded as a hard dependency.")},
+					"priority":                 integerProp("Numeric priority, 0..100; default 50.", 0, 100),
+					"estimate_minutes":         integerProp("Estimated TOTAL work minutes for the task; distinct from today's focus budget and minimum action. Do not invent word/paper/case counts the user did not request.", 1, 1440),
+					"planned_start":            stringProp("First planned Gantt date in YYYY-MM-DD. Include both dates for schedulable work."),
+					"planned_end":              stringProp("Last planned Gantt date in YYYY-MM-DD, inclusive."),
+					"leave_unscheduled_reason": stringProp("Explain why a new task should remain undated, such as a user request or an external dependency with unknown timing."),
 				}, "type", "title", "success_criteria", "minimum_action"),
 			},
 		}, "title", "success_criteria", "nodes"),
@@ -59,19 +66,36 @@ func newGoalWithTasksTool(app *App) Tool {
 		if err := validateNewGoalDecomposition(payload); err != nil {
 			return PendingProposalRef{}, nil, "", err
 		}
-		return PendingProposalRef{Summary: "创建科研目标：" + payload.Title, Diff: payload}, payload, strings.TrimSpace(stringArg(args, "instruction")), nil
+		payload.Nodes, payload.ScheduleAssumptions, err = defaultNewTaskDates(a.Store.DB.WithContext(ctx), tc.UserID, payload.Nodes, nil, payload.ScheduleAssumptions)
+		if err != nil {
+			return PendingProposalRef{}, nil, "", err
+		}
+		schedule, err := schedulePreview(payload.Nodes, nil, payload.TargetDate, payload.ScheduleAssumptions, false)
+		if err != nil {
+			return PendingProposalRef{}, nil, "", err
+		}
+		return PendingProposalRef{Summary: "创建科研目标：" + payload.Title, Diff: payload, Schedule: schedule}, payload, strings.TrimSpace(stringArg(args, "instruction")), nil
 	}}
 }
 
 func normalizeGoalWithTasks(args map[string]any) (goalWithTasksPayload, error) {
 	payload := goalWithTasksPayload{Title: strings.TrimSpace(stringArg(args, "title")), Description: strings.TrimSpace(stringArg(args, "description")), SuccessCriteria: strings.TrimSpace(stringArg(args, "success_criteria")), ShortfallReason: strings.TrimSpace(stringArg(args, "shortfall_reason"))}
+	payload.ScheduleAssumptions = strings.TrimSpace(stringArg(args, "schedule_assumptions"))
+	if value := args["target_date"]; value != nil {
+		date, ok := value.(string)
+		if !ok {
+			return payload, patchError("target_date must use YYYY-MM-DD")
+		}
+		payload.TargetDate = &date
+	}
 	if utf8.RuneCountInString(payload.ShortfallReason) > 2000 {
 		return payload, patchError("shortfall_reason must be at most 2000 characters")
 	}
-	goal := persistence.Goal{Title: payload.Title, Description: payload.Description, SuccessCriteria: payload.SuccessCriteria}
+	goal := persistence.Goal{Title: payload.Title, Description: payload.Description, SuccessCriteria: payload.SuccessCriteria, TargetDate: payload.TargetDate}
 	if err := validateGoalFields(&goal); err != nil {
-		return payload, patchError("a goal requires a title (up to 200 characters), success_criteria (up to 2000 characters), and description up to 4000 characters")
+		return payload, patchError("a goal requires a title (up to 200 characters), success_criteria (up to 2000 characters), description up to 4000 characters, and target_date in YYYY-MM-DD when supplied")
 	}
+	payload.TargetDate = goal.TargetDate
 	patch, problem := normalizePatch(args["nodes"])
 	if problem != "" {
 		return payload, patchError(problem)
@@ -97,6 +121,9 @@ func normalizeGoalWithTasks(args map[string]any) (goalWithTasksPayload, error) {
 			refs[ref] = true
 		}
 		task := persistence.Task{Type: textValue(node["type"]), Title: textValue(node["title"]), Description: textValue(node["description"]), SuccessCriteria: textValue(node["success_criteria"]), MinimumAction: textValue(node["minimum_action"]), Position: i}
+		if _, err := proposedDates(node, &task); err != nil {
+			return payload, err
+		}
 		if changeInt(node, "priority", &task.Priority) != nil || changeInt(node, "estimate_minutes", &task.EstimateMinutes) != nil {
 			return payload, patchError("task priority and estimate_minutes must be whole numbers")
 		}
@@ -265,7 +292,7 @@ func (a *App) ApplyGoalWithTasks(ctx context.Context, userID string, proposal *p
 			return err
 		}
 		now := persistence.Now()
-		goal = persistence.Goal{Title: validated.Title, Description: validated.Description, SuccessCriteria: validated.SuccessCriteria}
+		goal = persistence.Goal{Title: validated.Title, Description: validated.Description, SuccessCriteria: validated.SuccessCriteria, TargetDate: validated.TargetDate}
 		if err := a.GoalService.createGoalTx(tx, userID, &goal); err != nil {
 			return err
 		}

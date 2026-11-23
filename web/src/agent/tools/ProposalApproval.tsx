@@ -35,6 +35,7 @@ export function ProposalCard({ title, args, result, isError, addResult, taskTitl
   const [sendError, setSendError] = useState('')
   const sendingRef = useRef(false)
   const response = object(result)
+  const schedule = object(response.schedule)
   const failed = Boolean(isError || response.error || response.decision === 'conflict')
   const applied = response.applied === true && !failed
   const rejected = response.decision === 'reject'
@@ -61,10 +62,10 @@ export function ProposalCard({ title, args, result, isError, addResult, taskTitl
       </header>
 
       {applied || rejected
-        ? <details className="agent-proposal-review"><summary>{text(args?.title) || '查看方案详情'}</summary><ProposalSummary args={args} taskTitles={taskTitles}/></details>
-        : <ProposalSummary args={args} taskTitles={taskTitles} />}
+        ? <details className="agent-proposal-review"><summary>{text(args?.title) || '查看方案详情'}</summary><ProposalSummary args={args} taskTitles={taskTitles} schedule={schedule}/></details>
+        : <ProposalSummary args={args} taskTitles={taskTitles} schedule={schedule} />}
       {!applied && !rejected && <RestoreScopeSummary value={response.restore_scope}/>}
-      {applied&&<AppliedTodaySummary value={response.today_summary} kind={text(response.kind)}/>}
+      {applied && schedule.date_only !== true && <AppliedTodaySummary value={response.today_summary} kind={text(response.kind)}/>}
 
       {rejected && text(response.reason) && (
         <p className="agent-proposal-reason">理由：{text(response.reason)}</p>
@@ -197,8 +198,28 @@ function ProposalField({field,label,value,titles}:{field:string;label:string;val
   </>
 }
 
-export function ProposalSummary({ args,taskTitles }: { args: Record<string, unknown> | undefined; taskTitles?:ReadonlyMap<string,string> }) {
+function ScheduleSummary({ schedule }: { schedule: Record<string, unknown> }) {
+  const changes = Array.isArray(schedule.changes) ? schedule.changes.map(object) : []
+  const warnings = Array.isArray(schedule.warnings) ? schedule.warnings.map(text).filter(Boolean) : []
+  if (!changes.length && !warnings.length) return null
+  return <section aria-label="甘特排期" className="agent-proposal-schedule">
+    <h4>甘特排期</h4>
+    {text(schedule.target_date) && <p>目标截止日 {text(schedule.target_date)}</p>}
+    {text(schedule.assumptions) && <p>{text(schedule.assumptions)}</p>}
+    {changes.length > 0 && <ul className="agent-proposal-diff">{changes.map((change, index) => <li key={index} className="agent-proposal-node">
+      <b>{text(change.title)}</b>
+      <p>原计划 {text(change.before_start) && text(change.before_end) ? `${text(change.before_start)} 至 ${text(change.before_end)}` : '未排期'}</p>
+      <p>建议日期 {text(change.start)} 至 {text(change.end)}</p>
+    </li>)}</ul>}
+    {warnings.length > 0 && <ul aria-label="排期提示">{warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
+  </section>
+}
+
+export function ProposalSummary({ args, taskTitles, schedule }: { args: Record<string, unknown> | undefined; taskTitles?: ReadonlyMap<string, string>; schedule?: unknown }) {
   if (!args) return null
+  const dates = object(schedule)
+  const hasSchedule = Array.isArray(dates.changes) && dates.changes.length > 0
+  const dateOnly = dates.date_only === true && hasSchedule
   const summary = text(args.instruction) || text(args.summary)
   const list = [args.patch,args.nodes,args.candidates,args.operations].find(Array.isArray) as unknown[] | undefined
   const titles=new Map<string,string>(taskTitles)
@@ -218,7 +239,7 @@ export function ProposalSummary({ args,taskTitles }: { args: Record<string, unkn
       {text(args.success_criteria) && <p><b>目标验收：</b>{text(args.success_criteria)}</p>}
       {text(args.shortfall_reason) && <p><b>今日不足三项的原因：</b>{text(args.shortfall_reason)}</p>}
       {summary && <p>{summary}</p>}
-      {list && <ol className="agent-proposal-diff">{list.map((raw,index) => {
+      {list && !dateOnly && <ol className="agent-proposal-diff">{list.map((raw,index) => {
         const node = object(raw)
         const op=text(node.op)||'create'
         const target=text(node.target_id)||text(node.task_id)
@@ -230,12 +251,14 @@ export function ProposalSummary({ args,taskTitles }: { args: Record<string, unkn
           <b>{OP_LABELS[op] || op} · {title}</b>
           {target&&!knownTarget&&(!isDailyPlan||!text(node.title))&&<p className="meta">任务名称暂不可用，请按上方任务引用核对目标。</p>}
           {Object.entries(FIELD_LABELS).filter(([field]) => node[field] !== undefined&&(field!=='title'||op!=='create')).map(([field,label]) => <ProposalField key={field} field={field} label={label} value={node[field]} titles={titles}/>)}
+          {!hasSchedule && text(node.planned_start) && text(node.planned_end) && <p>建议日期 {text(node.planned_start)} 至 {text(node.planned_end)}</p>}
           <ProposalDependencies node={node} titles={titles}/>
           {op==='delete'&&<p className="meta">所选任务及其未删除的子任务将一起移入回收站；历史推进与专注记录保留。</p>}
           {op==='restore'&&<p className="meta">恢复所选任务及其同一删除批次的子任务；此前独立删除的子项仍留在回收站。</p>}
           {text(node.reason) && <p>{isDailyPlan?'安排理由':'建议理由'}：{text(node.reason)}</p>}
         </li>
       })}</ol>}
+      <ScheduleSummary schedule={dates}/>
       {Object.keys(changes).length > 0 && <dl className="agent-proposal-diff">{Object.entries(changes).map(([key,value]) => <div key={key}><dt>{key==='title'?'标题':FIELD_LABELS[key]||key}</dt><dd>{String(value??'')}</dd></div>)}</dl>}
       {!summary && !list && Object.keys(changes).length===0 && !args.title && <p className="agent-proposal-count">请审阅后决定是否应用。</p>}
     </div>

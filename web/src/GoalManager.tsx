@@ -390,6 +390,14 @@ export function GoalManager({ timezone='Asia/Shanghai',userId,onNotice, refreshV
 
 function TreeProposal({proposal,taskTitles,busy,demo,onDecide}:{proposal:Proposal;taskTitles:ReadonlyMap<string,string>;busy:boolean;demo:boolean;onDecide:(apply:boolean)=>void}) {
   let operations:Record<string,unknown>[]=[]
-  try{const raw:unknown=JSON.parse(proposal.patch_json);if(Array.isArray(raw))operations=raw.filter((op):op is Record<string,unknown>=>typeof op==='object'&&op!==null)}catch{return null}
-  return <div className="proposal-card"><h3>待确认的调整</h3>{demo&&<p className="model-notice">演示示例 · 未使用真实模型</p>}<ProposalSummary args={{patch:operations,instruction:proposal.instruction}} taskTitles={taskTitles}/><div className="actions"><mdui-button variant="text" disabled={busy} onClick={()=>onDecide(false)}>拒绝</mdui-button><mdui-button variant="outlined" disabled={busy} onClick={()=>onDecide(true)}>确认应用</mdui-button></div></div>
+  let schedule: unknown
+  try {
+    const raw: unknown = JSON.parse(proposal.patch_json)
+    const payload = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : undefined
+    const patch = payload?.patch ?? raw
+    if (!Array.isArray(patch)) return null
+    operations = patch.filter((op): op is Record<string, unknown> => typeof op === 'object' && op !== null)
+    schedule = payload?.schedule
+  } catch { return null }
+  return <div className="proposal-card"><h3>待确认的调整</h3>{demo&&<p className="model-notice">演示示例 · 未使用真实模型</p>}<ProposalSummary args={{patch:operations,instruction:proposal.instruction}} taskTitles={taskTitles} schedule={schedule}/><div className="actions"><mdui-button variant="text" disabled={busy} onClick={()=>onDecide(false)}>拒绝</mdui-button><mdui-button variant="outlined" disabled={busy} onClick={()=>onDecide(true)}>确认应用</mdui-button></div></div>
 }
