@@ -12,6 +12,7 @@ import (
 )
 
 type Config struct {
+	DatabaseURL        string
 	Listen             string
 	Port               int
 	PublicURL          string
@@ -154,6 +155,7 @@ func Load() (Config, error) {
 		Port:                  port,
 		PublicURL:             env("FASTTASK_PUBLIC_URL", fmt.Sprintf("http://127.0.0.1:%d", port)),
 		DatabasePath:          env("FASTTASK_DATABASE", "data/fasttask.db"),
+		DatabaseURL:           strings.TrimSpace(os.Getenv("FASTTASK_DATABASE_URL")),
 		JWTSecret:             env("FASTTASK_JWT_SECRET", "local-development-secret-change-me"),
 		AccessTTL:             time.Hour,
 		RefreshTTL:            30 * 24 * time.Hour,

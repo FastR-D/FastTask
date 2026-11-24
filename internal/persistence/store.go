@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -60,6 +61,9 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
+	if s.DB.Dialector.Name() == "postgres" {
+		return migratePostgres(ctx, s.DB)
+	}
 	return RunMigrations(ctx, s.DB)
 }
 
@@ -283,6 +287,10 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx *gorm.DB) error) error {
 var _ TxManager = (*Store)(nil)
 
 func isBusy(err error) bool {
+	var pg interface{ SQLState() string }
+	if errors.As(err, &pg) {
+		return pg.SQLState() == "40001" || pg.SQLState() == "40P01"
+	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "database is locked") || strings.Contains(message, "database is busy")
 }
@@ -353,6 +361,19 @@ func (s *Store) Backup(ctx context.Context, destination string) error {
 // VerifyBackup opens a backup read-only and checks that it is an intact FastTask database at the
 // schema this build expects, so a restore is known to work before it is needed.
 func VerifyBackup(ctx context.Context, path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	var signature [5]byte
+	_, err = io.ReadFull(file, signature[:])
+	_ = file.Close()
+	if err != nil {
+		return err
+	}
+	if string(signature[:]) == "PGDMP" {
+		return verifyPostgresBackup(ctx, path)
+	}
 	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro&_foreign_keys=on")
 	if err != nil {
 		return err

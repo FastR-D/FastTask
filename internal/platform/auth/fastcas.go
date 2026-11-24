@@ -331,7 +331,7 @@ func (s *Service) ApplyFastCASNotification(ctx context.Context, event fastcas.No
 }
 func (s *Service) applyFastCASIdentityDisable(ctx context.Context, eventID, subject string) error {
 	return s.store.Transaction(ctx, func(tx *gorm.DB) error {
-		created := tx.Exec("INSERT OR IGNORE INTO fastcas_events(issuer,id,processed_at) VALUES(?,?,?)", s.config.FastCASIssuer, eventID, persistence.Now())
+		created := tx.Exec("INSERT INTO fastcas_events(issuer,id,processed_at) VALUES(?,?,?) ON CONFLICT DO NOTHING", s.config.FastCASIssuer, eventID, persistence.Now())
 		if created.Error != nil {
 			return created.Error
 		}
@@ -354,7 +354,7 @@ func (s *Service) HandleFastCASLogout(ctx context.Context, raw string) error {
 }
 func (s *Service) ApplyFastCASLogout(ctx context.Context, notice fastcas.LogoutNotice) error {
 	return s.store.Transaction(ctx, func(tx *gorm.DB) error {
-		created := tx.Exec("INSERT OR IGNORE INTO fastcas_events(issuer,id,processed_at) VALUES(?,?,?)", s.config.FastCASIssuer, notice.ID, persistence.Now())
+		created := tx.Exec("INSERT INTO fastcas_events(issuer,id,processed_at) VALUES(?,?,?) ON CONFLICT DO NOTHING", s.config.FastCASIssuer, notice.ID, persistence.Now())
 		if created.Error != nil {
 			return created.Error
 		}
@@ -374,7 +374,7 @@ func (s *Service) ApplyFastCASLogout(ctx context.Context, notice fastcas.LogoutN
 func (s *Service) applyFastCASLink(ctx context.Context, link fastcas.Link, eventID string) error {
 	return s.store.Transaction(ctx, func(tx *gorm.DB) error {
 		if eventID != "" {
-			created := tx.Exec("INSERT OR IGNORE INTO fastcas_events(issuer,id,processed_at) VALUES(?,?,?)", s.config.FastCASIssuer, eventID, persistence.Now())
+			created := tx.Exec("INSERT INTO fastcas_events(issuer,id,processed_at) VALUES(?,?,?) ON CONFLICT DO NOTHING", s.config.FastCASIssuer, eventID, persistence.Now())
 			if created.Error != nil {
 				return created.Error
 			}

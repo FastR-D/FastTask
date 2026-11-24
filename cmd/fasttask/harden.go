@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/FastR-D/FastTask/internal/application"
+	"github.com/FastR-D/FastTask/internal/bootstrap"
+	"github.com/FastR-D/FastTask/internal/config"
 	"github.com/FastR-D/FastTask/internal/persistence"
 	platformauth "github.com/FastR-D/FastTask/internal/platform/auth"
 	"github.com/spf13/cobra"
@@ -56,7 +58,11 @@ func hardenCommand() *cobra.Command {
 		if identifier == "" {
 			identifier = "admin"
 		}
-		store, err := persistence.Open(databasePath)
+		dsn := os.Getenv("FASTTASK_DATABASE_URL")
+		if dsn == "" {
+			dsn = values["FASTTASK_DATABASE_URL"]
+		}
+		store, err := bootstrap.NewStore(config.Config{DatabasePath: databasePath, DatabaseURL: dsn})
 		if err != nil {
 			return err
 		}

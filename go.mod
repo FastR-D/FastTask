@@ -9,6 +9,7 @@ require (
 	github.com/go-co-op/gocron/v2 v2.23.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/fx v1.24.0
 	golang.org/x/crypto v0.58.0
@@ -16,10 +17,17 @@ require (
 	gorm.io/gorm v1.31.2
 )
 
-require go.mongodb.org/mongo-driver/v2 v2.9.2 // indirect
+require (
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.3 // indirect
+	go.mongodb.org/mongo-driver/v2 v2.9.2 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+)
 
 require (
 	github.com/FastR-D/FastCAS/sdk/go v0.1.3
+	github.com/FastR-D/FastDeploy/pgstore v0.1.1
 	github.com/bytedance/gopkg v0.1.4 // indirect
 	github.com/bytedance/sonic v1.15.4 // indirect
 	github.com/bytedance/sonic/loader v0.5.3 // indirect
@@ -60,4 +68,5 @@ require (
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
+	gorm.io/driver/postgres v1.6.0
 )

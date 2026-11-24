@@ -77,7 +77,7 @@ func migrateCommand() *cobra.Command {
 
 func backupCommand() *cobra.Command {
 	var output, verify string
-	cmd := &cobra.Command{Use: "backup", Short: "Create a consistent SQLite backup", RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "backup", Short: "Create a consistent database backup", RunE: func(cmd *cobra.Command, args []string) error {
 		if verify != "" {
 			// Checking a backup before restoring it needs no server configuration and must not touch the
 			// live database.

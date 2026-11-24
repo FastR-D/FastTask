@@ -15,10 +15,13 @@ var PersistenceModule = fx.Module("persistence",
 	fx.Invoke(registerStoreLifecycle),
 )
 
-// NewStore opens the SQLite database. Migration and schema validation run in the
+// NewStore opens the configured database. Migration and schema validation run in the
 // OnStart hook so startup ordering is explicit and failures surface as fx start
 // errors.
 func NewStore(cfg config.Config) (*persistence.Store, error) {
+	if cfg.DatabaseURL != "" {
+		return persistence.OpenPostgres(cfg.DatabaseURL)
+	}
 	return persistence.Open(cfg.DatabasePath)
 }
 

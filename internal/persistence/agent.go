@@ -612,7 +612,7 @@ func (r *AgentRepository) MarkInterruptedRuns(ctx context.Context, errorCode str
 	return res.RowsAffected, res.Error
 }
 
-// IsUniqueViolation reports whether err is a SQLite UNIQUE constraint failure,
+// IsUniqueViolation reports whether err is a database UNIQUE constraint failure,
 // letting callers turn the one-active-run and unique-tool-call rules into 409s.
 func IsUniqueViolation(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique")
