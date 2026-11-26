@@ -1,3 +1,4 @@
+import { AccountMenu } from './AccountMenu'
 import {FastCASAccount} from './FastCASAccount'
 import {AdminUsers} from './AdminUsers'
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
@@ -196,6 +197,11 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
   useMduiEvent(snackbarRef, 'close', () => setNotice(''))
   const items = navItems()
   if(user?.role==='admin') items.push(['users','用户管理'])
+  const accountMenu = user && <AccountMenu name={user.display_name} detail={user.identifier} actions={[
+    { label: 'CAS 认证', onSelect: () => setTab('account') },
+    { label: '工牌更新', onSelect: () => setTab('panel') },
+    { label: '退出登录', danger: true, onSelect: onLogout },
+  ]} />
   const currentLabel = tab === 'account' ? '账号认证' : tab === 'panel' ? '工牌更新' : items.find(([id]) => id === tab)?.[1] ?? ''
   if(!user)return <main className="page"><h1>正在打开工作台</h1>
     <p role={profileError?'alert':'status'}>{profileError?`暂时无法确认当前账号：${profileError}`:'正在确认当前账号…'}</p>
@@ -210,15 +216,15 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
       </nav>
       <div className="workbench-sidebar-bottom"><button type="button" className="workbench-nav-item" aria-label="账号认证" aria-current={tab==='account'?'page':undefined} onClick={()=>setTab('account')}><mdui-icon name="verified_user" aria-hidden="true"/><span>账号认证</span></button>
         <button type="button" className="workbench-nav-item" aria-current={tab==='panel'?'page':undefined} onClick={()=>setTab('panel')}><mdui-icon name="badge"/><span>工牌更新</span><small>工具</small></button>
-        <div className="workbench-profile"><span className="rail-avatar">{user.display_name?.slice(0,1)||'F'}</span><div><b>{user.display_name}</b><small>{timezone}</small></div></div>
+
         <VisualThemeMenu labelled/>
         <ThemeMenu labelled/>
-        <button type="button" className="workbench-nav-item" onClick={onLogout}><mdui-icon name="logout"/><span>退出登录</span></button>
+
       </div>
     </mdui-layout-item>
     <mdui-layout-item placement="top" className="workbench-topbar" role="banner">
       <div className="workbench-breadcrumb"><span>FastTask</span><span aria-hidden="true">/</span><strong>{currentLabel}</strong></div>
-      <div className="workbench-topbar-actions"><time>{new Intl.DateTimeFormat('zh-CN',{timeZone:timezone,month:'long',day:'numeric',weekday:'short'}).format(new Date())}</time><ThemeQuick/><button type="button" className="workbench-assistant-toggle" aria-controls="research-assistant" aria-expanded={assistantOpen} onClick={toggleAssistant}><mdui-icon name="forum"/>{assistantOpen?'收起助手':'打开助手'}</button></div>
+      <div className="workbench-topbar-actions"><time>{new Intl.DateTimeFormat('zh-CN',{timeZone:timezone,month:'long',day:'numeric',weekday:'short'}).format(new Date())}</time><ThemeQuick/><button type="button" className="workbench-assistant-toggle" aria-controls="research-assistant" aria-expanded={assistantOpen} onClick={toggleAssistant}><mdui-icon name="forum"/>{assistantOpen?'收起助手':'打开助手'}</button>{accountMenu}</div>
     </mdui-layout-item>
     <mdui-navigation-drawer ref={drawerRef} className="app-drawer" modal close-on-esc close-on-overlay-click open={drawerOpen}>
       <div className="drawer-inner">
@@ -254,9 +260,6 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
             <mdui-icon name="badge"/>
           </button>
         </mdui-tooltip>
-        <mdui-tooltip content={`${user?.display_name || '加载中'} · ${user?.timezone || ''}`} placement="left">
-          <span className="rail-avatar">{user?.display_name?.slice(0, 1) || 'F'}</span>
-        </mdui-tooltip>
         <VisualThemeMenu/>
         <ThemeMenu/>
         <mdui-button-icon icon="logout" aria-label="退出登录" onClick={onLogout}/>
@@ -266,7 +269,7 @@ function Workspace({ onLogout,requireFreshProfile=false }: { onLogout: () => voi
       <mdui-button-icon icon="menu" aria-label="打开导航" onClick={() => setDrawerOpen(true)}/>
       <mdui-top-app-bar-title>FastTask · {currentLabel}</mdui-top-app-bar-title>
       <mdui-button-icon icon="forum" aria-label={assistantOpen ? '收起科研助手' : '打开科研助手'} aria-controls="research-assistant" aria-expanded={assistantOpen} onClick={toggleAssistant}/>
-      <mdui-button-icon icon="logout" aria-label="退出登录" onClick={onLogout}/>
+      {accountMenu}
     </mdui-top-app-bar>
     <mdui-layout-main className="app-main">
       <ResearchWorkspace userId={user?.id} onNotice={setNotice} onBusinessChanged={businessChanged} assistantOpen={assistantOpen} assistantFocusRequest={assistantFocusRequest} onAssistantClose={hideAssistant} goalChatRequest={goalChatRequest}>

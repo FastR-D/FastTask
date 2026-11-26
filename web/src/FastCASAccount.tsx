@@ -19,12 +19,14 @@ export function FastCASAccount(){
   }catch(e){setError(e instanceof Error?e.message:'认证操作失败')}finally{setBusy(false)}
  }
  return <section className="account-page">
- <header className="page-head"><div className="title-block"><p className="eyebrow">统一身份 · 可选</p><h1>账号认证</h1></div></header>
- <div className="account-body">
- <p>FastCAS 登录保留原有任务。FastCAS 管理员认证后会自动获得 FastTask 管理员权限。</p>
+ <header className="page-head"><div className="title-block"><h1>账号认证</h1></div></header>
+ <div className="account-body"><div className="rd-account-section"><h2>FastCAS 认证</h2>
+
  {!status?<p className="meta">正在读取认证状态…</p>:!status.enabled?<p className="meta">此部署未启用 FastCAS，本地登录仍可正常使用。</p>:<>
- <p className="account-state">{current?.state==='active'?'已完成 FastCAS 认证':current?'认证尚未完成，可重试确认':'当前账号未认证'}<span className="meta"> · {status.issuer}</span></p>
+ <p className={current ? "rd-account-banner" : "account-state"} role="status">{current?.state==='active'?'已完成 FastCAS 认证':current?'认证尚未完成，可重试确认':'当前账号未认证'}<span className="meta"> · {status.issuer}</span></p>
  {status.link_enabled===false&&!current&&<p className="meta">管理员已关闭新的账号认证。</p>}
+ </>}</div><div className="rd-account-section"><h2>修改信息</h2>
+ {status?.enabled&&<>
  <mdui-text-field variant="outlined" label="确认本地 FastTask 密码" type="password" toggle-password autocomplete="current-password" value={password} onInput={e=>setPassword(fieldValue(e))}/>
  <div className="actions">
  {current?.state==='prepared'&&<mdui-button variant="outlined" disabled={status.link_enabled===false||busy||!password} onClick={()=>void act('reconcile')}>确认待完成认证</mdui-button>}
@@ -32,5 +34,5 @@ export function FastCASAccount(){
  </div>
  <p className="meta">解除认证只终止 FastCAS 来源会话。本地密码登录、设备权限和任务数据保持原样。</p>
  </>}{error&&<p className="login-error" role="alert"><mdui-icon name="error_outline"/>{error}</p>}
- </div></section>
+ </div></div></section>
 }

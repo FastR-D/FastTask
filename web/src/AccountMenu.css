@@ -1,0 +1,17 @@
+.rd-account-menu { position: relative; flex-shrink: 0; }
+.rd-account-menu .rd-account-trigger { min-height: 40px; padding: 4px 8px; gap: 9px; border: 0; background: transparent; }
+.rd-account-avatar { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--fastui-selected, #e7f2ee); color: var(--fastui-text, #24332d); font-size: 13px; font-weight: 600; }
+.rd-account-trigger-name { max-width: 110px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.rd-account-popover { position: absolute; z-index: 100; top: 100%; right: 0; width: 232px; max-width: calc(100vw - 32px); padding: 8px; border: 1px solid var(--fastui-border, #e6e9ed); border-radius: var(--fastui-radius-panel, 12px); background: var(--fastui-surface, white); color: var(--fastui-text, #252a32); box-shadow: 0 12px 36px #0000001a; }
+.rd-account-identity { display: grid; gap: 4px; padding: 10px 10px 14px; margin-bottom: 6px; border-bottom: 1px solid var(--fastui-border, #e6e9ed); overflow-wrap: anywhere; }
+.rd-account-identity small { color: var(--fastui-secondary, #666e7a); font-size: 12px; }
+.rd-account-menu .rd-account-action { display: flex; width: 100%; justify-content: flex-start; min-height: 40px; padding: 9px 10px; gap: 10px; border: 0; border-radius: var(--fastui-radius-button, 4px); font-size: 13px; font-weight: 500; }
+.rd-account-menu .rd-account-danger { color: var(--fastui-danger, #bd3434); }
+.rd-account-menu .rd-account-action:hover { background: var(--fastui-raised, #f3f5f7); }
+.rd-account-menu .rd-account-action:focus-visible { outline: 2px solid var(--fastui-focus, #087f61); outline-offset: -2px; }
+.rd-account-section { display: grid; gap: 16px; min-width: 0; padding: 0; border: 0; box-shadow: none; background: transparent; }
+.rd-account-section + .rd-account-section { padding-top: 24px; margin-top: 24px; border-top: 1px solid var(--fastui-border, #e6e9ed); }
+.rd-account-section h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.rd-account-section p { margin: 0; line-height: 1.65; overflow-wrap: anywhere; }
+.rd-account-banner { padding: 12px 16px; border-radius: var(--fastui-radius-control, 8px); background: var(--fastui-selected, #e7f2ee); color: var(--fastui-text, #24332d); }
+@media (max-width: 760px) { .rd-account-trigger-name { display: none; } .rd-account-menu .rd-account-trigger { min-width: 44px; min-height: 44px; } }
